@@ -1229,36 +1229,53 @@ class CrossAssetFeatures:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# 3B. MAG7/MAG10 MARKET BREADTH FEATURES
+# 3B. MAG MARKET BREADTH FEATURES (MAG3, MAG5, MAG6, MAG7, MAG10, MAG15)
 # ═══════════════════════════════════════════════════════════════════════════════
 class Mag7BreadthFeatures:
     """
-    Market breadth features specifically for MAG7 and MAG10 (Magnificent 7/10).
+    Market breadth features for various MAG (Magnificent) groupings.
 
-    MAG7: AAPL, MSFT, GOOGL, AMZN, META, NVDA, TSLA
-    MAG10: MAG7 + BRK-B, UNH, XOM (top 10 S&P weights)
+    MAG3:  AAPL, MSFT, NVDA (Big 3 tech leaders, ~20% of S&P)
+    MAG5:  AAPL, MSFT, NVDA, GOOGL, AMZN (Top 5 by market cap)
+    MAG6:  MAG5 + META (Core tech mega-caps)
+    MAG7:  MAG6 + TSLA (Magnificent 7)
+    MAG10: MAG7 + BRK.B, UNH, XOM (Top 10 S&P weights)
+    MAG15: MAG10 + JNJ, V, JPM, PG, MA (Top 15 S&P weights)
 
-    These mega-caps drive ~30% of S&P 500 movement, so tracking them
+    These mega-caps drive ~35-40% of S&P 500 movement, so tracking them
     specifically provides valuable market leadership signals.
 
-    Features:
-      - % MAG7/10 advancing
-      - % MAG7/10 at 52-week high/low
-      - MAG7/10 average momentum
-      - MAG7/10 breadth divergence from SPY
-      - Market cap weighted returns
-      - Sector rotation within MAG (tech vs non-tech)
+    Features for each group:
+      - % advancing (breadth)
+      - % at 52-week high/low
+      - Average and weighted momentum
+      - Breadth divergence from SPY
+      - Relative strength vs SPY
+      - Sector rotation signals
     """
 
+    # MAG groupings (ordered by market cap, largest first)
+    MAG3 = ["AAPL", "MSFT", "NVDA"]
+    MAG5 = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN"]
+    MAG6 = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META"]
     MAG7 = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA"]
     MAG10 = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "BRK.B", "UNH", "XOM"]
+    MAG15 = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "BRK.B", "UNH", "XOM",
+             "JNJ", "V", "JPM", "PG", "MA"]
 
-    # Approximate market cap weights (billions, for weighting)
+    # All unique tickers to download
+    ALL_MAG_TICKERS = list(set(MAG15))
+
+    # Approximate market cap weights (billions, for weighting) - Updated 2026
     MAG_WEIGHTS = {
-        "AAPL": 3000, "MSFT": 2800, "GOOGL": 1800, "AMZN": 1600,
-        "NVDA": 1400, "META": 1000, "TSLA": 800, "BRK.B": 750,
-        "UNH": 500, "XOM": 450,
+        "AAPL": 3200, "MSFT": 3000, "NVDA": 2000, "GOOGL": 1900, "AMZN": 1800,
+        "META": 1200, "TSLA": 900, "BRK.B": 800, "UNH": 550, "XOM": 500,
+        "JNJ": 400, "V": 480, "JPM": 550, "PG": 380, "MA": 420,
     }
+
+    # Tech vs Non-Tech classification for rotation analysis
+    TECH_MAGS = ["AAPL", "MSFT", "NVDA", "GOOGL", "AMZN", "META", "TSLA"]
+    NON_TECH_MAGS = ["BRK.B", "UNH", "XOM", "JNJ", "V", "JPM", "PG", "MA"]
 
     def __init__(self):
         self.data_cache = {}
@@ -1268,14 +1285,14 @@ class Mag7BreadthFeatures:
         start_date: datetime,
         end_date: datetime,
     ) -> pd.DataFrame:
-        """Download MAG10 price data via Alpaca."""
-        print("\n[MAG10] Downloading MAG7/MAG10 data via Alpaca...")
+        """Download MAG15 price data via Alpaca (covers all MAG groupings)."""
+        print("\n[MAG] Downloading MAG3/5/6/7/10/15 data via Alpaca...")
 
         try:
             helper = get_alpaca_helper()
 
-            # MAG10 tickers (already uses BRK.B format for Alpaca)
-            tickers = self.MAG10.copy()
+            # Download all MAG15 tickers (covers all smaller groups)
+            tickers = self.ALL_MAG_TICKERS.copy()
 
             data = helper.download_daily_bars(tickers, start_date, end_date)
 
@@ -1337,97 +1354,134 @@ class Mag7BreadthFeatures:
         if close.empty:
             return spy_daily
 
-        print("\n[MAG10] Engineering MAG7/MAG10 breadth features...")
+        print("\n[MAG] Engineering MAG3/5/6/7/10/15 breadth features...")
 
         features = spy_daily.copy()
         returns = close.pct_change()
 
-        # Normalize weights
-        mag7_weights = {k: v for k, v in self.MAG_WEIGHTS.items() if k in self.MAG7}
-        mag10_weights = self.MAG_WEIGHTS.copy()
-        mag7_total = sum(mag7_weights.values())
-        mag10_total = sum(mag10_weights.values())
-        mag7_norm = {k: v / mag7_total for k, v in mag7_weights.items()}
-        mag10_norm = {k: v / mag10_total for k, v in mag10_weights.items()}
+        # Define all MAG groups with their tickers
+        mag_groups = {
+            "mag3": self.MAG3,
+            "mag5": self.MAG5,
+            "mag6": self.MAG6,
+            "mag7": self.MAG7,
+            "mag10": self.MAG10,
+            "mag15": self.MAG15,
+        }
 
-        # Get MAG7 and MAG10 columns (handle missing tickers)
-        mag7_cols = [c for c in self.MAG7 if c in returns.columns]
-        mag10_cols = [c for c in self.MAG10 if c in returns.columns]
+        # Get available columns for each group
+        mag_cols_map = {name: [c for c in tickers if c in returns.columns]
+                        for name, tickers in mag_groups.items()}
+
+        # Compute normalized weights for each group
+        mag_norm_weights = {}
+        for name, cols in mag_cols_map.items():
+            weights = {k: v for k, v in self.MAG_WEIGHTS.items() if k in cols}
+            total = sum(weights.values()) if weights else 1
+            mag_norm_weights[name] = {k: v / total for k, v in weights.items()}
 
         mag_features = pd.DataFrame(index=returns.index)
 
-        # 1. % Advancing
-        mag_features["mag7_pct_advancing"] = (returns[mag7_cols] > 0).mean(axis=1)
-        mag_features["mag10_pct_advancing"] = (returns[mag10_cols] > 0).mean(axis=1)
-
-        # 2. Average returns
-        mag_features["mag7_avg_return"] = returns[mag7_cols].mean(axis=1)
-        mag_features["mag10_avg_return"] = returns[mag10_cols].mean(axis=1)
-
-        # 3. Market-cap weighted returns
-        mag7_wtd = sum(returns.get(t, 0) * mag7_norm.get(t, 0) for t in mag7_cols)
-        mag10_wtd = sum(returns.get(t, 0) * mag10_norm.get(t, 0) for t in mag10_cols)
-        mag_features["mag7_wtd_return"] = mag7_wtd
-        mag_features["mag10_wtd_return"] = mag10_wtd
-
-        # 4. 52-week high/low proximity
+        # 52-week high/low calculations (shared)
         rolling_high = high.rolling(lookback_52w).max()
         rolling_low = low.rolling(lookback_52w).min()
-
         pct_from_high = (close - rolling_high) / rolling_high
         pct_from_low = (close - rolling_low) / rolling_low
+        near_high = pct_from_high > -0.05  # Within 5% of 52w high
+        near_low = pct_from_low < 0.05     # Within 5% of 52w low
 
-        # Near 52w high = within 5%
-        near_high = pct_from_high > -0.05
-        near_low = pct_from_low < 0.05
+        # Generate features for each MAG group
+        for name, cols in mag_cols_map.items():
+            if len(cols) == 0:
+                continue
 
-        mag_features["mag7_pct_near_52w_high"] = near_high[mag7_cols].mean(axis=1) if len(mag7_cols) > 0 else 0
-        mag_features["mag7_pct_near_52w_low"] = near_low[mag7_cols].mean(axis=1) if len(mag7_cols) > 0 else 0
-        mag_features["mag10_pct_near_52w_high"] = near_high[mag10_cols].mean(axis=1) if len(mag10_cols) > 0 else 0
-        mag_features["mag10_pct_near_52w_low"] = near_low[mag10_cols].mean(axis=1) if len(mag10_cols) > 0 else 0
+            prefix = name  # e.g., "mag3", "mag5", etc.
 
-        # 5. Momentum
-        mag_features["mag7_momentum_5d"] = returns[mag7_cols].rolling(5).sum().mean(axis=1)
-        mag_features["mag7_momentum_20d"] = returns[mag7_cols].rolling(20).sum().mean(axis=1)
-        mag_features["mag10_momentum_5d"] = returns[mag10_cols].rolling(5).sum().mean(axis=1)
-        mag_features["mag10_momentum_20d"] = returns[mag10_cols].rolling(20).sum().mean(axis=1)
+            # 1. % Advancing (breadth)
+            mag_features[f"{prefix}_pct_advancing"] = (returns[cols] > 0).mean(axis=1)
 
-        # 6. Volatility
-        mag_features["mag7_volatility_20d"] = returns[mag7_cols].rolling(20).std().mean(axis=1)
-        mag_features["mag10_volatility_20d"] = returns[mag10_cols].rolling(20).std().mean(axis=1)
+            # 2. Average return (equal weight)
+            mag_features[f"{prefix}_avg_return"] = returns[cols].mean(axis=1)
 
-        # 7. Tech vs Non-Tech MAG rotation
-        tech_mag = ["AAPL", "MSFT", "GOOGL", "AMZN", "META", "NVDA"]
-        non_tech_mag = ["TSLA", "BRK.B", "UNH", "XOM"]
-        tech_cols = [c for c in tech_mag if c in returns.columns]
-        non_tech_cols = [c for c in non_tech_mag if c in returns.columns]
+            # 3. Market-cap weighted return
+            norm_w = mag_norm_weights[name]
+            wtd_ret = sum(returns.get(t, 0) * norm_w.get(t, 0) for t in cols)
+            mag_features[f"{prefix}_wtd_return"] = wtd_ret
+
+            # 4. 52-week high/low proximity
+            mag_features[f"{prefix}_pct_near_52w_high"] = near_high[cols].mean(axis=1)
+            mag_features[f"{prefix}_pct_near_52w_low"] = near_low[cols].mean(axis=1)
+
+            # 5. Momentum (5-day and 20-day)
+            mag_features[f"{prefix}_momentum_5d"] = returns[cols].rolling(5).sum().mean(axis=1)
+            mag_features[f"{prefix}_momentum_20d"] = returns[cols].rolling(20).sum().mean(axis=1)
+
+            # 6. Volatility (20-day)
+            mag_features[f"{prefix}_volatility_20d"] = returns[cols].rolling(20).std().mean(axis=1)
+
+            # 7. Relative strength (cumulative 20d return)
+            mag_features[f"{prefix}_rel_strength_20d"] = returns[cols].rolling(20).sum().mean(axis=1)
+
+            # 8. Streak features (consecutive advancing/declining days)
+            advancing = (returns[cols] > 0).all(axis=1)
+            declining = (returns[cols] < 0).all(axis=1)
+            mag_features[f"{prefix}_all_advancing"] = advancing.astype(int)
+            mag_features[f"{prefix}_all_declining"] = declining.astype(int)
+
+        # Tech vs Non-Tech MAG rotation analysis
+        tech_cols = [c for c in self.TECH_MAGS if c in returns.columns]
+        non_tech_cols = [c for c in self.NON_TECH_MAGS if c in returns.columns]
 
         if len(tech_cols) > 0 and len(non_tech_cols) > 0:
             tech_return = returns[tech_cols].mean(axis=1)
             non_tech_return = returns[non_tech_cols].mean(axis=1)
             mag_features["mag_tech_vs_nontech"] = tech_return - non_tech_return
+            mag_features["mag_tech_vs_nontech_5d"] = mag_features["mag_tech_vs_nontech"].rolling(5).sum()
             mag_features["mag_tech_vs_nontech_20d"] = mag_features["mag_tech_vs_nontech"].rolling(20).sum()
+
+            # Tech leadership indicator
+            mag_features["mag_tech_leading"] = (mag_features["mag_tech_vs_nontech_5d"] > 0).astype(int)
         else:
             mag_features["mag_tech_vs_nontech"] = 0
+            mag_features["mag_tech_vs_nontech_5d"] = 0
             mag_features["mag_tech_vs_nontech_20d"] = 0
+            mag_features["mag_tech_leading"] = 0
 
-        # 8. Correlation with SPY (rolling 20-day)
+        # Cross-MAG breadth comparison (larger group vs smaller group)
+        if "mag7_pct_advancing" in mag_features.columns and "mag3_pct_advancing" in mag_features.columns:
+            # MAG3 vs MAG7 divergence (big 3 leading/lagging the MAG7)
+            mag_features["mag3_vs_mag7_breadth"] = (
+                mag_features["mag3_pct_advancing"] - mag_features["mag7_pct_advancing"]
+            )
+
+        if "mag15_pct_advancing" in mag_features.columns and "mag7_pct_advancing" in mag_features.columns:
+            # MAG7 vs MAG15 divergence (core tech vs broader mega-caps)
+            mag_features["mag7_vs_mag15_breadth"] = (
+                mag_features["mag7_pct_advancing"] - mag_features["mag15_pct_advancing"]
+            )
+
+        # Concentration risk indicator (top 3 driving all returns)
+        if "mag3_wtd_return" in mag_features.columns and "mag7_wtd_return" in mag_features.columns:
+            mag3_wt = mag_features["mag3_wtd_return"]
+            mag7_wt = mag_features["mag7_wtd_return"]
+            # If MAG3 return > 80% of MAG7 return, concentration is high
+            mag_features["mag_concentration_risk"] = (
+                (mag3_wt.abs() > 0.8 * mag7_wt.abs()) & (mag7_wt.abs() > 0.001)
+            ).astype(int)
+
+        # SPY correlation (rolling 20-day) for key groups
         if "day_return" in features.columns:
             spy_ret = features.set_index("date")["day_return"] if "date" in features.columns else features["day_return"]
-            # Align indices
-            common_idx = mag_features.index.intersection(spy_ret.index)
-            if len(common_idx) > 20:
-                mag_features["mag7_spy_corr_20d"] = returns[mag7_cols].mean(axis=1).rolling(20).corr(spy_ret)
-                mag_features["mag10_spy_corr_20d"] = returns[mag10_cols].mean(axis=1).rolling(20).corr(spy_ret)
-            else:
-                mag_features["mag7_spy_corr_20d"] = 0
-                mag_features["mag10_spy_corr_20d"] = 0
-        else:
-            mag_features["mag7_spy_corr_20d"] = 0
-            mag_features["mag10_spy_corr_20d"] = 0
+            try:
+                for name in ["mag3", "mag7", "mag10", "mag15"]:
+                    if f"{name}_avg_return" in mag_features.columns:
+                        mag_features[f"{name}_spy_corr_20d"] = (
+                            mag_features[f"{name}_avg_return"].rolling(20).corr(spy_ret)
+                        )
+            except (KeyError, ValueError):
+                pass  # Correlation calc may fail on misaligned indices
 
-        # 9. Breadth divergence (MAG advancing but SPY flat/down, or vice versa)
-        # Will be computed after merge with SPY
+        # Breadth divergence (MAG advancing but SPY flat/down)
         mag_features["date"] = pd.to_datetime(mag_features.index.date)
 
         # Merge with SPY daily
@@ -1440,14 +1494,17 @@ class Mag7BreadthFeatures:
         # Compute divergence after merge
         if "day_return" in features.columns:
             spy_direction = (features["day_return"] > 0).astype(int)
-            mag_direction = (features["mag7_pct_advancing"] > 0.5).astype(int)
-            features["mag7_breadth_divergence"] = mag_direction - spy_direction
+            for name in ["mag3", "mag7", "mag10", "mag15"]:
+                col = f"{name}_pct_advancing"
+                if col in features.columns:
+                    mag_direction = (features[col] > 0.5).astype(int)
+                    features[f"{name}_breadth_divergence"] = mag_direction - spy_direction
 
         # Fill NaN
-        mag_cols = [c for c in features.columns if "mag" in c.lower()]
-        features[mag_cols] = features[mag_cols].fillna(0)
+        all_mag_cols = [c for c in features.columns if "mag" in c.lower()]
+        features[all_mag_cols] = features[all_mag_cols].fillna(0)
 
-        print(f"  Added {len(mag_cols)} MAG7/MAG10 breadth features")
+        print(f"  Added {len(all_mag_cols)} MAG3/5/6/7/10/15 breadth features")
         return features
 
     def analyze_mag_leadership(self, features: pd.DataFrame) -> Dict:
@@ -1463,14 +1520,30 @@ class Mag7BreadthFeatures:
 
         signal = {
             "date": latest.get("date"),
+            # All MAG group breadths
+            "mag3_advancing": latest.get("mag3_pct_advancing", 0),
+            "mag5_advancing": latest.get("mag5_pct_advancing", 0),
+            "mag6_advancing": latest.get("mag6_pct_advancing", 0),
             "mag7_advancing": latest.get("mag7_pct_advancing", 0),
             "mag10_advancing": latest.get("mag10_pct_advancing", 0),
+            "mag15_advancing": latest.get("mag15_pct_advancing", 0),
+            # Momentum
+            "mag3_momentum_5d": latest.get("mag3_momentum_5d", 0),
             "mag7_momentum_5d": latest.get("mag7_momentum_5d", 0),
+            "mag15_momentum_5d": latest.get("mag15_momentum_5d", 0),
+            # 52-week position
             "mag7_near_52w_high": latest.get("mag7_pct_near_52w_high", 0),
+            # Rotation
             "tech_vs_nontech": latest.get("mag_tech_vs_nontech_20d", 0),
+            "tech_leading": latest.get("mag_tech_leading", 0),
+            # Concentration
+            "concentration_risk": latest.get("mag_concentration_risk", 0),
+            # Cross-group divergence
+            "mag3_vs_mag7_breadth": latest.get("mag3_vs_mag7_breadth", 0),
+            "mag7_vs_mag15_breadth": latest.get("mag7_vs_mag15_breadth", 0),
         }
 
-        # Interpretation
+        # Interpretation based on MAG7 (core indicator)
         if signal["mag7_advancing"] >= 0.7 and signal["mag7_momentum_5d"] > 0.02:
             signal["interpretation"] = "STRONG_MAG_LEADERSHIP"
             signal["bias"] = "BULLISH"
@@ -1494,6 +1567,240 @@ class Mag7BreadthFeatures:
             signal["rotation"] = "TECH_UNDERPERFORMING"
         else:
             signal["rotation"] = "NO_CLEAR_ROTATION"
+
+        # Breadth divergence warning (big 3 leading but rest lagging)
+        if signal["mag3_vs_mag7_breadth"] > 0.3:
+            signal["breadth_warning"] = "BIG3_LEADING_NARROWLY"
+        elif signal["mag7_vs_mag15_breadth"] > 0.3:
+            signal["breadth_warning"] = "CORE_TECH_LEADING_NARROWLY"
+        else:
+            signal["breadth_warning"] = "NONE"
+
+        # Concentration warning
+        if signal["concentration_risk"] == 1:
+            signal["concentration_warning"] = "HIGH_CONCENTRATION_IN_TOP3"
+        else:
+            signal["concentration_warning"] = "NONE"
+
+        return signal
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# 3C. SECTOR BREADTH FEATURES (S&P 500 Sectors)
+# ═══════════════════════════════════════════════════════════════════════════════
+class SectorBreadthFeatures:
+    """
+    Market breadth features by S&P 500 sector for validation.
+
+    Tracks sector rotation, leadership, and divergence signals using sector ETFs.
+    This provides additional validation dimensions beyond individual stocks.
+
+    Sector ETFs:
+      XLK - Technology
+      XLF - Financials
+      XLV - Healthcare
+      XLE - Energy
+      XLI - Industrials
+      XLY - Consumer Discretionary
+      XLP - Consumer Staples
+      XLU - Utilities
+      XLB - Materials
+      XLRE - Real Estate
+      XLC - Communication Services
+    """
+
+    SECTOR_ETFS = {
+        "XLK": "Technology",
+        "XLF": "Financials",
+        "XLV": "Healthcare",
+        "XLE": "Energy",
+        "XLI": "Industrials",
+        "XLY": "Consumer Discretionary",
+        "XLP": "Consumer Staples",
+        "XLU": "Utilities",
+        "XLB": "Materials",
+        "XLRE": "Real Estate",
+        "XLC": "Communication Services",
+    }
+
+    # Defensive vs Cyclical classification
+    DEFENSIVE_SECTORS = ["XLV", "XLP", "XLU", "XLRE"]
+    CYCLICAL_SECTORS = ["XLK", "XLF", "XLE", "XLI", "XLY", "XLB", "XLC"]
+
+    # Risk-on vs Risk-off classification
+    RISK_ON_SECTORS = ["XLK", "XLY", "XLF", "XLE", "XLI"]
+    RISK_OFF_SECTORS = ["XLV", "XLP", "XLU", "XLRE"]
+
+    def __init__(self):
+        self.data_cache = {}
+
+    def download_sector_data(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> pd.DataFrame:
+        """Download sector ETF data via Alpaca."""
+        print("\n[SECTORS] Downloading sector ETF data via Alpaca...")
+
+        try:
+            helper = get_alpaca_helper()
+            tickers = list(self.SECTOR_ETFS.keys())
+
+            data = helper.download_daily_bars(tickers, start_date, end_date)
+
+            if isinstance(data, dict):
+                close = data.get("close", pd.DataFrame())
+                volume = data.get("volume", pd.DataFrame())
+            else:
+                print("  [WARN] Unexpected data format from Alpaca")
+                return pd.DataFrame()
+
+            if close.empty:
+                print("  [WARN] No sector data returned from Alpaca")
+                return pd.DataFrame()
+
+            print(f"  Downloaded {len(close.columns)} sector ETFs, {len(close)} days")
+
+            self.data_cache = {
+                "close": close,
+                "volume": volume,
+            }
+            return close
+
+        except Exception as e:
+            print(f"  [ERROR] Failed to download sector data: {e}")
+            return pd.DataFrame()
+
+    def create_sector_features(
+        self,
+        spy_daily: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """Create sector breadth features for validation."""
+        if not self.data_cache:
+            print("  [WARN] No sector data cached. Call download_sector_data first.")
+            return spy_daily
+
+        close = self.data_cache.get("close", pd.DataFrame())
+        volume = self.data_cache.get("volume", pd.DataFrame())
+
+        if close.empty:
+            return spy_daily
+
+        print("\n[SECTORS] Engineering sector breadth features...")
+
+        features = spy_daily.copy()
+        returns = close.pct_change()
+
+        # Get available sectors
+        available_sectors = [c for c in self.SECTOR_ETFS.keys() if c in returns.columns]
+        defensive_cols = [c for c in self.DEFENSIVE_SECTORS if c in returns.columns]
+        cyclical_cols = [c for c in self.CYCLICAL_SECTORS if c in returns.columns]
+        risk_on_cols = [c for c in self.RISK_ON_SECTORS if c in returns.columns]
+        risk_off_cols = [c for c in self.RISK_OFF_SECTORS if c in returns.columns]
+
+        sector_features = pd.DataFrame(index=returns.index)
+
+        # 1. Overall sector breadth
+        sector_features["sector_pct_advancing"] = (returns[available_sectors] > 0).mean(axis=1)
+        sector_features["sector_avg_return"] = returns[available_sectors].mean(axis=1)
+
+        # 2. Defensive vs Cyclical rotation
+        if len(defensive_cols) > 0 and len(cyclical_cols) > 0:
+            defensive_ret = returns[defensive_cols].mean(axis=1)
+            cyclical_ret = returns[cyclical_cols].mean(axis=1)
+            sector_features["sector_cyclical_vs_defensive"] = cyclical_ret - defensive_ret
+            sector_features["sector_cyclical_vs_defensive_5d"] = sector_features["sector_cyclical_vs_defensive"].rolling(5).sum()
+            sector_features["sector_cyclical_vs_defensive_20d"] = sector_features["sector_cyclical_vs_defensive"].rolling(20).sum()
+
+        # 3. Risk-on vs Risk-off rotation
+        if len(risk_on_cols) > 0 and len(risk_off_cols) > 0:
+            risk_on_ret = returns[risk_on_cols].mean(axis=1)
+            risk_off_ret = returns[risk_off_cols].mean(axis=1)
+            sector_features["sector_risk_on_vs_off"] = risk_on_ret - risk_off_ret
+            sector_features["sector_risk_appetite_5d"] = sector_features["sector_risk_on_vs_off"].rolling(5).sum()
+            sector_features["sector_risk_appetite_20d"] = sector_features["sector_risk_on_vs_off"].rolling(20).sum()
+
+        # 4. Leading/Lagging sectors
+        sector_features["sector_best_return"] = returns[available_sectors].max(axis=1)
+        sector_features["sector_worst_return"] = returns[available_sectors].min(axis=1)
+        sector_features["sector_dispersion"] = sector_features["sector_best_return"] - sector_features["sector_worst_return"]
+
+        # 5. Momentum for key sectors
+        for sector in ["XLK", "XLF", "XLE", "XLV"]:
+            if sector in returns.columns:
+                sector_features[f"{sector.lower()}_momentum_5d"] = returns[sector].rolling(5).sum()
+                sector_features[f"{sector.lower()}_momentum_20d"] = returns[sector].rolling(20).sum()
+                sector_features[f"{sector.lower()}_rel_strength"] = (
+                    returns[sector].rolling(20).sum() - sector_features["sector_avg_return"].rolling(20).sum()
+                )
+
+        # 6. Sector breadth divergence
+        sector_features["sector_breadth_strong"] = (sector_features["sector_pct_advancing"] >= 0.7).astype(int)
+        sector_features["sector_breadth_weak"] = (sector_features["sector_pct_advancing"] <= 0.3).astype(int)
+
+        # 7. Volume-weighted sector strength (if volume available)
+        if not volume.empty:
+            vol_cols = [c for c in available_sectors if c in volume.columns]
+            if len(vol_cols) > 0:
+                vol_weights = volume[vol_cols].div(volume[vol_cols].sum(axis=1), axis=0)
+                sector_features["sector_vol_wtd_return"] = (returns[vol_cols] * vol_weights).sum(axis=1)
+
+        # Add date for merge
+        sector_features["date"] = pd.to_datetime(sector_features.index.date)
+
+        # Merge with SPY daily
+        features = features.merge(
+            sector_features.reset_index(drop=True),
+            on="date",
+            how="left"
+        )
+
+        # Compute divergence after merge
+        if "day_return" in features.columns:
+            spy_direction = (features["day_return"] > 0).astype(int)
+            sector_direction = (features["sector_pct_advancing"] > 0.5).astype(int)
+            features["sector_breadth_divergence"] = sector_direction - spy_direction
+
+        # Fill NaN
+        sector_cols = [c for c in features.columns if "sector_" in c.lower() or c.startswith("xl")]
+        features[sector_cols] = features[sector_cols].fillna(0)
+
+        print(f"  Added {len(sector_cols)} sector breadth features")
+        return features
+
+    def analyze_sector_rotation(self, features: pd.DataFrame) -> Dict:
+        """Analyze current sector rotation signals."""
+        if len(features) == 0:
+            return {}
+
+        latest = features.iloc[-1].to_dict()
+
+        signal = {
+            "date": latest.get("date"),
+            "sector_advancing": latest.get("sector_pct_advancing", 0),
+            "cyclical_vs_defensive": latest.get("sector_cyclical_vs_defensive_5d", 0),
+            "risk_appetite": latest.get("sector_risk_appetite_5d", 0),
+            "dispersion": latest.get("sector_dispersion", 0),
+        }
+
+        # Rotation interpretation
+        if signal["cyclical_vs_defensive"] > 0.02:
+            signal["rotation"] = "CYCLICAL_LEADING"
+            signal["market_phase"] = "EXPANSION"
+        elif signal["cyclical_vs_defensive"] < -0.02:
+            signal["rotation"] = "DEFENSIVE_LEADING"
+            signal["market_phase"] = "CONTRACTION"
+        else:
+            signal["rotation"] = "NEUTRAL"
+            signal["market_phase"] = "TRANSITION"
+
+        # Risk appetite
+        if signal["risk_appetite"] > 0.02:
+            signal["risk_sentiment"] = "RISK_ON"
+        elif signal["risk_appetite"] < -0.02:
+            signal["risk_sentiment"] = "RISK_OFF"
+        else:
+            signal["risk_sentiment"] = "NEUTRAL"
 
         return signal
 
@@ -1636,7 +1943,8 @@ def integrate_anti_overfit(
     use_synthetic: bool = True,
     use_cross_assets: bool = True,
     use_breadth_streaks: bool = True,
-    use_mag_breadth: bool = True,  # NEW: MAG7/MAG10 features
+    use_mag_breadth: bool = True,  # MAG3/5/6/7/10/15 features
+    use_sector_breadth: bool = True,  # Sector rotation features
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
 ) -> Tuple[pd.DataFrame, Dict]:
     """
@@ -1648,7 +1956,8 @@ def integrate_anti_overfit(
         use_synthetic: Generate synthetic SPY universes
         use_cross_assets: Add TLT, QQQ, GLD features
         use_breadth_streaks: Add component streak breadth features
-        use_mag_breadth: Add MAG7/MAG10 market breadth features
+        use_mag_breadth: Add MAG3/5/6/7/10/15 market breadth features
+        use_sector_breadth: Add sector rotation and breadth features
         synthetic_weight: Weight for synthetic data (0.4 = 40% synthetic)
 
     Returns:
@@ -1691,7 +2000,7 @@ def integrate_anti_overfit(
             df_daily = cross_assets.create_cross_asset_features(cross_data, df_daily)
             metadata["cross_assets"] = list(cross_data.columns)
 
-    # 3. MAG7/MAG10 Market Breadth Features (NEW)
+    # 3. MAG Market Breadth Features (MAG3/5/6/7/10/15)
     if use_mag_breadth:
         mag_breadth = Mag7BreadthFeatures()
         mag_data = mag_breadth.download_mag_data(start_date, end_date)
@@ -1699,7 +2008,8 @@ def integrate_anti_overfit(
         if not mag_data.empty:
             df_daily = mag_breadth.create_mag_features(df_daily)
             metadata["mag_features"] = True
-            metadata["mag_tickers"] = mag_breadth.MAG10
+            metadata["mag_tickers"] = mag_breadth.ALL_MAG_TICKERS
+            metadata["mag_groups"] = ["MAG3", "MAG5", "MAG6", "MAG7", "MAG10", "MAG15"]
 
             # Analyze current MAG leadership
             mag_signal = mag_breadth.analyze_mag_leadership(df_daily)
@@ -1707,8 +2017,27 @@ def integrate_anti_overfit(
                 print(f"  MAG7 Leadership: {mag_signal.get('interpretation', 'N/A')}")
                 print(f"    Bias: {mag_signal.get('bias', 'N/A')}")
                 print(f"    Tech Rotation: {mag_signal.get('rotation', 'N/A')}")
+                if mag_signal.get('breadth_warning') != 'NONE':
+                    print(f"    Breadth Warning: {mag_signal.get('breadth_warning')}")
 
-    # 4. Synthetic SPY Universes (do last since it multiplies data)
+    # 4. Sector Breadth Features (S&P 500 Sectors)
+    if use_sector_breadth:
+        sector_breadth = SectorBreadthFeatures()
+        sector_data = sector_breadth.download_sector_data(start_date, end_date)
+
+        if not sector_data.empty:
+            df_daily = sector_breadth.create_sector_features(df_daily)
+            metadata["sector_features"] = True
+            metadata["sector_etfs"] = list(sector_breadth.SECTOR_ETFS.keys())
+
+            # Analyze current sector rotation
+            sector_signal = sector_breadth.analyze_sector_rotation(df_daily)
+            if sector_signal:
+                print(f"  Sector Rotation: {sector_signal.get('rotation', 'N/A')}")
+                print(f"    Market Phase: {sector_signal.get('market_phase', 'N/A')}")
+                print(f"    Risk Sentiment: {sector_signal.get('risk_sentiment', 'N/A')}")
+
+    # 5. Synthetic SPY Universes (do last since it multiplies data)
     if use_synthetic:
         real_weight = 1 - synthetic_weight
         synth_gen = SyntheticSPYGenerator(n_universes=10, real_weight=real_weight)
