@@ -1,0 +1,380 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Pipeline Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Master configuration for the 27-phase, 265-step ML trading pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+pipeline_name: "SPY Swing Trading ML Pipeline"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# GLOBAL SETTINGS
+# ─────────────────────────────────────────────────────────────────────────────────
+global:
+  timezone: "America/New_York"
+  market_hours:
+    open: "09:30"
+    close: "16:00"
+  trading_days: ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 1: DATA ACQUISITION (Steps 1-5)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_01_data_acquisition:
+  enabled: true
+  sources:
+    primary:
+      provider: "alpaca"
+      symbols: ["SPY"]
+      timeframe: "1Min"
+      lookback_years: 5
+
+    components:
+      provider: "yfinance"
+      symbols: "sp500_constituents"  # Load from config/sp500.csv
+      timeframe: "1D"
+
+    auxiliary:
+      - symbol: "VIX"
+        provider: "yfinance"
+      - symbol: "^TNX"  # 10-year Treasury
+        provider: "yfinance"
+      - symbols: ["XLK", "XLF", "XLE", "XLV", "XLI", "XLC", "XLY", "XLP", "XLB", "XLU", "XLRE"]
+        provider: "yfinance"
+        description: "Sector ETFs"
+
+  storage:
+    database: "data/giga_trader.db"
+    raw_tables:
+      - "spy_1min_raw"
+      - "spy_components_daily"
+      - "auxiliary_data"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 2: PREPROCESSING (Steps 6-14)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_02_preprocessing:
+  enabled: true
+  steps:
+    datetime_parsing:
+      format: "auto"
+      timezone: "America/New_York"
+
+    duplicate_handling:
+      strategy: "keep_first"
+
+    missing_values:
+      ohlc: "ffill"
+      volume: "fill_zero"
+      max_gap_minutes: 5
+
+    ohlc_validation:
+      enforce: true
+      fix_violations: true
+
+    outlier_detection:
+      method: "zscore"
+      threshold: 3.0
+      treatment: "clip"
+
+    volume_handling:
+      zero_replacement: 1
+      spike_threshold: 10.0  # 10x average
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 3: SYNTHETIC DATA (Steps 15-30)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_03_synthetic_data:
+  enabled: true
+  scenarios:
+    sector_exclusions:
+      - "spy_no_tech"
+      - "spy_no_financials"
+      - "spy_no_energy"
+      - "spy_no_healthcare"
+      # ... all 11 sectors
+
+    market_cap_variations:
+      - "spy_top10"
+      - "spy_top20"
+      - "spy_top50"
+      - "spy_top100"
+
+    noise_injection:
+      levels: [0.001, 0.002, 0.005]  # 0.1%, 0.2%, 0.5%
+
+    volatility_scaling:
+      factors: [0.5, 0.75, 1.25, 1.5, 2.0]
+
+    momentum_weighting:
+      periods: [5, 10, 20, 60]  # days
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 5: TARGET VARIABLE (Steps 41-48)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_05_targets:
+  enabled: true
+  primary_target:
+    name: "intraday_swing"
+    description: "Afternoon swing >= threshold from 12:30 to 16:00"
+    thresholds: [0.003, 0.004, 0.005, 0.006]  # 0.3% to 0.6%
+    default_threshold: 0.004  # 0.4%
+    entry_time: "12:30"
+    exit_time: "16:00"
+
+  alternative_targets:
+    - name: "orb_breakout"
+      description: "Opening Range Breakout"
+    - name: "gap_fill"
+      description: "Overnight gap closure"
+    - name: "continuous_return"
+      description: "Regression target"
+
+  class_imbalance:
+    handling: "class_weight"  # or "smote", "threshold_adjust"
+    target_ratio: 0.4  # Expected ~34-40% positive
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 6-9: FEATURE ENGINEERING (Steps 49-95)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_06_09_features:
+  total_features: 200
+
+  intraday_features:
+    orb:
+      - "orb_range_pct"
+      - "orb_direction"
+      - "orb_return"
+      - "orb_breakout_up"
+      - "orb_breakout_down"
+
+    morning_session:
+      - "morn_return"
+      - "morn_range"
+      - "morn_volatility"
+      - "morn_skew"
+
+    volume_profile:
+      - "vol_ratio_halves"
+      - "vol_trend"
+      - "vol_spike_count"
+
+    vwap:
+      - "vwap_deviation"
+      - "vwap_zscore"
+      - "vwap_crosses"
+
+  daily_features:
+    returns:
+      periods: [1, 5, 10, 21, 63]
+
+    moving_averages:
+      sma: [9, 20, 50, 200]
+      ema: [9, 20, 50]
+
+    volatility:
+      realized: [5, 21, 63]
+      parkinson: true
+      atr_period: 14
+
+    technical:
+      - "rsi_14"
+      - "macd_12_26_9"
+      - "stochastic"
+      - "cci"
+      - "adx"
+
+  breadth_features:
+    daily_breadth:
+      periods: [1, 3, 5, 10]
+    streaks: true
+    thrust: true
+    exhaustion: true
+
+  calendar_features:
+    - "day_of_week"
+    - "day_of_month"
+    - "month"
+    - "opex_week"
+    - "fomc_week"
+    - "jobs_report_week"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 10: FEATURE PROCESSING (Steps 96-104)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_10_feature_processing:
+  missing_handling:
+    strategy: "ffill_then_zero"
+
+  infinity_handling:
+    replace_with: "nan"
+    then: "fill"
+
+  outlier_clipping:
+    method: "zscore"
+    threshold: 3.0
+
+  scaling:
+    method: "standard"  # standard, robust, minmax
+    fit_on: "train_only"
+
+  correlation_filter:
+    threshold: 0.95
+    keep: "most_important"
+
+  feature_selection:
+    methods:
+      - "mutual_info"
+      - "f_classif"
+      - "lasso"
+      - "tree_importance"
+    top_n: [20, 30, 40, 50, 75, 100]
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 11: CROSS-VALIDATION (Steps 105-112)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_11_cv:
+  strategy: "purged_kfold"
+  n_splits: 5
+  purge_days: 5
+  embargo_days: 2
+
+  train_val_test_split:
+    train: 0.65
+    val: 0.15
+    test: 0.20
+
+  walk_forward:
+    enabled: true
+    n_windows: 10
+    expanding: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 12: MODEL TRAINING (Steps 113-124)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_12_models:
+  architectures:
+    logistic_regression:
+      enabled: true
+      regularization: ["l1", "l2"]
+      C: [0.01, 0.1, 1.0, 10.0, 50.0, 100.0]
+
+    random_forest:
+      enabled: true
+      n_estimators: [50, 100, 200, 500]
+      max_depth: [3, 5, 10, 15, null]
+      min_samples_split: [10, 20, 50]
+      min_samples_leaf: [5, 10, 20]
+
+    xgboost:
+      enabled: true
+      learning_rate: [0.001, 0.01, 0.05, 0.1]
+      max_depth: [2, 3, 5, 7]
+      n_estimators: [50, 100, 200, 500]
+      reg_alpha: [0, 0.1, 1.0, 10.0]
+      reg_lambda: [0, 0.1, 1.0, 10.0]
+
+    lightgbm:
+      enabled: true
+      learning_rate: [0.001, 0.01, 0.05, 0.1]
+      num_leaves: [15, 31, 63, 127]
+      max_depth: [3, 5, 10, 15]
+
+    mlp:
+      enabled: true
+      hidden_layers: [[50], [100], [50, 50], [100, 50]]
+      activation: ["relu", "tanh"]
+      alpha: [0.0001, 0.001, 0.01, 0.1]
+
+  ensemble:
+    voting:
+      strategy: "soft"
+      top_n: [3, 5, 7, 10]
+
+    stacking:
+      enabled: true
+      meta_learners: ["logistic", "ridge", "xgboost"]
+
+    weighted:
+      optimize_for: ["auc", "sharpe", "balanced"]
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 15: STRATEGY (Steps 151-166)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_15_strategy:
+  signals:
+    base_threshold: 0.55
+    dynamic_threshold:
+      enabled: true
+      adjust_by: "volatility"
+
+    entry_rules:
+      time: "12:30"
+      confirmations: 1
+      risk_checks: true
+
+    exit_rules:
+      stop_loss: -0.002  # -0.2%
+      take_profit: 0.004  # +0.4%
+      time_exit: "16:00"
+      trailing_stop:
+        enabled: true
+        activation: 0.002  # +0.2%
+        trail: 0.001  # 0.1%
+
+  position_sizing:
+    method: "kelly"  # fixed, kelly, volatility_adjusted
+    max_position_pct: 25
+    kelly_fraction: 0.25  # Quarter Kelly
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 19: PAPER TRADING (Steps 194-210)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_19_paper_trading:
+  account:
+    initial_capital: 100000
+    broker: "alpaca"
+    mode: "paper"
+
+  execution:
+    entry_time: "12:30"
+    exit_time: "16:00"
+    order_type: "market"
+
+  risk_management:
+    max_daily_loss: 0.02
+    max_drawdown: 0.10
+    consecutive_loss_limit: 5
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 20: MONITORING (Steps 211-222)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_20_monitoring:
+  dashboards:
+    realtime: true
+    port: 8080
+
+  reports:
+    daily: true
+    weekly: true
+    monthly: true
+
+  alerts:
+    drawdown_threshold: 0.05
+    win_rate_threshold: 0.45
+    drift_detection: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# VALIDATION THRESHOLDS
+# ─────────────────────────────────────────────────────────────────────────────────
+validation:
+  minimum_test_auc: 0.58
+  maximum_train_test_gap: 0.10
+  minimum_win_rate: 0.52
+  minimum_sharpe: 0.5
+
+  robustness_tests:
+    permutation_p_value: 0.05
+    feature_stability: 0.70
+    cv_stability_max_std: 0.05
+    noise_robustness: 0.05

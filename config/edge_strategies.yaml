@@ -1,0 +1,645 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Edge Strategies Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Novel edge-generating strategies that provide competitive advantage
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE 1: REGULARIZATION-FIRST MODEL PHILOSOPHY
+# ─────────────────────────────────────────────────────────────────────────────────
+# Core principle: If a feature works with a heavily regularized linear model,
+# it's likely a robust feature. Complex models overfit; simple models generalize.
+# ─────────────────────────────────────────────────────────────────────────────────
+regularization_first:
+  philosophy: |
+    Features that survive heavy regularization are TRUE signals.
+    Complex models memorize noise; simple models find patterns.
+    If logistic regression with L1 can't use a feature, it's likely noise.
+
+  model_hierarchy:
+    # Train models in this order - simpler first
+    # Only use complex models if simple ones fail
+    priority_order:
+      1:
+        model: "logistic_regression_l1"
+        description: "Heavily regularized linear - feature discovery"
+        use_for: "feature_selection"
+      2:
+        model: "logistic_regression_l2"
+        description: "Ridge regression - stable predictions"
+        use_for: "baseline_model"
+      3:
+        model: "elastic_net"
+        description: "L1+L2 hybrid - balanced regularization"
+        use_for: "production_candidate"
+      4:
+        model: "shallow_tree"
+        description: "Max depth 3-5 trees - capture interactions"
+        use_for: "interaction_discovery"
+      5:
+        model: "ensemble_simple"
+        description: "Voting of simple models only"
+        use_for: "production_model"
+
+  # NEVER use these for final models
+  avoid_models:
+    - name: "deep_neural_networks"
+      reason: "Overfit on financial data"
+    - name: "deep_trees"
+      reason: "Max depth > 5 memorizes noise"
+    - name: "unbounded_boosting"
+      reason: "Without early stopping, overfits"
+    - name: "unregularized_models"
+      reason: "No L1/L2 = no feature selection"
+
+  regularization_settings:
+    logistic_regression:
+      penalty: "l1"                 # LASSO for feature selection
+      C_range: [0.001, 0.01, 0.1]   # Strong regularization
+      solver: "saga"
+      max_iter: 5000
+
+    elastic_net:
+      l1_ratio_range: [0.5, 0.7, 0.9]  # Favor L1
+      alpha_range: [0.1, 1.0, 10.0]
+
+    tree_models:
+      max_depth: [3, 4, 5]          # NEVER > 5
+      min_samples_leaf: [50, 100, 200]  # High minimum
+      min_samples_split: [100, 200]
+      max_features: [0.3, 0.5]      # Limit features per tree
+
+    gradient_boosting:
+      n_estimators: [50, 100]       # Fewer trees
+      learning_rate: [0.01, 0.05]   # Slow learning
+      max_depth: [2, 3]             # Very shallow
+      subsample: [0.5, 0.7]         # Stochastic
+      reg_alpha: [1.0, 10.0]        # L1 regularization
+      reg_lambda: [1.0, 10.0]       # L2 regularization
+      early_stopping_rounds: 10
+
+  feature_validation:
+    # Feature is ONLY valid if it survives regularization
+    survival_test:
+      method: "lasso_path"
+      description: "Track feature across regularization strengths"
+      passing_criteria:
+        - "non_zero_coefficient_at_C_0.01"
+        - "consistent_sign_across_C_values"
+        - "coefficient_magnitude_stability"
+
+    robustness_score:
+      description: "Score features by regularization survival"
+      formula: |
+        robustness = (
+          0.4 * lasso_survival_rate +      # % of C values where non-zero
+          0.3 * coefficient_stability +     # 1 - std(coef) / mean(coef)
+          0.2 * cross_val_importance +      # Importance across CV folds
+          0.1 * linear_predictive_power     # AUC in logistic regression
+        )
+      min_robustness_score: 0.6
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE 2: EXTENDED HOURS SIGNAL EXTRACTION
+# ─────────────────────────────────────────────────────────────────────────────────
+# Premarket and after-hours contain predictive signal that most ignore.
+# Extract trends from PM today, PM prior days, AH prior days, and combinations.
+# ─────────────────────────────────────────────────────────────────────────────────
+extended_hours_signals:
+  philosophy: |
+    Extended hours trading reveals institutional positioning before retail.
+    Premarket today + afterhours yesterday = overnight sentiment.
+    Consistent extended hours trends = high conviction institutional moves.
+
+  sessions:
+    premarket:
+      abbreviation: "PM"
+      start: "04:00"
+      end: "09:30"
+      timezone: "America/New_York"
+
+    afterhours:
+      abbreviation: "AH"
+      start: "16:00"
+      end: "20:00"
+      timezone: "America/New_York"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PREMARKET FEATURES - Current Day
+  # ─────────────────────────────────────────────────────────────────────────────
+  premarket_today:
+    price_features:
+      - name: "pm_return_today"
+        calculation: "(pm_close - prev_close) / prev_close"
+        description: "Today's premarket return"
+
+      - name: "pm_range_today"
+        calculation: "(pm_high - pm_low) / pm_open"
+        description: "Today's premarket range as %"
+
+      - name: "pm_direction_today"
+        calculation: "sign(pm_close - pm_open)"
+        description: "Premarket direction: 1, 0, -1"
+
+      - name: "pm_vwap_deviation"
+        calculation: "(pm_close - pm_vwap) / pm_vwap"
+        description: "Close vs VWAP in premarket"
+
+    momentum_features:
+      - name: "pm_momentum_30min"
+        calculation: "pm_return_last_30min"
+        description: "Last 30 min of premarket momentum"
+
+      - name: "pm_momentum_60min"
+        calculation: "pm_return_last_60min"
+        description: "Last hour of premarket momentum"
+
+      - name: "pm_trend_consistency"
+        calculation: "count(positive_5min_bars) / total_5min_bars"
+        description: "% of 5-min bars that are positive"
+
+    volume_features:
+      - name: "pm_volume_ratio"
+        calculation: "pm_volume / avg_pm_volume_20d"
+        description: "Volume vs 20-day premarket average"
+
+      - name: "pm_volume_trend"
+        calculation: "pm_volume_last_hour / pm_volume_first_hour"
+        description: "Volume acceleration in premarket"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # PREMARKET FEATURES - Prior Days (Lagged)
+  # ─────────────────────────────────────────────────────────────────────────────
+  premarket_lagged:
+    lags: [1, 2, 3, 5]              # Days to look back
+
+    per_lag_features:
+      - "pm_return_lag{n}"
+      - "pm_range_lag{n}"
+      - "pm_direction_lag{n}"
+      - "pm_volume_ratio_lag{n}"
+
+    aggregate_features:
+      - name: "pm_return_avg_3d"
+        calculation: "mean(pm_return_lag1, pm_return_lag2, pm_return_lag3)"
+
+      - name: "pm_direction_streak"
+        calculation: "consecutive_same_direction_pm_days"
+
+      - name: "pm_consistency_5d"
+        calculation: "count(pm_return > 0) / 5"
+        description: "% of last 5 PMs that were positive"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # AFTERHOURS FEATURES - Prior Days (Lagged)
+  # ─────────────────────────────────────────────────────────────────────────────
+  afterhours_lagged:
+    lags: [1, 2, 3, 5]
+
+    per_lag_features:
+      - "ah_return_lag{n}"
+      - "ah_range_lag{n}"
+      - "ah_direction_lag{n}"
+      - "ah_volume_ratio_lag{n}"
+
+    aggregate_features:
+      - name: "ah_return_avg_3d"
+        calculation: "mean(ah_return_lag1, ah_return_lag2, ah_return_lag3)"
+
+      - name: "ah_direction_streak"
+        calculation: "consecutive_same_direction_ah_days"
+
+      - name: "ah_consistency_5d"
+        calculation: "count(ah_return > 0) / 5"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # COMBINED EXTENDED HOURS TIME SERIES
+  # ─────────────────────────────────────────────────────────────────────────────
+  combined_extended_hours:
+    description: |
+      Treat PM + AH as a continuous "overnight" session.
+      Yesterday's AH + Today's PM = overnight sentiment flow.
+
+    overnight_features:
+      - name: "overnight_return"
+        calculation: "pm_close_today - ah_close_yesterday"
+        description: "Combined overnight move"
+
+      - name: "overnight_direction_agreement"
+        calculation: "sign(ah_return_yesterday) == sign(pm_return_today)"
+        description: "Does PM confirm AH direction?"
+
+      - name: "overnight_momentum"
+        calculation: "pm_return_today + ah_return_yesterday"
+        description: "Combined overnight momentum"
+
+    extended_only_time_series:
+      description: |
+        Build separate time series using ONLY extended hours data.
+        This captures institutional activity without regular session noise.
+
+      series:
+        - name: "pm_only_series"
+          data: "Premarket OHLCV only, concatenated across days"
+          features:
+            - "pm_only_sma_5"       # 5-day PM SMA
+            - "pm_only_sma_10"
+            - "pm_only_momentum"
+            - "pm_only_volatility"
+
+        - name: "ah_only_series"
+          data: "Afterhours OHLCV only, concatenated across days"
+          features:
+            - "ah_only_sma_5"
+            - "ah_only_sma_10"
+            - "ah_only_momentum"
+            - "ah_only_volatility"
+
+        - name: "extended_combined_series"
+          data: "PM + AH concatenated as single continuous session"
+          features:
+            - "ext_combined_sma_5"
+            - "ext_combined_momentum"
+            - "ext_combined_trend"
+            - "ext_combined_volatility"
+
+    predictive_patterns:
+      - name: "pm_ah_divergence"
+        description: "PM and AH moving opposite = reversal signal"
+        calculation: "sign(pm_return) != sign(ah_return_yesterday)"
+
+      - name: "extended_hours_breakout"
+        description: "Breaking 5-day extended hours range"
+        calculation: "pm_high > max(pm_high_5d) OR pm_low < min(pm_low_5d)"
+
+      - name: "institutional_accumulation"
+        description: "Rising PM on rising volume across days"
+        calculation: |
+          pm_return_today > 0 AND pm_return_lag1 > 0 AND
+          pm_volume_ratio > 1.2 AND pm_volume_ratio_lag1 > 1.2
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE 3: INTRADAY TRADABLE OPPORTUNITIES
+# ─────────────────────────────────────────────────────────────────────────────────
+# Detect specific intraday patterns with configurable time windows and thresholds.
+# Grid search over time windows and swing magnitudes to find optimal setups.
+# ─────────────────────────────────────────────────────────────────────────────────
+intraday_opportunities:
+  philosophy: |
+    Intraday patterns are tradable if they occur reliably.
+    The exact timing and magnitude should be discovered through grid search.
+    Multiple opportunities per day > waiting for perfect setup.
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPPORTUNITY: Morning Dip Buy
+  # ─────────────────────────────────────────────────────────────────────────────
+  morning_dip:
+    description: "Buy SPY after morning drop of X% between time A and B"
+    enabled: true
+
+    default_parameters:
+      window_start: "10:15"
+      window_end: "12:30"
+      min_drop_pct: 0.003           # 0.3%
+      direction: "down"
+
+    grid_search:
+      window_start: ["09:45", "10:00", "10:15", "10:30"]
+      window_end: ["11:30", "12:00", "12:30", "13:00"]
+      min_drop_pct: [0.002, 0.003, 0.004, 0.005]  # 0.2% to 0.5%
+
+    entry_rules:
+      trigger: "price_dropped_by_min_drop_pct"
+      confirmation: "rsi_below_40"  # Optional oversold confirmation
+      timing: "at_window_end"       # Enter at end of window
+
+    exit_rules:
+      target_pct: 0.002             # 0.2% profit target
+      stop_loss_pct: 0.002          # 0.2% stop loss
+      time_exit: "16:00"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPPORTUNITY: Afternoon Swing Up
+  # ─────────────────────────────────────────────────────────────────────────────
+  afternoon_swing:
+    description: "Trade SPY swing up of Y% between time C and D"
+    enabled: true
+
+    default_parameters:
+      window_start: "12:30"
+      window_end: "15:30"
+      min_swing_pct: 0.004          # 0.4%
+      direction: "up"
+
+    grid_search:
+      window_start: ["12:00", "12:30", "13:00"]
+      window_end: ["15:00", "15:30", "15:45"]
+      min_swing_pct: [0.003, 0.004, 0.005, 0.006]  # 0.3% to 0.6%
+
+    entry_rules:
+      trigger: "at_window_start"
+      confirmation: "breadth_positive"
+      signal_threshold: 0.55
+
+    exit_rules:
+      target_pct: 0.004
+      stop_loss_pct: 0.002
+      trailing_stop:
+        activation_pct: 0.002
+        trail_pct: 0.001
+      time_exit: "15:55"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPPORTUNITY: Gap Fade
+  # ─────────────────────────────────────────────────────────────────────────────
+  gap_fade:
+    description: "Fade overnight gaps that exceed threshold"
+    enabled: true
+
+    default_parameters:
+      min_gap_pct: 0.005            # 0.5% gap
+      max_gap_pct: 0.015            # Avoid extreme gaps
+      fade_direction: "opposite_to_gap"
+
+    grid_search:
+      min_gap_pct: [0.003, 0.005, 0.007, 0.010]
+      max_gap_pct: [0.010, 0.015, 0.020]
+      entry_time: ["09:35", "09:45", "10:00"]
+
+    entry_rules:
+      trigger: "gap_exceeds_threshold"
+      confirmation: "volume_spike"
+      timing: "after_open_volatility"
+
+    exit_rules:
+      target: "gap_fill_50pct"      # Target 50% gap fill
+      stop_loss_pct: 0.003
+      time_exit: "12:00"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # OPPORTUNITY: ORB Breakout
+  # ─────────────────────────────────────────────────────────────────────────────
+  orb_breakout:
+    description: "Opening Range Breakout - trade break of first N minutes"
+    enabled: true
+
+    default_parameters:
+      orb_minutes: 30               # First 30 minutes
+      breakout_buffer_pct: 0.001    # 0.1% beyond range
+
+    grid_search:
+      orb_minutes: [15, 30, 45, 60]
+      breakout_buffer_pct: [0.0005, 0.001, 0.0015]
+
+    entry_rules:
+      trigger: "price_breaks_orb_high_or_low"
+      confirmation: "volume_above_average"
+      direction: "breakout_direction"
+
+    exit_rules:
+      target_pct: 0.003
+      stop_loss: "opposite_orb_boundary"
+      time_exit: "15:30"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # MULTI-OPPORTUNITY FRAMEWORK
+  # ─────────────────────────────────────────────────────────────────────────────
+  multi_opportunity:
+    description: "Trade multiple opportunities per day"
+    enabled: true
+
+    rules:
+      max_opportunities_per_day: 3
+      min_time_between_trades: 30   # minutes
+      reduce_size_after_loss: true
+      size_reduction_per_loss: 0.5
+
+    priority:
+      1: "morning_dip"              # Highest priority
+      2: "afternoon_swing"
+      3: "orb_breakout"
+      4: "gap_fade"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE 4: CONFIDENCE SOFT TARGETS
+# ─────────────────────────────────────────────────────────────────────────────────
+# Use soft targets (confidence scores) instead of hard binary labels.
+# This reduces overfitting by acknowledging uncertainty in labels.
+# ─────────────────────────────────────────────────────────────────────────────────
+soft_targets:
+  philosophy: |
+    Binary targets (0/1) pretend we have perfect labels - we don't.
+    A 0.45% move is almost identical to 0.40% but gets different label.
+    Soft targets capture this uncertainty, reducing overfitting.
+
+  enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # SOFT TARGET GENERATION
+  # ─────────────────────────────────────────────────────────────────────────────
+  generation:
+    method: "continuous_transform"
+
+    # Transform continuous returns to soft probabilities
+    continuous_transform:
+      description: "Convert returns to probability-like targets"
+
+      # Sigmoid-based transformation
+      sigmoid:
+        enabled: true
+        formula: "1 / (1 + exp(-k * (return - threshold)))"
+        k: 50                       # Steepness (higher = sharper transition)
+        threshold: 0.004            # Center point (0.4%)
+
+      # Distance-based transformation
+      distance_based:
+        enabled: true
+        formula: |
+          if return >= target:
+            target = 1.0 - decay * (return - target)
+          else:
+            target = 0.0 + decay * (target - return)
+        target: 0.004
+        decay: 100                  # How fast to decay from 1.0/0.0
+
+      # Percentile-based transformation
+      percentile_based:
+        enabled: true
+        description: "Map return to its percentile in historical distribution"
+        lookback_days: 252          # 1 year of returns
+        formula: "percentile_rank(return)"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # CONFIDENCE WEIGHTING
+  # ─────────────────────────────────────────────────────────────────────────────
+  confidence_weighting:
+    description: "Weight samples by how confident we are in the label"
+
+    high_confidence_samples:
+      condition: "abs(return - threshold) > 0.002"  # Far from boundary
+      weight: 1.0
+
+    medium_confidence_samples:
+      condition: "0.001 < abs(return - threshold) <= 0.002"
+      weight: 0.7
+
+    low_confidence_samples:
+      condition: "abs(return - threshold) <= 0.001"  # Near boundary
+      weight: 0.3
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # TRAINING MODIFICATIONS
+  # ─────────────────────────────────────────────────────────────────────────────
+  training:
+    loss_function:
+      # Use MSE or cross-entropy with soft targets
+      primary: "mse"                # Mean Squared Error for soft targets
+      alternative: "bce_with_logits"  # Binary cross-entropy
+
+    label_smoothing:
+      enabled: true
+      epsilon: 0.1                  # Smooth binary labels toward 0.5
+      # 1 -> 0.9, 0 -> 0.1
+
+    temperature_scaling:
+      enabled: true
+      description: "Soften probability predictions"
+      temperature: 2.0              # Higher = softer probabilities
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EVALUATION WITH SOFT TARGETS
+  # ─────────────────────────────────────────────────────────────────────────────
+  evaluation:
+    metrics:
+      - name: "soft_auc"
+        description: "AUC using soft targets as ground truth"
+
+      - name: "calibration_error"
+        description: "How well predictions match soft target distribution"
+
+      - name: "confidence_weighted_accuracy"
+        description: "Accuracy weighted by sample confidence"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EDGE 5: BATCH POSITION SCALING
+# ─────────────────────────────────────────────────────────────────────────────────
+# Never enter or exit full position at once.
+# Scale in slowly on entry, scale out slowly on exit.
+# This reduces timing risk and smooths execution.
+# ─────────────────────────────────────────────────────────────────────────────────
+batch_position_scaling:
+  philosophy: |
+    All-in entries are gambling; gradual scaling is systematic.
+    Even on first signal, scale in over multiple orders.
+    Selling in batches captures more of the move.
+
+  enabled: true
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # ENTRY SCALING (Buying)
+  # ─────────────────────────────────────────────────────────────────────────────
+  entry_scaling:
+    description: "Scale into position over multiple orders"
+
+    default_batches: 3
+    batch_schedule:
+      - batch: 1
+        pct_of_position: 0.40       # 40% on first signal
+        timing: "immediate"
+
+      - batch: 2
+        pct_of_position: 0.35       # 35% on confirmation
+        timing: "after_confirmation"
+        confirmation_rules:
+          - "price_holds_above_entry"
+          - "time_elapsed_minutes >= 15"
+
+      - batch: 3
+        pct_of_position: 0.25       # 25% on momentum
+        timing: "on_momentum"
+        momentum_rules:
+          - "price_up_from_avg_entry"
+          - "volume_increasing"
+
+    alternative_schedules:
+      aggressive:
+        batches: 2
+        schedule: [0.60, 0.40]
+        timing: ["immediate", "after_5min"]
+
+      conservative:
+        batches: 4
+        schedule: [0.25, 0.25, 0.25, 0.25]
+        timing: ["immediate", "after_10min", "after_20min", "after_30min"]
+
+      volatility_adjusted:
+        description: "More batches in high volatility"
+        low_vol_batches: 2
+        high_vol_batches: 5
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EXIT SCALING (Selling)
+  # ─────────────────────────────────────────────────────────────────────────────
+  exit_scaling:
+    description: "Scale out of position to capture more upside"
+
+    default_batches: 3
+    batch_schedule:
+      - batch: 1
+        pct_of_position: 0.30       # 30% at first target
+        trigger: "price_up_0.2pct"
+
+      - batch: 2
+        pct_of_position: 0.40       # 40% at second target
+        trigger: "price_up_0.4pct"
+
+      - batch: 3
+        pct_of_position: 0.30       # 30% at time exit or stop
+        trigger: "time_exit_or_stop"
+
+    trailing_exit:
+      enabled: true
+      description: "Trail remaining position after first 2 batches"
+      activation_pct: 0.003         # Activate after 0.3% gain
+      trail_pct: 0.001              # Trail by 0.1%
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # STOP LOSS SCALING
+  # ─────────────────────────────────────────────────────────────────────────────
+  stop_loss_scaling:
+    description: "Tighten stops as position scales in"
+
+    initial_stop_pct: 0.03          # Wide stop on first batch
+    final_stop_pct: 0.015           # Tight stop once fully in
+
+    per_batch_adjustment:
+      - after_batch: 1
+        stop_pct: 0.03
+      - after_batch: 2
+        stop_pct: 0.02
+      - after_batch: 3
+        stop_pct: 0.015
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # EXECUTION SETTINGS
+  # ─────────────────────────────────────────────────────────────────────────────
+  execution:
+    order_type: "limit"             # Prefer limits for scaling
+    limit_offset_bps: 2             # 0.02% better than market
+    retry_on_miss: true
+    retry_delay_seconds: 30
+    max_retries: 3
+    convert_to_market_after: 2      # Market order after 2 failed limits
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # BATCH TIMING
+  # ─────────────────────────────────────────────────────────────────────────────
+  timing:
+    min_time_between_batches_seconds: 60
+    max_time_to_full_position_minutes: 60
+    cancel_remaining_if:
+      - "signal_reverses"
+      - "stop_loss_triggered"
+      - "market_close_approaching"

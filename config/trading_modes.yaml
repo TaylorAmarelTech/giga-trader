@@ -1,0 +1,341 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Trading Mode Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Defines Simulation, Paper, and Live trading modes with separate risk profiles
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+active_mode: "paper"  # simulation | paper | live
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# MODE TRANSITIONS
+# ─────────────────────────────────────────────────────────────────────────────────
+mode_transitions:
+  simulation_to_paper:
+    duration_days: 14
+    requirements:
+      sharpe_ratio: 0.5
+      win_rate: 0.52
+      test_auc: 0.58
+      robustness_p_value: 0.05
+      max_drawdown: 0.15
+    approval: "automatic"
+
+  paper_to_live:
+    duration_days: 30
+    requirements:
+      paper_sharpe_ratio: 1.0
+      paper_win_rate: 0.55
+      max_paper_drawdown: 0.05
+      consecutive_profitable_weeks: 3
+      zero_api_errors_days: 7
+    approval: "manual_required"
+    initial_position_limit_pct: 0.02  # Start at 2%, scale up
+
+  live_scaling:
+    - days: 7
+      max_position_pct: 0.02
+    - days: 14
+      max_position_pct: 0.05
+    - days: 30
+      max_position_pct: 0.10
+    - days: 60
+      max_position_pct: 0.15
+    - days: 90
+      max_position_pct: 0.25
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# SIMULATION MODE
+# ─────────────────────────────────────────────────────────────────────────────────
+simulation:
+  enabled: true
+  description: "No real orders, instant fills, configurable slippage for testing"
+
+  account:
+    initial_capital: 100000
+    currency: "USD"
+
+  execution:
+    slippage_model: "none"          # none | fixed | adaptive | historical
+    slippage_bps: 0                 # 0 for best-case testing
+    commission_pct: 0.0
+    order_delay_ms: 0               # Instant
+    fill_probability: 1.0           # Always filled
+    partial_fills: false
+
+  market_simulation:
+    enforce_market_hours: false     # Allow 24/7 backtesting
+    allow_fractional_shares: true
+    allow_short_selling: true
+    short_borrow_rate_pct: 0.0
+
+  risk_limits:
+    max_daily_loss_pct: 0.05        # Relaxed for testing
+    max_drawdown_pct: 0.20
+    max_position_pct: 0.50          # Allow larger positions
+    consecutive_loss_limit: 10
+    circuit_breaker: false
+
+  logging:
+    log_every_order: true
+    log_every_signal: true
+    log_every_position_change: true
+    verbose_metrics: true
+    save_trade_by_trade: true
+
+  scenarios:
+    run_best_case: true             # Zero slippage
+    run_worst_case: true            # Max slippage
+    run_realistic: true             # Historical slippage distribution
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PAPER TRADING MODE
+# ─────────────────────────────────────────────────────────────────────────────────
+paper:
+  enabled: true
+  description: "Real-time data, simulated orders through broker API"
+
+  account:
+    broker: "alpaca"
+    initial_capital: 100000
+    account_type: "paper"
+    api_base_url: "https://paper-api.alpaca.markets"
+    data_url: "https://data.alpaca.markets"
+
+  execution:
+    slippage_model: "fixed"
+    slippage_bps: 5                 # 0.05% realistic slippage
+    commission_pct: 0.0             # Alpaca zero commission
+    order_types: ["market", "limit", "stop", "stop_limit"]
+    default_order_type: "market"
+    limit_order_tolerance_pct: 0.1  # Accept if within 0.1% of limit
+    order_timeout_seconds: 60
+    market_order_timeout_seconds: 10
+
+  market_hours:
+    enforce: true
+    regular_session: ["09:30", "16:00"]
+    extended_hours_enabled: true
+    premarket: ["04:00", "09:30"]
+    afterhours: ["16:00", "20:00"]
+
+  risk_limits:
+    max_daily_loss_pct: 0.02
+    max_drawdown_pct: 0.10
+    max_position_pct: 0.25
+    max_sector_concentration_pct: 0.40
+    consecutive_loss_limit: 5
+    circuit_breaker: true
+
+  performance_tracking:
+    benchmark: "SPY"
+    rebalance_frequency: "none"     # Swing trading, no rebalance
+    track_attribution: true
+    save_daily_snapshot: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# LIVE TRADING MODE
+# ─────────────────────────────────────────────────────────────────────────────────
+live:
+  enabled: false                    # MUST BE EXPLICITLY ENABLED
+  description: "Real money trading - USE WITH EXTREME CAUTION"
+
+  account:
+    broker: "alpaca"
+    account_type: "live"
+    api_base_url: "https://api.alpaca.markets"
+    data_url: "https://data.alpaca.markets"
+    min_buying_power: 25000         # PDT rule compliance
+    margin_enabled: false           # Start with cash account
+    # Credentials from environment
+    api_key: "${ALPACA_LIVE_API_KEY}"
+    api_secret: "${ALPACA_LIVE_SECRET_KEY}"
+
+  execution:
+    slippage_model: "adaptive_historical"
+    slippage_percentile: 0.90       # Use 90th percentile historical
+    slippage_max_bps: 15            # Cap at 0.15%
+    commission_pct: 0.0             # Alpaca zero commission
+    order_types: ["market", "limit"]
+    default_order_type: "limit"     # Prefer limit orders in live
+    order_timeout_seconds: 30
+    require_confirmation: true      # Require signal confirmation
+
+  market_hours:
+    enforce: true
+    regular_session: ["09:30", "16:00"]
+    extended_hours_enabled: false   # Disable extended hours initially
+    no_trade_periods:
+      - name: "market_open_volatility"
+        start: "09:30"
+        end: "09:45"
+      - name: "market_close_volatility"
+        start: "15:45"
+        end: "16:00"
+
+  risk_limits:
+    max_daily_loss_pct: 0.015       # Tighter than paper
+    max_daily_loss_usd: 500         # Hard USD limit
+    max_drawdown_pct: 0.08
+    max_drawdown_usd: 4000
+    max_position_pct: 0.10          # Start conservative
+    max_sector_concentration_pct: 0.30
+    consecutive_loss_limit: 3       # Fewer allowed
+    circuit_breaker: true
+
+  approval_gates:
+    require_manual_approval_first_trade: true
+    require_approval_after_consecutive_losses: 2
+    require_approval_for_position_above_pct: 0.05
+    daily_position_limit: 5         # Max 5 trades per day initially
+
+  kill_switch:
+    enabled: true
+    triggers:
+      - name: "daily_loss_exceeded"
+        condition: "daily_pnl_pct < -max_daily_loss_pct"
+        action: "halt_trading"
+      - name: "drawdown_exceeded"
+        condition: "drawdown_pct > max_drawdown_pct"
+        action: "close_all_positions"
+      - name: "api_disconnection"
+        condition: "no_heartbeat_seconds > 30"
+        action: "halt_trading"
+      - name: "execution_failures"
+        condition: "order_fail_rate > 0.5"
+        action: "halt_trading"
+      - name: "unusual_volatility"
+        condition: "vix > 35"
+        action: "reduce_position_sizes"
+
+  monitoring:
+    heartbeat_interval_seconds: 10
+    position_check_interval_seconds: 30
+    risk_check_interval_seconds: 60
+    alert_on_every_trade: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EXTENDED HOURS TRADING
+# ─────────────────────────────────────────────────────────────────────────────────
+extended_hours:
+  enabled: true
+
+  premarket:
+    enabled: true
+    session: ["04:00", "09:30"]
+    timezone: "America/New_York"
+
+    execution:
+      order_types: ["limit"]        # Limit orders only in PM
+      slippage_multiplier: 2.0      # Double normal slippage
+      max_spread_pct: 0.5           # Max 0.5% bid-ask spread
+
+    risk_limits:
+      max_position_pct: 0.10        # Reduced from 25%
+      min_volume_vs_avg: 0.3        # Require 30% of avg volume
+      max_price_gap_pct: 3.0        # Max 3% gap from prior close
+
+    signals:
+      use_premarket_data: true
+      orb_window: null              # No ORB in premarket
+      momentum_lookback_minutes: 60
+
+  afterhours:
+    enabled: true
+    session: ["16:00", "20:00"]
+    timezone: "America/New_York"
+
+    execution:
+      order_types: ["limit"]
+      slippage_multiplier: 2.5      # Higher in AH
+      max_spread_pct: 0.75
+
+    risk_limits:
+      max_position_pct: 0.05        # Very reduced
+      min_volume_vs_avg: 0.2
+      max_price_gap_pct: 5.0
+
+    signals:
+      use_afterhours_data: true
+      earnings_reaction_enabled: true  # Trade earnings reactions
+      news_reaction_enabled: true
+
+  halt_detection:
+    enabled: true
+    check_interval_seconds: 5
+    sources: ["alpaca", "finnhub"]
+    halt_actions:
+      - "cancel_open_orders"
+      - "log_halt_event"
+      - "alert_user"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# POSITION SIZING METHODS
+# ─────────────────────────────────────────────────────────────────────────────────
+position_sizing:
+  default_method: "kelly_fractional"
+
+  methods:
+    fixed_fractional:
+      description: "Fixed percentage of portfolio per trade"
+      base_pct: 0.05               # 5% base
+      by_signal_strength:
+        strong: 0.08
+        medium: 0.05
+        weak: 0.02
+
+    kelly_criterion:
+      description: "Optimal growth sizing based on edge and odds"
+      full_kelly: false            # Never use full Kelly
+      kelly_fraction: 0.25         # Quarter Kelly
+      max_kelly_position: 0.20
+      min_edge_required: 0.02      # Need 2% edge minimum
+
+    volatility_adjusted:
+      description: "Inverse to volatility for consistent risk"
+      target_volatility_pct: 0.15  # 15% annual vol target
+      atr_period: 14
+      lookback_days: 21
+      formula: "base_pct * (target_vol / realized_vol)"
+      min_position_pct: 0.01
+      max_position_pct: 0.25
+
+    risk_parity:
+      description: "Equal risk contribution per position"
+      target_risk_per_position_pct: 0.005  # 0.5% of portfolio
+      stop_loss_based: true
+
+  adjustments:
+    by_confidence:
+      high_confidence:             # > 0.85
+        multiplier: 1.2
+      medium_confidence:           # 0.70 - 0.85
+        multiplier: 1.0
+      low_confidence:              # < 0.70
+        multiplier: 0.6
+
+    by_regime:
+      high_volatility:             # VIX > 25
+        multiplier: 0.5
+      normal_volatility:           # VIX 15-25
+        multiplier: 1.0
+      low_volatility:              # VIX < 15
+        multiplier: 1.2
+
+    by_consecutive_losses:
+      - losses: 1
+        multiplier: 1.0
+      - losses: 2
+        multiplier: 0.75
+      - losses: 3
+        multiplier: 0.50
+      - losses: 4
+        multiplier: 0.25
+      - losses: 5
+        multiplier: 0.0           # Stop trading
+
+  constraints:
+    max_single_position_pct: 0.25
+    max_sector_concentration_pct: 0.40
+    max_correlated_positions: 3    # Max 3 positions with corr > 0.7
+    min_position_size_usd: 100

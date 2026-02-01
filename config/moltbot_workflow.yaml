@@ -1,0 +1,174 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Moltbot Continuous Build Workflow
+# ═══════════════════════════════════════════════════════════════════════════════
+# This workflow defines step-by-step component building with validation.
+# Run: moltbot agent --workspace "c:\Users\amare\OneDrive\Documents\giga_trader"
+# ═══════════════════════════════════════════════════════════════════════════════
+
+name: giga_trader_build
+description: Continuous component building for ML trading pipeline
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# VALIDATION RULES (applied to every component)
+# ─────────────────────────────────────────────────────────────────────────────────
+validation:
+  pre_edit:
+    - "Syntax check: python -c \"import ast; ast.parse(open('FILE', encoding='utf-8').read())\""
+  post_edit:
+    - "Import check: python -c \"import MODULE\""
+    - "Run tests if available: pytest tests/ -x --tb=short"
+  pre_commit:
+    - "Full run: python src/train_robust_model.py (if training-related)"
+    - "Model verification: Check models/production/ for saved models"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# COMPONENT BUILD ORDER (synchronized dependencies)
+# ─────────────────────────────────────────────────────────────────────────────────
+phases:
+  # Phase 1: Data Infrastructure
+  - name: data_infrastructure
+    priority: 1
+    components:
+      - data_sources/alpaca_client.py       # Real-time + historical
+      - data_sources/yfinance_fallback.py   # Backup data source
+      - data_validation/ohlc_validator.py   # Validate OHLC relationships
+      - data_storage/parquet_manager.py     # Efficient storage
+    validation: "All data tests pass"
+
+  # Phase 2: Feature Engineering
+  - name: feature_engineering
+    priority: 2
+    depends_on: [data_infrastructure]
+    components:
+      - features/technical_indicators.py    # RSI, MACD, BB, etc.
+      - features/extended_hours.py          # Premarket/afterhours (EDGE 2)
+      - features/intraday_patterns.py       # Time-based patterns (EDGE 3)
+      - features/rolling_statistics.py      # Rolling windows
+    validation: "Feature columns match expected count"
+
+  # Phase 3: Dimensionality Reduction
+  - name: dimensionality_reduction
+    priority: 3
+    depends_on: [feature_engineering]
+    components:
+      - reduction/variance_filter.py
+      - reduction/correlation_filter.py
+      - reduction/umap_reducer.py
+      - reduction/kernel_pca.py
+      - reduction/ica_decomposition.py
+      - reduction/kmedoids_clustering.py
+      - reduction/ensemble_reducer.py
+    validation: "Ensemble+ reduces to 30-50 dimensions"
+
+  # Phase 4: Model Training
+  - name: model_training
+    priority: 4
+    depends_on: [dimensionality_reduction]
+    components:
+      - models/swing_predictor.py           # Direction model
+      - models/timing_predictor.py          # Entry/exit timing
+      - models/ensemble_combiner.py         # L2 + GB ensemble
+      - optimization/optuna_tuner.py        # Hyperparameter search
+    validation: "AUC > 0.65, Buy Win Rate > 70%"
+
+  # Phase 5: Risk Management
+  - name: risk_management
+    priority: 5
+    depends_on: [model_training]
+    components:
+      - risk/position_sizer.py              # Batch scaling (EDGE 5)
+      - risk/stop_loss_manager.py
+      - risk/drawdown_monitor.py
+      - risk/consecutive_loss_tracker.py
+    validation: "Risk limits enforced"
+
+  # Phase 6: Signal Generation
+  - name: signal_generation
+    priority: 6
+    depends_on: [risk_management]
+    components:
+      - signals/combined_signal.py          # Dual model agreement
+      - signals/confidence_scorer.py
+      - signals/entry_exit_timing.py
+    validation: "Signals only when both models agree"
+
+  # Phase 7: Backtesting
+  - name: backtesting
+    priority: 7
+    depends_on: [signal_generation]
+    components:
+      - backtest/historical_simulator.py
+      - backtest/performance_metrics.py
+      - backtest/regime_analyzer.py
+    validation: "Sharpe > 0.5, Max Drawdown < 15%"
+
+  # Phase 8: Paper Trading
+  - name: paper_trading
+    priority: 8
+    depends_on: [backtesting]
+    components:
+      - trading/alpaca_paper_trader.py
+      - trading/order_manager.py
+      - trading/position_tracker.py
+    validation: "Paper trades execute correctly"
+
+  # Phase 9: Monitoring
+  - name: monitoring
+    priority: 9
+    depends_on: [paper_trading]
+    components:
+      - monitoring/health_checker.py
+      - monitoring/performance_dashboard.py
+      - monitoring/alert_manager.py
+    validation: "Health checks pass"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# BUILD COMMANDS
+# ─────────────────────────────────────────────────────────────────────────────────
+commands:
+  build_all:
+    description: "Build all components in order"
+    steps:
+      - "for phase in phases: build_phase(phase)"
+
+  build_phase:
+    description: "Build a single phase with validation"
+    steps:
+      - "Check dependencies are complete"
+      - "For each component: read existing, plan changes, implement, validate"
+      - "Run phase validation"
+      - "Mark phase complete"
+
+  validate_all:
+    description: "Run all validation checks"
+    steps:
+      - "python -c \"import ast; ast.parse(open('src/train_robust_model.py', encoding='utf-8').read())\""
+      - "python src/train_robust_model.py"
+      - "Check models/production/ for saved models"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# AGENT INSTRUCTIONS
+# ─────────────────────────────────────────────────────────────────────────────────
+agent_instructions: |
+  You are building the giga_trader ML trading pipeline.
+
+  CRITICAL RULES:
+  1. Every edit MUST be verified to work (run the code after changes)
+  2. Never break existing functionality
+  3. Always use real Alpaca API data (not made-up data)
+  4. Follow the build order - dependencies must be complete first
+  5. Run validation after each component
+
+  WORKFLOW:
+  1. Check current status (what's implemented vs missing)
+  2. Identify next component to build based on dependencies
+  3. Read existing code to understand patterns
+  4. Implement the component following EDGE strategies
+  5. Validate the component works
+  6. Update CLAUDE.md with progress
+  7. Continue to next component
+
+  REFERENCE FILES:
+  - CLAUDE.md: Project rules and strategies
+  - src/train_robust_model.py: Main training pipeline
+  - config/pipeline_status.yaml: Step completion tracker

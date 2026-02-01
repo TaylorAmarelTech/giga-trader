@@ -1,0 +1,318 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# SPY COMPONENT SENTIMENT ANALYZER - Pipeline Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# 10-stage sentiment analysis pipeline for S&P 500 component news
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+pipeline_name: "SPY Component Sentiment Analyzer"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 1: INITIALIZATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_1_initialization:
+  steps:
+    - id: "1.1"
+      name: "Load settings"
+      description: "Load API keys, thresholds, parameters from config/settings.py"
+    - id: "1.2"
+      name: "Initialize universe"
+      description: "Load S&P 500 components (458 tickers with market cap weights)"
+    - id: "1.3"
+      name: "Create NewsOrchestrator"
+      description: "Multi-source news collection manager"
+    - id: "1.4"
+      name: "Create SentimentAnalyzer"
+      description: "Mistral primary LLM, OpenAI/Anthropic fallbacks"
+    - id: "1.5"
+      name: "Create SPYAggregator"
+      description: "Market-cap weighted aggregation"
+    - id: "1.6"
+      name: "Create SignalGenerator"
+      description: "Configurable trading thresholds"
+    - id: "1.7"
+      name: "Initialize database"
+      description: "PostgreSQL primary, SQLite fallback"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 2: TICKER DETERMINATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_2_ticker_determination:
+  default_top_n: 10
+  sort_by: "weight_in_spy"
+  default_tickers:
+    - "AAPL"
+    - "MSFT"
+    - "NVDA"
+    - "AMZN"
+    - "META"
+    - "GOOGL"
+    - "TSLA"
+    - "BRK.B"
+    - "UNH"
+    - "XOM"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 3: NEWS COLLECTION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_3_news_collection:
+  default_lookback_hours: 24
+  sources:
+    alpha_vantage:
+      enabled: true
+      priority: 1
+      ticker_normalization: "BRK.B -> BRK-B"
+      provides_sentiment: true  # Pre-scored -1 to +1
+
+    finnhub:
+      enabled: true
+      priority: 2
+      provides_sentiment: false
+
+    newsapi:
+      enabled: true
+      priority: 3
+      search_by: ["company_name", "ticker"]
+      provides_sentiment: false
+
+  deduplication:
+    method: "content_hash"
+    algorithm: "MD5"
+    fields: ["headline", "content"]
+
+  rate_limiting:
+    delay_between_tickers_ms: 1000
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 4: SENTIMENT ANALYSIS
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_4_sentiment_analysis:
+  llm_providers:
+    primary:
+      provider: "mistral"
+      model: "mistral-large-latest"
+    fallback_1:
+      provider: "openai"
+      model: "gpt-4o-mini"
+    fallback_2:
+      provider: "anthropic"
+      model: "claude-3-haiku"
+
+  prompt_config:
+    max_content_chars: 2000
+    include_fields: ["ticker", "company_name", "headline", "content"]
+
+  output_schema:
+    - name: "positive_score"
+      type: "float"
+      range: [0, 1]
+      description: "Bullish sentiment strength"
+    - name: "negative_score"
+      type: "float"
+      range: [0, 1]
+      description: "Bearish sentiment strength"
+    - name: "neutral_score"
+      type: "float"
+      range: [0, 1]
+      description: "Neutral content"
+    - name: "expectation_score"
+      type: "float"
+      range: [-1, 1]
+      description: "Forward-looking bias"
+    - name: "expectation_confidence"
+      type: "float"
+      range: [0, 1]
+      description: "Confidence in expectation"
+    - name: "key_topics"
+      type: "list[str]"
+      description: "Extracted topics"
+    - name: "reasoning"
+      type: "str"
+      description: "LLM explanation"
+
+  concurrency:
+    max_concurrent_calls: 3
+    retry_attempts: 3
+    backoff_range_seconds: [2, 10]
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 5: COMPONENT AGGREGATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_5_component_aggregation:
+  source_weights:
+    news: 1.5
+    reddit: 0.8
+    twitter: 0.7
+    pre_scored: 1.2
+
+  calculations:
+    - "avg_positive = sum(positive * weight) / sum(weight)"
+    - "avg_negative = sum(negative * weight) / sum(weight)"
+    - "avg_neutral = sum(neutral * weight) / sum(weight)"
+    - "avg_expectation = mean(expectations)"
+    - "net_sentiment = avg_positive - avg_negative"
+    - "sentiment_volatility = stdev(net_sentiments)"
+
+  delta_periods:
+    - "1h"
+    - "24h"
+    - "7d"
+
+  confidence_weights:
+    source_count: 0.40
+    agreement: 0.40
+    expectation_confidence: 0.20
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 6: SPY AGGREGATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_6_spy_aggregation:
+  weighting: "market_cap"
+  normalize_weights: true  # Sum to 1.0
+
+  breadth_thresholds:
+    advancing: 0.05   # net_sentiment > 0.05
+    declining: -0.05  # net_sentiment < -0.05
+
+  momentum_periods:
+    short: 3   # days
+    medium: 10  # days
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 7: SIGNAL GENERATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_7_signal_generation:
+  cooldown:
+    min_hours_between_signals: 4
+    significant_change_threshold: 0.2
+
+  thresholds:
+    strong_buy:
+      net_sentiment: 0.7
+      expectation: 0.5
+    buy:
+      net_sentiment: 0.4
+      expectation: 0.2
+    sell:
+      net_sentiment: -0.4
+      expectation: -0.2
+    strong_sell:
+      net_sentiment: -0.7
+      expectation: -0.5
+
+  strength_weights:
+    net_sentiment: 0.70
+    expectation: 0.30
+
+  position_sizing:
+    base_pct: 0.05  # 5% of portfolio
+    max_pct: 0.20   # 20% max
+    volatility_reduction_threshold: 0.10
+
+  risk_parameters:
+    default:
+      stop_loss: 0.02   # 2%
+      take_profit: 0.03  # 3%
+    strong_signal:
+      stop_loss: 0.03   # 3%
+      take_profit: 0.06  # 6%
+
+  holding_period:
+    base_days: 5
+    strong_momentum_days: 3
+    weak_momentum_days: 10
+    range: [3, 20]
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 8: DATABASE STORAGE
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_8_database:
+  tables:
+    trading_signals:
+      fields:
+        - "signal_type"
+        - "direction"
+        - "strength"
+        - "confidence"
+        - "sentiment_factors"  # JSON
+        - "position_size"
+        - "stop_loss"
+        - "take_profit"
+        - "holding_period"
+
+    component_sentiment:
+      fields:
+        - "ticker"
+        - "positive_score"
+        - "negative_score"
+        - "neutral_score"
+        - "expectation"
+        - "volatility"
+        - "deltas"
+        - "source_breakdown"
+
+    spy_sentiment_index:
+      fields:
+        - "weighted_sentiment"
+        - "breadth_indicators"
+        - "sector_breakdown"
+        - "momentum_indicators"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 9: TRADING EXECUTION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_9_trading:
+  modes:
+    - name: "SIMULATION"
+      description: "No actual orders, logging only"
+    - name: "PAPER"
+      description: "Alpaca paper trading account"
+    - name: "LIVE"
+      description: "Real money trading"
+
+  default_mode: "PAPER"
+
+  execution_rules:
+    buy:
+      calculation: "(portfolio * position_pct) / price"
+      order_type: "market"
+    sell:
+      calculation: "Reduce position by 50%"
+      order_type: "market"
+    strong_sell:
+      action: "Close entire position"
+      order_type: "market"
+    hold:
+      action: "No action"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STAGE 10: AUTONOMOUS OPERATION
+# ─────────────────────────────────────────────────────────────────────────────────
+stage_10_autonomous:
+  intervals:
+    health_check_seconds: 60
+    signal_generation_seconds: 3600  # 1 hour
+
+  health_checks:
+    - "Database connectivity"
+    - "Collector rate limits"
+    - "Pending/completed task counts"
+
+  task_priorities:
+    - "CRITICAL"
+    - "HIGH"
+    - "NORMAL"
+    - "LOW"
+
+  error_recovery:
+    max_retries: 3
+    actions: ["retry", "skip", "modify_params", "escalate"]
+    advisor: "Claude CLI"
+
+  task_types:
+    - name: "collection"
+      description: "Run news collection only"
+    - name: "analysis"
+      description: "Run sentiment analysis only"
+    - name: "signal_generation"
+      description: "Run full pipeline"

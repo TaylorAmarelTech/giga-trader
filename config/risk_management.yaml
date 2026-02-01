@@ -1,0 +1,280 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Risk Management Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Regime-aware risk limits with dynamic adjustment
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# REGIME DETECTION
+# ─────────────────────────────────────────────────────────────────────────────────
+regime_detection:
+  volatility_regime:
+    indicator: "VIX"
+    thresholds:
+      low: 15
+      normal: 25
+      high: 35
+      extreme: 50
+
+  trend_regime:
+    indicator: "SPY_vs_SMA50"
+    thresholds:
+      strong_bull: 0.05       # > 5% above SMA50
+      bull: 0.02
+      neutral: -0.02
+      bear: -0.05
+      strong_bear: -0.10
+
+  breadth_regime:
+    indicator: "pct_above_sma20"
+    thresholds:
+      strong: 0.70
+      healthy: 0.50
+      weak: 0.30
+      very_weak: 0.20
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# REGIME-BASED RISK LIMITS
+# ─────────────────────────────────────────────────────────────────────────────────
+risk_limits_by_regime:
+
+  low_volatility:                   # VIX < 15
+    description: "Complacent market - opportunity for larger positions"
+    max_daily_loss_pct: 0.025
+    max_drawdown_pct: 0.12
+    max_position_pct: 0.30
+    consecutive_loss_limit: 6
+    stop_loss_pct: 0.015            # Tighter stops in calm markets
+    take_profit_pct: 0.025
+    signal_threshold_adjustment: -0.1  # Lower thresholds
+
+  normal_volatility:                # VIX 15-25
+    description: "Standard market conditions"
+    max_daily_loss_pct: 0.02
+    max_drawdown_pct: 0.10
+    max_position_pct: 0.25
+    consecutive_loss_limit: 5
+    stop_loss_pct: 0.02
+    take_profit_pct: 0.04
+    signal_threshold_adjustment: 0.0
+
+  high_volatility:                  # VIX 25-35
+    description: "Elevated uncertainty - reduce exposure"
+    max_daily_loss_pct: 0.015
+    max_drawdown_pct: 0.08
+    max_position_pct: 0.15
+    consecutive_loss_limit: 3
+    stop_loss_pct: 0.03             # Wider stops for volatility
+    take_profit_pct: 0.06
+    signal_threshold_adjustment: 0.15  # Higher thresholds needed
+
+  extreme_volatility:               # VIX > 35
+    description: "Crisis conditions - capital preservation mode"
+    max_daily_loss_pct: 0.01
+    max_drawdown_pct: 0.05
+    max_position_pct: 0.05
+    consecutive_loss_limit: 2
+    stop_loss_pct: 0.05             # Very wide stops
+    take_profit_pct: 0.10           # Large targets if trading
+    signal_threshold_adjustment: 0.25
+    prefer_cash: true               # Stay mostly in cash
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STOP LOSS CONFIGURATIONS
+# ─────────────────────────────────────────────────────────────────────────────────
+stop_loss:
+  methods:
+    fixed_percentage:
+      enabled: true
+      default_pct: 0.02
+      strong_signal_pct: 0.03
+      weak_signal_pct: 0.015
+
+    atr_based:
+      enabled: true
+      atr_period: 14
+      atr_multiplier: 2.0
+      max_stop_pct: 0.05
+      min_stop_pct: 0.01
+
+    trailing:
+      enabled: true
+      activation_pct: 0.02          # Activate after 2% gain
+      trail_pct: 0.01               # Trail by 1%
+      step_size: 0.005              # Move stop in 0.5% increments
+
+    time_based:
+      enabled: true
+      max_holding_minutes: 210      # 3.5 hours (12:30 to 16:00)
+      force_exit_time: "15:55"      # Exit by 3:55 PM
+
+  execution:
+    use_stop_orders: true
+    stop_order_type: "stop_market"  # vs stop_limit
+    slippage_buffer_pct: 0.1        # Add 0.1% buffer for execution
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# TAKE PROFIT CONFIGURATIONS
+# ─────────────────────────────────────────────────────────────────────────────────
+take_profit:
+  methods:
+    fixed_percentage:
+      enabled: true
+      default_pct: 0.04
+      strong_signal_pct: 0.06
+      weak_signal_pct: 0.02
+
+    risk_reward_ratio:
+      enabled: true
+      default_ratio: 2.0            # 2:1 reward:risk
+      strong_signal_ratio: 2.5
+      weak_signal_ratio: 1.5
+
+    scaled_exit:
+      enabled: true
+      levels:
+        - at_pct: 0.02
+          exit_pct: 0.25            # Exit 25% at +2%
+        - at_pct: 0.04
+          exit_pct: 0.50            # Exit 50% at +4%
+        - at_pct: 0.06
+          exit_pct: 0.25            # Exit 25% at +6%
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CIRCUIT BREAKERS
+# ─────────────────────────────────────────────────────────────────────────────────
+circuit_breakers:
+  daily_loss:
+    enabled: true
+    trigger_pct: 0.02               # 2% daily loss
+    action: "halt_new_trades"
+    cooldown_hours: 24
+
+  drawdown:
+    enabled: true
+    trigger_pct: 0.10               # 10% drawdown
+    action: "close_all_positions"
+    require_manual_reset: true
+
+  consecutive_losses:
+    enabled: true
+    trigger_count: 5
+    action: "halt_new_trades"
+    cooldown_hours: 48
+
+  volatility_spike:
+    enabled: true
+    trigger_vix: 40
+    action: "reduce_positions_50pct"
+
+  market_halt:
+    enabled: true
+    monitor: true
+    action: "cancel_open_orders"
+
+  api_failure:
+    enabled: true
+    trigger_failed_calls: 3
+    action: "halt_trading"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CORRELATION & CONCENTRATION LIMITS
+# ─────────────────────────────────────────────────────────────────────────────────
+concentration:
+  max_single_position_pct: 0.25
+  max_sector_pct: 0.40
+  max_correlated_positions: 3       # Positions with corr > 0.7
+  correlation_lookback_days: 60
+  correlation_threshold: 0.7
+
+  sector_limits:
+    technology: 0.40
+    financials: 0.30
+    healthcare: 0.30
+    consumer_discretionary: 0.30
+    industrials: 0.25
+    energy: 0.20
+    materials: 0.15
+    utilities: 0.15
+    real_estate: 0.15
+    consumer_staples: 0.20
+    communication_services: 0.25
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ENTRY TIMING RULES
+# ─────────────────────────────────────────────────────────────────────────────────
+entry_timing:
+  base_entry_time: "12:30"
+
+  adjustments:
+    fomc_day:
+      action: "no_trading"
+      note: "Avoid FOMC volatility"
+
+    jobs_report_day:
+      delay_until: "10:00"
+      note: "Wait for jobs reaction"
+
+    cpi_day:
+      delay_until: "09:00"
+      note: "Wait for CPI reaction"
+
+    high_volatility:
+      allow_early_entry: true
+      early_entry_time: "11:00"
+      note: "Capture early momentum"
+
+    earnings_week:
+      reduce_position: 0.5
+      note: "Component earnings risk"
+
+  no_trade_windows:
+    - name: "market_open"
+      start: "09:30"
+      end: "09:45"
+      reason: "Opening volatility"
+
+    - name: "market_close"
+      start: "15:50"
+      end: "16:00"
+      reason: "Closing imbalance"
+
+    - name: "lunch_lull"
+      start: "12:00"
+      end: "12:30"
+      reason: "Low liquidity (optional)"
+      enabled: false
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# RECOVERY RULES
+# ─────────────────────────────────────────────────────────────────────────────────
+recovery:
+  after_circuit_breaker:
+    cooldown_hours: 24
+    first_trade_position_pct: 0.05  # Start small
+    scaling_period_days: 5
+    scaling_increments:
+      - day: 1
+        max_position_pct: 0.05
+      - day: 2
+        max_position_pct: 0.10
+      - day: 3
+        max_position_pct: 0.15
+      - day: 5
+        max_position_pct: 0.25     # Back to normal
+
+  after_consecutive_losses:
+    reduce_size_per_loss: 0.20     # Reduce 20% per loss
+    minimum_size_pct: 0.25         # Floor at 25% of normal
+    recovery_wins_needed: 2        # 2 wins to reset
+
+  after_drawdown:
+    stages:
+      - drawdown_pct: 0.05
+        action: "reduce_size_25pct"
+      - drawdown_pct: 0.08
+        action: "reduce_size_50pct"
+      - drawdown_pct: 0.10
+        action: "halt_trading"

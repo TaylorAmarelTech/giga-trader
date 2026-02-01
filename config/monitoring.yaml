@@ -1,0 +1,385 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Monitoring & Alerting Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Real-time monitoring, drift detection, and multi-channel alerting
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+enabled: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# HEALTH CHECKS
+# ─────────────────────────────────────────────────────────────────────────────────
+health_checks:
+  interval_seconds: 60
+
+  checks:
+    - name: "database_connectivity"
+      type: "ping"
+      target: "database"
+      timeout_seconds: 5
+      critical: true
+
+    - name: "broker_api"
+      type: "api_call"
+      target: "alpaca"
+      endpoint: "/v2/account"
+      timeout_seconds: 10
+      critical: true
+
+    - name: "data_feed"
+      type: "data_freshness"
+      target: "market_data"
+      max_age_seconds: 60
+      critical: true
+
+    - name: "model_service"
+      type: "ping"
+      target: "model_server"
+      timeout_seconds: 5
+      critical: false
+
+    - name: "disk_space"
+      type: "threshold"
+      metric: "disk_free_pct"
+      threshold: 0.10
+      critical: false
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# MODEL PERFORMANCE MONITORING
+# ─────────────────────────────────────────────────────────────────────────────────
+model_monitoring:
+  enabled: true
+  check_interval_minutes: 60
+
+  metrics:
+    - name: "auc_roc"
+      baseline: 0.58
+      warning_threshold: 0.55
+      critical_threshold: 0.52
+      window_days: 7
+
+    - name: "precision"
+      baseline: 0.55
+      warning_threshold: 0.50
+      critical_threshold: 0.45
+      window_days: 7
+
+    - name: "recall"
+      baseline: 0.60
+      warning_threshold: 0.55
+      critical_threshold: 0.50
+      window_days: 7
+
+    - name: "win_rate"
+      baseline: 0.55
+      warning_threshold: 0.52
+      critical_threshold: 0.48
+      window_days: 14
+
+  drift_detection:
+    enabled: true
+    method: "psi"                   # Population Stability Index
+    threshold: 0.10                 # PSI > 0.1 indicates drift
+    check_features: true
+    check_predictions: true
+    window_days: 30
+    reference_window_days: 90
+
+  degradation_actions:
+    on_warning:
+      - "log_event"
+      - "send_alert"
+    on_critical:
+      - "log_event"
+      - "send_alert"
+      - "reduce_position_sizes"
+      - "trigger_retraining_flag"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# SIGNAL QUALITY MONITORING
+# ─────────────────────────────────────────────────────────────────────────────────
+signal_monitoring:
+  enabled: true
+  check_interval_minutes: 30
+
+  metrics:
+    - name: "signal_accuracy"
+      description: "Percentage of correct signal directions"
+      window_trades: 20
+      warning_threshold: 0.50
+      critical_threshold: 0.45
+
+    - name: "average_confidence"
+      description: "Mean signal confidence score"
+      window_signals: 50
+      warning_threshold: 0.65
+      critical_threshold: 0.55
+
+    - name: "strength_distribution"
+      description: "Distribution of signal strengths"
+      check_for: "concentration"    # Alert if all signals weak or strong
+      concentration_threshold: 0.80
+
+    - name: "signal_frequency"
+      description: "Signals per day"
+      expected_range: [0.5, 3.0]    # 0.5 to 3 signals per day
+      alert_on_deviation: true
+
+  quality_flags:
+    - name: "low_confidence_streak"
+      trigger: "5_consecutive_below_0.7"
+      action: "send_alert"
+
+    - name: "reversal_frequency"
+      trigger: "direction_change_within_2_hours"
+      action: "log_warning"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EXECUTION QUALITY MONITORING
+# ─────────────────────────────────────────────────────────────────────────────────
+execution_monitoring:
+  enabled: true
+  check_interval_minutes: 15
+
+  metrics:
+    - name: "fill_rate"
+      description: "Percentage of orders filled"
+      warning_threshold: 0.95
+      critical_threshold: 0.90
+
+    - name: "average_slippage_bps"
+      description: "Average slippage in basis points"
+      warning_threshold: 10
+      critical_threshold: 20
+
+    - name: "order_latency_ms"
+      description: "Time from signal to order submission"
+      warning_threshold: 1000
+      critical_threshold: 5000
+
+    - name: "rejection_rate"
+      description: "Percentage of rejected orders"
+      warning_threshold: 0.05
+      critical_threshold: 0.10
+
+  slippage_analysis:
+    track_by_time_of_day: true
+    track_by_volatility: true
+    track_by_order_size: true
+    report_frequency: "daily"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# RISK MONITORING
+# ─────────────────────────────────────────────────────────────────────────────────
+risk_monitoring:
+  enabled: true
+  check_interval_minutes: 5
+
+  metrics:
+    - name: "daily_pnl_pct"
+      warning_threshold: -0.015
+      critical_threshold: -0.02
+
+    - name: "drawdown_pct"
+      warning_threshold: -0.07
+      critical_threshold: -0.10
+
+    - name: "position_concentration"
+      description: "Largest position as % of portfolio"
+      warning_threshold: 0.20
+      critical_threshold: 0.25
+
+    - name: "sector_concentration"
+      warning_threshold: 0.35
+      critical_threshold: 0.40
+
+    - name: "correlation_exposure"
+      description: "Sum of correlated position weights"
+      warning_threshold: 0.50
+      critical_threshold: 0.70
+
+  real_time_tracking:
+    unrealized_pnl: true
+    realized_pnl: true
+    open_positions: true
+    pending_orders: true
+    buying_power: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ALERTING CHANNELS
+# ─────────────────────────────────────────────────────────────────────────────────
+alerting:
+  enabled: true
+
+  channels:
+    email:
+      enabled: true
+      recipients:
+        - "${ALERT_EMAIL}"
+      smtp:
+        host: "${SMTP_HOST}"
+        port: 587
+        user: "${SMTP_USER}"
+        password: "${SMTP_PASSWORD}"
+      rate_limit:
+        max_per_hour: 10
+        cooldown_minutes: 5
+
+    slack:
+      enabled: false
+      webhook_url: "${SLACK_WEBHOOK_URL}"
+      channel: "#trading-alerts"
+      rate_limit:
+        max_per_hour: 20
+        cooldown_minutes: 2
+
+    discord:
+      enabled: false
+      webhook_url: "${DISCORD_WEBHOOK_URL}"
+      rate_limit:
+        max_per_hour: 20
+        cooldown_minutes: 2
+
+    telegram:
+      enabled: false
+      bot_token: "${TELEGRAM_BOT_TOKEN}"
+      chat_id: "${TELEGRAM_CHAT_ID}"
+      rate_limit:
+        max_per_hour: 30
+        cooldown_minutes: 1
+
+    sms:
+      enabled: false
+      provider: "twilio"
+      to_number: "${SMS_ALERT_NUMBER}"
+      from_number: "${TWILIO_NUMBER}"
+      rate_limit:
+        max_per_day: 10
+        cooldown_minutes: 30
+
+  severity_routing:
+    critical:
+      channels: ["email", "slack", "sms"]
+      immediate: true
+    warning:
+      channels: ["email", "slack"]
+      batch_minutes: 15
+    info:
+      channels: ["slack"]
+      batch_minutes: 60
+
+  alert_types:
+    - name: "circuit_breaker_triggered"
+      severity: "critical"
+      message_template: "CIRCUIT BREAKER: {reason} - Trading halted"
+
+    - name: "model_drift_detected"
+      severity: "warning"
+      message_template: "Model drift detected: PSI={psi_score:.3f}"
+
+    - name: "execution_failure"
+      severity: "critical"
+      message_template: "Order execution failed: {order_id} - {error}"
+
+    - name: "daily_summary"
+      severity: "info"
+      schedule: "16:30"
+      message_template: "Daily P&L: {pnl_pct:.2%}, Trades: {trade_count}"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# DASHBOARDS
+# ─────────────────────────────────────────────────────────────────────────────────
+dashboards:
+  realtime:
+    enabled: true
+    port: 8080
+    refresh_seconds: 5
+
+    panels:
+      - name: "Portfolio Overview"
+        metrics: ["equity", "cash", "buying_power", "unrealized_pnl"]
+
+      - name: "Open Positions"
+        metrics: ["symbol", "qty", "entry_price", "current_price", "pnl_pct"]
+
+      - name: "Today's Performance"
+        metrics: ["realized_pnl", "unrealized_pnl", "trade_count", "win_rate"]
+
+      - name: "Signal Status"
+        metrics: ["current_signal", "confidence", "strength", "last_updated"]
+
+      - name: "Risk Metrics"
+        metrics: ["drawdown", "daily_loss", "position_concentration"]
+
+      - name: "Model Health"
+        metrics: ["auc", "precision", "recall", "drift_score"]
+
+  reports:
+    daily:
+      enabled: true
+      generate_time: "17:00"
+      format: ["html", "csv"]
+      include:
+        - "performance_summary"
+        - "trade_log"
+        - "signal_log"
+        - "risk_metrics"
+
+    weekly:
+      enabled: true
+      generate_day: "Friday"
+      generate_time: "17:00"
+      format: ["html", "pdf"]
+      include:
+        - "performance_summary"
+        - "model_performance"
+        - "execution_quality"
+        - "risk_analysis"
+
+    monthly:
+      enabled: true
+      generate_day: 1
+      generate_time: "09:00"
+      format: ["html", "pdf"]
+      include:
+        - "comprehensive_analysis"
+        - "attribution_report"
+        - "benchmark_comparison"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# LOGGING
+# ─────────────────────────────────────────────────────────────────────────────────
+logging:
+  level: "INFO"
+  format: "%(asctime)s | %(levelname)-8s | %(name)-20s | %(message)s"
+
+  handlers:
+    console:
+      enabled: true
+      level: "INFO"
+
+    file:
+      enabled: true
+      level: "DEBUG"
+      path: "logs/giga_trader_{date}.log"
+      rotation: "daily"
+      retention_days: 30
+
+    structured:
+      enabled: true
+      format: "json"
+      path: "logs/structured_{date}.jsonl"
+      include_metrics: true
+
+  log_events:
+    - "signal_generated"
+    - "order_submitted"
+    - "order_filled"
+    - "order_rejected"
+    - "position_opened"
+    - "position_closed"
+    - "stop_triggered"
+    - "circuit_breaker_activated"
+    - "model_retrained"
+    - "alert_sent"

@@ -1,0 +1,535 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Complete Pipeline Status Tracker
+# ═══════════════════════════════════════════════════════════════════════════════
+# 217 total steps | 148 done (68%) | 13 partial (6%) | 56 missing (26%)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+last_updated: "2026-01-29"
+
+summary:
+  total_steps: 217
+  done: 148
+  partial: 13
+  missing: 56
+  done_pct: 68
+  partial_pct: 6
+  missing_pct: 26
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 1: DATA INFRASTRUCTURE (13 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_1_data_infrastructure:
+  total: 13
+  done: 5
+  partial: 0
+  missing: 8
+
+  data_sources:
+    - id: "1.1.1"
+      name: "Alpaca API connection"
+      description: "Real-time and historical market data"
+      status: "done"
+
+    - id: "1.1.2"
+      name: "Extended hours data"
+      description: "4:00 AM - 8:00 PM ET coverage"
+      status: "done"
+
+    - id: "1.1.3"
+      name: "Cross-asset data"
+      description: "QQQ, IWM, VIX, sector ETFs"
+      status: "done"
+
+    - id: "1.1.4"
+      name: "News/Sentiment APIs"
+      description: "Bloomberg, Reuters, Benzinga"
+      status: "missing"
+      priority: "high"
+
+    - id: "1.1.5"
+      name: "Social sentiment"
+      description: "Reddit (r/wallstreetbets), Twitter/X"
+      status: "missing"
+      priority: "medium"
+
+    - id: "1.1.6"
+      name: "SEC EDGAR filings"
+      description: "10-K, 10-Q, 8-K parsing"
+      status: "missing"
+      priority: "low"
+
+    - id: "1.1.7"
+      name: "FRED economic data"
+      description: "GDP, unemployment, CPI, Fed funds"
+      status: "missing"
+      priority: "medium"
+
+    - id: "1.1.8"
+      name: "Options data feed"
+      description: "OPRA, CBOE options chains"
+      status: "missing"
+      priority: "high"
+
+  data_storage:
+    - id: "1.2.1"
+      name: "Parquet storage"
+      description: "Columnar format for time series"
+      status: "done"
+
+    - id: "1.2.2"
+      name: "CSV backup"
+      description: "Human-readable backup"
+      status: "done"
+
+    - id: "1.2.3"
+      name: "Feature caching"
+      description: "Avoid recomputation"
+      status: "done"
+
+    - id: "1.2.4"
+      name: "Time-series DB"
+      description: "TimescaleDB/InfluxDB for tick data"
+      status: "missing"
+      priority: "medium"
+
+    - id: "1.2.5"
+      name: "Redis caching"
+      description: "In-memory feature cache"
+      status: "missing"
+      priority: "low"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 2: DATA COLLECTION & PREPROCESSING (9 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_2_data_preprocessing:
+  total: 9
+  done: 4
+  partial: 1
+  missing: 4
+
+  raw_data:
+    - id: "2.1.1"
+      name: "Historical OHLCV"
+      description: "5+ years daily/intraday"
+      status: "done"
+
+    - id: "2.1.2"
+      name: "Intraday data"
+      description: "1-minute, 5-minute bars"
+      status: "done"
+
+    - id: "2.1.3"
+      name: "Corporate actions"
+      description: "Splits, dividends, spinoffs"
+      status: "missing"
+      priority: "high"
+
+    - id: "2.1.4"
+      name: "Options chains"
+      description: "Strikes, expirations, greeks"
+      status: "missing"
+      priority: "high"
+
+  data_quality:
+    - id: "2.2.1"
+      name: "Missing value detection"
+      description: "Gaps, holidays, halts"
+      status: "done"
+
+    - id: "2.2.2"
+      name: "Outlier detection"
+      description: "Z-score, IQR filtering"
+      status: "partial"
+
+    - id: "2.2.3"
+      name: "Timestamp validation"
+      description: "Timezone handling, DST"
+      status: "done"
+
+    - id: "2.2.4"
+      name: "Split/dividend adjustment"
+      description: "Adjusted close calculation"
+      status: "missing"
+      priority: "high"
+
+    - id: "2.2.5"
+      name: "Cross-source reconciliation"
+      description: "Multiple data source validation"
+      status: "missing"
+      priority: "medium"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 3: UNIVERSE MANAGEMENT (8 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_3_universe:
+  total: 8
+  done: 5
+  partial: 1
+  missing: 2
+
+  sp500_tracking:
+    - id: "3.1.1"
+      name: "Current constituents"
+      description: "Live S&P 500 list"
+      status: "done"
+
+    - id: "3.1.2"
+      name: "Historical constituents"
+      description: "Point-in-time membership (survivorship bias)"
+      status: "missing"
+      priority: "critical"
+      note: "Required to eliminate survivorship bias"
+
+    - id: "3.1.3"
+      name: "Sector classifications"
+      description: "GICS sector mapping"
+      status: "partial"
+
+    - id: "3.1.4"
+      name: "Liquidity filters"
+      description: "Volume, spread thresholds"
+      status: "missing"
+      priority: "medium"
+
+  synthetic_index:
+    - id: "3.2.1"
+      name: "Equal-weight SPY"
+      description: "Alternative weighting scheme"
+      status: "done"
+
+    - id: "3.2.2"
+      name: "Sector-excluded SPY"
+      description: "Tech-ex, financials-ex variants"
+      status: "done"
+
+    - id: "3.2.3"
+      name: "Noise-injected variants"
+      description: "100+ synthetic alternatives"
+      status: "done"
+
+    - id: "3.2.4"
+      name: "Block bootstrap"
+      description: "Stationary bootstrap resampling"
+      status: "done"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 4: FEATURE ENGINEERING - PRICE/VOLUME (18 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_4_price_volume_features:
+  total: 18
+  done: 15
+  partial: 2
+  missing: 1
+
+  returns:
+    - id: "4.1.1"
+      name: "Multi-horizon returns"
+      description: "1d, 5d, 21d, 63d, 252d"
+      status: "done"
+
+    - id: "4.1.2"
+      name: "Log returns"
+      description: "Continuous compounding"
+      status: "done"
+
+    - id: "4.1.3"
+      name: "Cumulative returns"
+      description: "Running total return"
+      status: "done"
+
+  moving_averages:
+    - id: "4.2.1"
+      name: "SMA"
+      description: "5, 10, 20, 50, 200 day"
+      status: "done"
+
+    - id: "4.2.2"
+      name: "EMA"
+      description: "Exponential weighted"
+      status: "done"
+
+    - id: "4.2.3"
+      name: "Price vs MA"
+      description: "Distance from moving averages"
+      status: "done"
+
+  momentum_oscillators:
+    - id: "4.3.1"
+      name: "RSI"
+      description: "Relative Strength Index (14-period)"
+      status: "done"
+
+    - id: "4.3.2"
+      name: "MACD"
+      description: "Moving Average Convergence Divergence"
+      status: "done"
+
+    - id: "4.3.3"
+      name: "Bollinger Bands"
+      description: "2 std deviation bands"
+      status: "done"
+
+    - id: "4.3.4"
+      name: "Stochastic"
+      description: "%K, %D oscillator"
+      status: "done"
+
+  volume:
+    - id: "4.4.1"
+      name: "Volume ratios"
+      description: "vs 20-day average"
+      status: "done"
+
+    - id: "4.4.2"
+      name: "VWAP"
+      description: "Volume Weighted Average Price"
+      status: "done"
+
+    - id: "4.4.3"
+      name: "OBV"
+      description: "On Balance Volume"
+      status: "partial"
+
+    - id: "4.4.4"
+      name: "MFI"
+      description: "Money Flow Index"
+      status: "partial"
+
+  volatility:
+    - id: "4.5.1"
+      name: "ATR"
+      description: "Average True Range"
+      status: "done"
+
+    - id: "4.5.2"
+      name: "Historical volatility"
+      description: "Rolling std of returns"
+      status: "done"
+
+    - id: "4.5.3"
+      name: "Parkinson volatility"
+      description: "High-low based"
+      status: "done"
+
+    - id: "4.5.4"
+      name: "Candlestick patterns"
+      description: "Doji, hammer, engulfing"
+      status: "done"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 5: FEATURE ENGINEERING - BREADTH/STREAK (15 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_5_breadth_streak:
+  total: 15
+  done: 15
+  partial: 0
+  missing: 0
+
+  basic_streak:
+    - id: "5.1.1"
+      name: "% with 1 consecutive green day"
+      status: "done"
+    - id: "5.1.2"
+      name: "% with 2 consecutive green days"
+      status: "done"
+    - id: "5.1.3"
+      name: "% with 3 consecutive green days"
+      status: "done"
+    - id: "5.1.4"
+      name: "% with 5 consecutive green days"
+      status: "done"
+    - id: "5.1.5"
+      name: "% with N consecutive red days"
+      status: "done"
+    - id: "5.1.6"
+      name: "Average streak length"
+      status: "done"
+    - id: "5.1.7"
+      name: "Max streak in universe"
+      status: "done"
+
+  advanced_streak:
+    - id: "5.2.1"
+      name: "Market-cap weighted streaks"
+      description: "Mega/large/mid/small cap"
+      status: "done"
+    - id: "5.2.2"
+      name: "Sector streak features"
+      description: "11 GICS sectors"
+      status: "done"
+    - id: "5.2.3"
+      name: "Cyclical vs defensive spread"
+      status: "done"
+    - id: "5.2.4"
+      name: "Streak momentum"
+      status: "done"
+    - id: "5.2.5"
+      name: "Streak acceleration"
+      status: "done"
+    - id: "5.2.6"
+      name: "Historical streak percentile"
+      status: "done"
+    - id: "5.2.7"
+      name: "McClellan Oscillator"
+      status: "done"
+    - id: "5.2.8"
+      name: "McClellan Summation Index"
+      status: "done"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 6: FEATURE ENGINEERING - SENTIMENT (15 steps)
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_6_sentiment:
+  total: 15
+  done: 8
+  partial: 0
+  missing: 7
+
+  news_sentiment:
+    - id: "6.1.1"
+      name: "News headline sentiment"
+      description: "NLP scoring"
+      status: "missing"
+      priority: "high"
+
+    - id: "6.1.2"
+      name: "News volume"
+      description: "Article count spike detection"
+      status: "missing"
+      priority: "medium"
+
+    - id: "6.1.3"
+      name: "Component-level news"
+      description: "Per-stock sentiment aggregation"
+      status: "missing"
+      priority: "high"
+
+  social_sentiment:
+    - id: "6.2.1"
+      name: "Reddit sentiment"
+      description: "WSB, investing subreddits"
+      status: "missing"
+      priority: "medium"
+
+    - id: "6.2.2"
+      name: "Twitter/X sentiment"
+      description: "Cashtag volume and tone"
+      status: "missing"
+      priority: "medium"
+
+  options_sentiment:
+    - id: "6.3.1"
+      name: "Put/Call ratio (equity)"
+      status: "done"
+    - id: "6.3.2"
+      name: "Put/Call ratio (index)"
+      status: "done"
+    - id: "6.3.3"
+      name: "Put/Call ratio (volume)"
+      status: "done"
+    - id: "6.3.4"
+      name: "Put/Call ratio (open interest)"
+      status: "done"
+    - id: "6.3.5"
+      name: "IV skew"
+      description: "25-delta put-call spread"
+      status: "done"
+    - id: "6.3.6"
+      name: "IV term structure"
+      status: "done"
+    - id: "6.3.7"
+      name: "Unusual options activity"
+      status: "done"
+    - id: "6.3.8"
+      name: "Gamma exposure"
+      status: "done"
+
+  event_features:
+    - id: "6.4.1"
+      name: "FOMC meeting flags"
+      status: "missing"
+      priority: "high"
+
+    - id: "6.4.2"
+      name: "Earnings season flags"
+      status: "missing"
+      priority: "high"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 7: FEATURE ENGINEERING - EXTENDED HOURS (23 steps) - ALL DONE
+# ─────────────────────────────────────────────────────────────────────────────────
+phase_7_extended_hours:
+  total: 23
+  done: 23
+  partial: 0
+  missing: 0
+  note: "All extended hours features complete"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# PHASE 8-14: See full breakdown in docs/pipeline_phases.md
+# ─────────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CRITICAL MISSING ITEMS (Priority: Critical/High)
+# ─────────────────────────────────────────────────────────────────────────────────
+critical_missing:
+  - id: "3.1.2"
+    name: "Historical S&P 500 constituents"
+    reason: "Survivorship bias elimination"
+    priority: "critical"
+
+  - id: "1.1.4"
+    name: "News/Sentiment APIs"
+    reason: "Core sentiment data source"
+    priority: "high"
+
+  - id: "1.1.8"
+    name: "Options data feed"
+    reason: "Options flow signals"
+    priority: "high"
+
+  - id: "2.1.3"
+    name: "Corporate actions"
+    reason: "Data accuracy"
+    priority: "high"
+
+  - id: "6.1.1"
+    name: "News headline sentiment"
+    reason: "Sentiment feature"
+    priority: "high"
+
+  - id: "6.4.1"
+    name: "FOMC meeting flags"
+    reason: "Event-driven trading"
+    priority: "high"
+
+  - id: "21.x"
+    name: "Monitoring & Alerting"
+    reason: "Production readiness"
+    priority: "high"
+    note: "0/4 steps complete"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# NEXT ACTIONS
+# ─────────────────────────────────────────────────────────────────────────────────
+next_actions:
+  - priority: 1
+    action: "Implement historical S&P 500 constituents (survivorship bias)"
+    effort: "medium"
+
+  - priority: 2
+    action: "Integrate news sentiment APIs (Alpha Vantage, Finnhub)"
+    effort: "medium"
+
+  - priority: 3
+    action: "Add FOMC/earnings calendar features"
+    effort: "low"
+
+  - priority: 4
+    action: "Build monitoring dashboard"
+    effort: "high"
+
+  - priority: 5
+    action: "Complete options data integration"
+    effort: "high"

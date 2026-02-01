@@ -1,0 +1,329 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# GIGA TRADER - Data Sources Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Multi-source data acquisition with fallback chains and reconciliation
+# ═══════════════════════════════════════════════════════════════════════════════
+
+version: "1.0"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# MARKET DATA SOURCES
+# ─────────────────────────────────────────────────────────────────────────────────
+market_data:
+  primary:
+    provider: "alpaca"
+    data_types: ["ohlcv", "quotes", "trades"]
+    timeframes: ["1Min", "5Min", "15Min", "1D"]
+    api_key: "${ALPACA_API_KEY}"
+    api_secret: "${ALPACA_SECRET_KEY}"
+    base_url: "https://data.alpaca.markets"
+    rate_limit:
+      requests_per_minute: 200
+      burst_limit: 10
+
+  fallbacks:
+    - order: 1
+      provider: "yfinance"
+      data_types: ["ohlcv"]
+      timeframes: ["1Min", "5Min", "15Min", "1D"]
+      trigger_conditions:
+        - "primary_timeout_seconds > 5"
+        - "primary_error_count > 3"
+      rate_limit:
+        requests_per_minute: 60
+        cooldown_seconds: 1
+
+    - order: 2
+      provider: "polygon"
+      data_types: ["ohlcv", "quotes", "trades"]
+      timeframes: ["1Min", "5Min", "1D"]
+      api_key: "${POLYGON_API_KEY}"
+      trigger_conditions:
+        - "fallback_1_failed"
+      rate_limit:
+        requests_per_minute: 100
+
+    - order: 3
+      provider: "finnhub"
+      data_types: ["ohlcv"]
+      timeframes: ["1D"]
+      api_key: "${FINNHUB_API_KEY}"
+      trigger_conditions:
+        - "fallback_2_failed"
+      rate_limit:
+        requests_per_minute: 60
+
+  reconciliation:
+    enabled: true
+    check_sources: ["alpaca", "yfinance"]
+    price_tolerance_pct: 0.5        # 0.5% variance acceptable
+    volume_tolerance_pct: 5.0       # 5% volume variance acceptable
+    on_divergence:
+      action: "use_primary"
+      alert: true
+      log: true
+
+  caching:
+    enabled: true
+    backend: "file"                 # file | redis
+    ttl_seconds:
+      intraday: 60
+      daily: 3600
+      historical: 86400
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# EXTENDED HOURS DATA
+# ─────────────────────────────────────────────────────────────────────────────────
+extended_hours:
+  premarket:
+    enabled: true
+    provider: "alpaca"
+    session: ["04:00", "09:30"]
+    data_quality: "lower"           # Expect gaps, lower volume
+    min_volume_filter: 1000
+    fallback_provider: null         # No fallback for premarket
+
+  afterhours:
+    enabled: true
+    provider: "alpaca"
+    session: ["16:00", "20:00"]
+    data_quality: "lower"
+    min_volume_filter: 500
+    fallback_provider: null
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# NEWS & SENTIMENT DATA
+# ─────────────────────────────────────────────────────────────────────────────────
+news_data:
+  primary:
+    provider: "alpha_vantage"
+    api_key: "${ALPHA_VANTAGE_API_KEY}"
+    provides_sentiment: true        # Pre-scored -1 to +1
+    rate_limit:
+      requests_per_minute: 5
+      requests_per_day: 500
+
+  fallbacks:
+    - order: 1
+      provider: "finnhub"
+      api_key: "${FINNHUB_API_KEY}"
+      provides_sentiment: false
+      rate_limit:
+        requests_per_minute: 60
+
+    - order: 2
+      provider: "newsapi"
+      api_key: "${NEWS_API_KEY}"
+      provides_sentiment: false
+      rate_limit:
+        requests_per_minute: 100
+        requests_per_day: 1000
+
+  deduplication:
+    enabled: true
+    method: "content_hash"
+    hash_fields: ["headline", "content"]
+    lookback_hours: 24
+
+  sentiment_fallback:
+    when: "source_sentiment_unavailable"
+    use_llm: true
+    llm_chain:
+      - provider: "mistral"
+        model: "mistral-large-latest"
+      - provider: "openai"
+        model: "gpt-4o-mini"
+      - provider: "anthropic"
+        model: "claude-3-haiku"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# ECONOMIC DATA
+# ─────────────────────────────────────────────────────────────────────────────────
+economic_data:
+  primary:
+    provider: "fred"
+    api_key: "${FRED_API_KEY}"
+    series:
+      - id: "VIXCLS"
+        name: "vix"
+        frequency: "daily"
+      - id: "DGS10"
+        name: "treasury_10y"
+        frequency: "daily"
+      - id: "DGS2"
+        name: "treasury_2y"
+        frequency: "daily"
+      - id: "DEXUSEU"
+        name: "eurusd"
+        frequency: "daily"
+      - id: "DCOILWTICO"
+        name: "wti_oil"
+        frequency: "daily"
+      - id: "GOLDAMGBD228NLBM"
+        name: "gold"
+        frequency: "daily"
+    rate_limit:
+      requests_per_minute: 120
+
+  fallbacks:
+    - order: 1
+      provider: "yfinance"
+      symbols:
+        vix: "^VIX"
+        treasury_10y: "^TNX"
+        eurusd: "EURUSD=X"
+        oil: "CL=F"
+        gold: "GC=F"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# OPTIONS DATA
+# ─────────────────────────────────────────────────────────────────────────────────
+options_data:
+  enabled: true
+
+  primary:
+    provider: "polygon"
+    api_key: "${POLYGON_API_KEY}"
+    data_types:
+      - "option_chains"
+      - "greeks"
+      - "implied_volatility"
+      - "open_interest"
+    rate_limit:
+      requests_per_minute: 100
+
+  fallbacks:
+    - order: 1
+      provider: "yfinance"
+      data_types: ["option_chains"]
+      note: "Limited options data, no real-time greeks"
+
+  derived_metrics:
+    put_call_ratio:
+      calculation: "put_volume / call_volume"
+      expiration_filter: "0-30 DTE"
+    iv_skew:
+      calculation: "25d_put_iv - 25d_call_iv"
+    term_structure:
+      calculation: "front_month_iv / back_month_iv"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# S&P 500 CONSTITUENTS
+# ─────────────────────────────────────────────────────────────────────────────────
+sp500_universe:
+  current_constituents:
+    source: "wikipedia"
+    url: "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+    update_frequency: "weekly"
+    local_cache: "config/sp500.csv"
+
+  historical_constituents:
+    enabled: false                   # CRITICAL: Enable to avoid survivorship bias
+    source: "custom"                 # Requires external data source
+    note: "Essential for backtesting - prevents survivorship bias"
+
+  sector_mappings:
+    source: "gics"
+    include_subsectors: true
+
+  market_cap_weights:
+    source: "calculate"              # Calculate from price × shares
+    update_frequency: "daily"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# CALENDAR & EVENTS
+# ─────────────────────────────────────────────────────────────────────────────────
+calendar_data:
+  market_calendar:
+    provider: "pandas_market_calendars"
+    exchange: "NYSE"
+
+  economic_calendar:
+    provider: "finnhub"
+    api_key: "${FINNHUB_API_KEY}"
+    events:
+      - "FOMC"
+      - "NFP"        # Non-Farm Payrolls
+      - "CPI"
+      - "GDP"
+      - "Retail Sales"
+      - "PMI"
+
+  earnings_calendar:
+    provider: "finnhub"
+    lookforward_days: 14
+
+  ex_dividend_dates:
+    provider: "yfinance"
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# DATA QUALITY & VALIDATION
+# ─────────────────────────────────────────────────────────────────────────────────
+data_quality:
+  validation:
+    ohlc_relationships:
+      enabled: true
+      rule: "high >= max(open, close) AND low <= min(open, close)"
+      on_violation: "flag_and_fix"
+
+    price_continuity:
+      enabled: true
+      max_gap_pct: 10.0             # Flag gaps > 10%
+      on_violation: "flag"
+
+    volume_sanity:
+      enabled: true
+      min_volume: 0
+      max_volume_multiplier: 100    # 100x average is suspicious
+      on_violation: "flag"
+
+    timestamp_ordering:
+      enabled: true
+      on_violation: "sort_and_dedupe"
+
+  missing_data:
+    detection:
+      enabled: true
+      max_gap_minutes: 5            # Intraday
+      max_gap_days: 3               # Daily
+
+    handling:
+      ohlc: "ffill"
+      volume: "fill_zero"
+      extended_gap: "interpolate"
+
+  corporate_actions:
+    splits:
+      source: "yfinance"
+      auto_adjust: true
+    dividends:
+      source: "yfinance"
+      auto_adjust: true
+
+# ─────────────────────────────────────────────────────────────────────────────────
+# STORAGE
+# ─────────────────────────────────────────────────────────────────────────────────
+storage:
+  raw_data:
+    format: "parquet"
+    path: "data/raw"
+    partitioning: ["symbol", "date"]
+    compression: "snappy"
+
+  processed_data:
+    format: "parquet"
+    path: "data/processed"
+    partitioning: ["symbol", "date"]
+
+  database:
+    primary: "sqlite"
+    path: "data/giga_trader.db"
+    # Alternative: PostgreSQL for production
+    # primary: "postgresql"
+    # connection_string: "${DATABASE_URL}"
+
+  backup:
+    enabled: true
+    frequency: "daily"
+    retention_days: 30
+    path: "data/backups"
