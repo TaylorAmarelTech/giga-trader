@@ -657,6 +657,19 @@ class WalkForwardBacktest:
         """
         print("[WALK-FORWARD] Starting walk-forward analysis...")
 
+        # Ensure datetime index
+        if not isinstance(daily_data.index, pd.DatetimeIndex):
+            if 'date' in daily_data.columns:
+                daily_data = daily_data.set_index('date')
+            elif 'Date' in daily_data.columns:
+                daily_data = daily_data.set_index('Date')
+            # Convert index to datetime if not already
+            if not isinstance(daily_data.index, pd.DatetimeIndex):
+                try:
+                    daily_data.index = pd.to_datetime(daily_data.index)
+                except (ValueError, TypeError):
+                    return {"error": "Could not convert index to datetime"}
+
         # Generate time periods
         dates = sorted(daily_data.index.unique())
         min_date = dates[0]

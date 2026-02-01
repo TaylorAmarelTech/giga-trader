@@ -492,6 +492,19 @@ class BacktestingHarness:
         if df is None:
             return {"error": "Failed to prepare features"}
 
+        # Ensure datetime index for regime filtering
+        if not isinstance(df.index, pd.DatetimeIndex):
+            if 'date' in df.columns:
+                df = df.set_index('date')
+            elif 'Date' in df.columns:
+                df = df.set_index('Date')
+            # Convert index to datetime if it's not already
+            if not isinstance(df.index, pd.DatetimeIndex):
+                try:
+                    df.index = pd.to_datetime(df.index)
+                except (ValueError, TypeError):
+                    return {"error": "Could not convert index to datetime"}
+
         for regime in HISTORICAL_REGIMES:
             try:
                 # Filter data to regime period
