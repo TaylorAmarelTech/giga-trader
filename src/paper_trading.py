@@ -560,6 +560,8 @@ class SignalGenerator:
         self.scaler = None
         self.dim_state = None
         self.feature_cols = None
+        self.use_leak_proof = False  # Initialize here - will be updated in _load_models() if leak-proof model loaded
+        self.model_config = None
 
         # Dynamic model selector - MANDATORY for proper signal generation
         # No fallback to static models to ensure all signals use properly trained/validated models
