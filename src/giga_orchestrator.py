@@ -55,6 +55,7 @@ ORCHESTRATOR_CONFIG = {
 
     # Experimentation (NEVER IDLE)
     "run_experiments_continuously": True,
+    "experiment_during_market_hours": True,  # Run experiments even when market is open
     "experiment_interval_seconds": 60,  # Min time between experiments
     "max_experiments_per_day": 100,
 
@@ -882,6 +883,12 @@ class GigaOrchestrator:
 
                     # Run trading cycle
                     self.trading_engine.run_cycle()
+
+                    # Run experiments during market hours if enabled
+                    if ORCHESTRATOR_CONFIG["experiment_during_market_hours"]:
+                        if self.experiment_runner.should_run_experiment():
+                            logger.debug("Running experiment during market hours...")
+                            self.experiment_runner.run_experiment()
 
                 # ─────────────────────────────────────────────────────────
                 # MARKET CLOSED: TRAINING/EXPERIMENTING MODE (NEVER IDLE!)
