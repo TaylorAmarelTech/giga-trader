@@ -164,7 +164,10 @@ class BacktestingHarness:
             import joblib
 
             model_dir = project_root / "models" / "production"
-            model_files = list(model_dir.glob("spy_robust_models*.joblib"))
+            # Look for both leak-proof and robust models, prefer leak-proof
+            model_files = list(model_dir.glob("spy_leak_proof_models*.joblib"))
+            if not model_files:
+                model_files = list(model_dir.glob("spy_robust_models*.joblib"))
 
             if not model_files:
                 logger.warning("No model files found")
@@ -176,20 +179,30 @@ class BacktestingHarness:
 
             state = joblib.load(model_file)
 
-            # Handle both flat and nested model structures
-            if "models" in state:
+            # Handle different model structures
+            if "swing_pipeline" in state:
+                # Leak-proof pipeline structure (new format)
+                self.swing_model = state.get("swing_pipeline")
+                self.timing_model = state.get("timing_pipeline")
+                self.feature_cols = state.get("feature_columns", [])
+                self.scaler = None  # Pipelines handle their own scaling
+                self.dim_state = None  # Pipelines handle dim reduction
+                logger.info("Loaded leak-proof pipeline models")
+            elif "models" in state:
                 # Nested structure: state['models']['swing']['l2']
                 models = state.get("models", {})
                 self.swing_model = models.get("swing", {}).get("l2") or models.get("swing", {}).get("gb")
                 self.timing_model = models.get("timing", {}).get("l2") or models.get("timing", {}).get("gb")
+                self.scaler = state.get("scaler")
+                self.dim_state = state.get("dim_reduction_state") or state.get("dim_state")
+                self.feature_cols = state.get("feature_cols") or state.get("feature_columns", [])
             else:
                 # Flat structure: state['swing_model']
                 self.swing_model = state.get("swing_model") or state.get("swing_l2")
                 self.timing_model = state.get("timing_model") or state.get("timing_l2")
-
-            self.scaler = state.get("scaler")
-            self.dim_state = state.get("dim_reduction_state") or state.get("dim_state")
-            self.feature_cols = state.get("feature_cols") or state.get("feature_columns", [])
+                self.scaler = state.get("scaler")
+                self.dim_state = state.get("dim_reduction_state") or state.get("dim_state")
+                self.feature_cols = state.get("feature_cols") or state.get("feature_columns", [])
 
             self._models_loaded = True
             logger.info(f"Models loaded: swing={self.swing_model is not None}, timing={self.timing_model is not None}")
@@ -363,45 +376,23 @@ class BacktestingHarness:
             timing_proba = self.timing_model.predict_proba(X)[:, 1]
             logger.info(f"Using saved models with {len(available)}/{len(self.feature_cols)} features")
         else:
-            # Not enough features - train simple fallback models on available data
-            logger.warning(f"Only {len(available)}/{len(self.feature_cols)} features available, using fallback models")
+            # CRITICAL: Not enough features available for saved models
+            # DO NOT train fallback models - this bypasses proper CV and validation
+            # Backtests must use properly trained models from the registry
+            logger.error(f"CRITICAL: Only {len(available)}/{len(self.feature_cols)} features available")
+            logger.error("Cannot run backtest without properly trained models")
+            logger.error("Fallback models are NOT allowed - they bypass CV and use invalid targets")
+            logger.error("")
+            logger.error("To fix this issue:")
+            logger.error("  1. Run grid search to train validated models: python scripts/run_grid_search.py")
+            logger.error("  2. Ensure feature engineering produces all required features")
+            logger.error("  3. Load models from the model registry")
 
-            # Get numeric features for fallback
-            exclude_cols = ['target', 'date', 'Date', 'open', 'high', 'low', 'close', 'volume',
-                           'Open', 'High', 'Low', 'Close', 'Volume', 'day_return', 'future_return']
-            fallback_cols = [c for c in df.columns if c not in exclude_cols
-                            and df[c].dtype in ['float64', 'int64', 'float32', 'int32']
-                            and not df[c].isna().all()][:50]  # Limit to 50 features
-
-            if len(fallback_cols) < 10:
-                raise ValueError(f"Insufficient features for fallback: {len(fallback_cols)}")
-
-            X_raw = df[fallback_cols].values
-            X_raw = np.nan_to_num(X_raw, nan=0.0, posinf=0.0, neginf=0.0)
-
-            # Create simple targets: next day up/down
-            if 'day_return' in df.columns:
-                y_swing = (df['day_return'].shift(-1) > 0).astype(int).fillna(0).values
-            else:
-                # Calculate from close prices
-                df['_next_return'] = df['close'].pct_change().shift(-1)
-                y_swing = (df['_next_return'] > 0).astype(int).fillna(0).values
-
-            # Simple timing target (random baseline)
-            y_timing = np.random.randint(0, 2, len(df))
-
-            # Train simple fallback models
-            fallback_swing = LogisticRegression(max_iter=500, C=0.1, random_state=42)
-            fallback_timing = LogisticRegression(max_iter=500, C=0.1, random_state=42)
-
-            # Use first 80% for training
-            split_idx = int(len(X_raw) * 0.8)
-            fallback_swing.fit(X_raw[:split_idx], y_swing[:split_idx])
-            fallback_timing.fit(X_raw[:split_idx], y_timing[:split_idx])
-
-            swing_proba = fallback_swing.predict_proba(X_raw)[:, 1]
-            timing_proba = fallback_timing.predict_proba(X_raw)[:, 1]
-            logger.info(f"Trained fallback models on {len(fallback_cols)} features")
+            raise ValueError(
+                f"Insufficient features ({len(available)}/{len(self.feature_cols)}) for backtest. "
+                "Fallback models are not allowed as they bypass proper cross-validation "
+                "and use invalid random targets. Train proper models first using grid search."
+            )
 
         swing_predictions = pd.Series(swing_proba, index=df.index)
         timing_predictions = pd.Series(timing_proba, index=df.index)
@@ -459,17 +450,29 @@ class BacktestingHarness:
             return {"error": "Failed to prepare features"}
 
         # Define model trainer function
+        # NOTE: This is for walk-forward validation where models are retrained at each step
+        # The timing target MUST exist - no random fallbacks allowed
         def train_models(train_data, feature_cols):
             from sklearn.linear_model import LogisticRegression
 
             X = train_data[feature_cols].values
-            y_swing = (train_data["day_return"] > 0.003).astype(int)
-            y_timing = train_data.get("low_before_high", pd.Series(1, index=train_data.index)).astype(int)
 
-            swing_model = LogisticRegression(C=1.0, max_iter=1000)
+            # Swing target: next day return > threshold
+            y_swing = (train_data["day_return"] > 0.003).astype(int)
+
+            # Timing target: REQUIRED - no fallback to dummy values
+            if "low_before_high" not in train_data.columns:
+                raise ValueError(
+                    "CRITICAL: 'low_before_high' column missing in training data. "
+                    "Timing target is REQUIRED for valid model training. "
+                    "Ensure feature engineering creates this target column."
+                )
+            y_timing = train_data["low_before_high"].astype(int)
+
+            swing_model = LogisticRegression(C=0.1, max_iter=1000, random_state=42)  # Strong reg
             swing_model.fit(X, y_swing)
 
-            timing_model = LogisticRegression(C=1.0, max_iter=1000)
+            timing_model = LogisticRegression(C=0.1, max_iter=1000, random_state=42)  # Strong reg
             timing_model.fit(X, y_timing)
 
             return swing_model, timing_model
@@ -686,9 +689,27 @@ class BacktestingHarness:
         """Prepare features for backtesting, including dimensionality reduction."""
         try:
             from src.train_robust_model import engineer_all_features, reduce_dimensions
+            from src.anti_overfit import integrate_anti_overfit
             import numpy as np
 
             df_with_features = engineer_all_features(df.copy())
+
+            # Check if we need additional anti-overfit features for the model
+            if self.feature_cols and len(self.feature_cols) > 150:
+                # Model expects many features - need to run anti-overfit integration
+                logger.info("Running anti-overfit feature engineering for full feature set...")
+                df_with_features, _ = integrate_anti_overfit(
+                    df_with_features,
+                    spy_1min=None,
+                    use_synthetic=False,  # No synthetic data for backtest
+                    use_cross_assets=True,
+                    use_breadth_streaks=True,
+                    use_mag_breadth=True,
+                    use_sector_breadth=True,
+                    use_vol_regime=True,
+                    synthetic_weight=0.0,
+                )
+                logger.info(f"After anti-overfit: {len(df_with_features.columns)} columns")
 
             # Check if we have dim_state for transformation
             if self.dim_state is not None:
@@ -734,20 +755,32 @@ class BacktestingHarness:
                             logger.warning(f"Dim reduction failed, using raw features: {dim_error}")
                             self.feature_cols = raw_feature_cols
             else:
-                # No dim_state - use raw features
-                exclude_cols = ['target', 'date', 'Date', 'open', 'high', 'low', 'close', 'volume',
-                               'Open', 'High', 'Low', 'Close', 'Volume', 'day_return', 'future_return']
-                self.feature_cols = [c for c in df_with_features.columns if c not in exclude_cols
-                                    and df_with_features[c].dtype in ['float64', 'int64', 'float32', 'int32']][:50]
+                # No dim_state - this means leak-proof pipeline or raw features
+                # If we have feature_cols from the loaded model, use those
+                if self.feature_cols and len(self.feature_cols) > 0:
+                    # Check which expected features are available in engineered data
+                    logger.info(f"Using {len(self.feature_cols)} feature columns from model")
+                else:
+                    # Fallback: extract numeric feature columns
+                    exclude_cols = ['target', 'date', 'Date', 'open', 'high', 'low', 'close', 'volume',
+                                   'Open', 'High', 'Low', 'Close', 'Volume', 'day_return', 'future_return']
+                    self.feature_cols = [c for c in df_with_features.columns if c not in exclude_cols
+                                        and df_with_features[c].dtype in ['float64', 'int64', 'float32', 'int32']]
 
             # Filter to available features (check both raw and reduced)
             available = [c for c in self.feature_cols if c in df_with_features.columns]
 
-            if len(available) < len(self.feature_cols) * 0.5:
-                logger.warning(f"Only {len(available)}/{len(self.feature_cols)} features available")
-                # Use whatever features are available
-                self.feature_cols = available
+            if len(available) < len(self.feature_cols) * 0.8:
+                # STRICT: Require at least 80% of expected features
+                # Using fewer features would produce invalid backtest results
+                logger.error(f"CRITICAL: Only {len(available)}/{len(self.feature_cols)} features available (need 80%)")
+                raise ValueError(
+                    f"Insufficient features for valid backtest: {len(available)}/{len(self.feature_cols)}. "
+                    "Backtests require at least 80% of expected features to be valid. "
+                    "Ensure feature engineering produces all required features."
+                )
 
+            self.feature_cols = available
             return df_with_features
 
         except Exception as e:

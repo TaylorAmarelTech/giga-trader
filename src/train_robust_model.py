@@ -142,7 +142,7 @@ CONFIG = {
     },
 
     # Anti-overfitting
-    "n_cv_folds": 5,
+    "n_cv_folds": 7,  # Increased from 5 for more robust validation
     "purge_days": 5,
     "embargo_days": 2,
 
@@ -168,7 +168,9 @@ CONFIG = {
     "use_synthetic_universes": True,  # Generate "what SPY could have been"
     "use_cross_assets": True,  # Add TLT, QQQ, GLD, etc.
     "use_breadth_streaks": True,  # Add component streak breadth features
-    "use_mag_breadth": True,  # Add MAG7/MAG10 breadth features
+    "use_mag_breadth": True,  # Add MAG3/5/6/7/10/15 breadth features
+    "use_sector_breadth": True,  # Add sector rotation/breadth features (11 sectors)
+    "use_vol_regime": True,  # Add volatility regime features (VXX-based)
     "synthetic_weight": 0.3,  # 30% weight for synthetic data (conservative)
     "wmes_threshold": 0.55,  # Minimum weighted model evaluation score
     "stability_threshold": 0.5,  # Minimum stability score for hyperparameters
@@ -894,9 +896,22 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
 
     else:
         # Transform only (for inference)
-        X = state["var_selector"].transform(X)
-        X = X[:, state["corr_keep_idx"]]
-        X_scaled = state["pre_transform_scaler"].transform(X)
+        # Safely get required transformers with helpful error messages
+        var_selector = state.get("var_selector")
+        if var_selector is None:
+            raise ValueError("dim_state missing 'var_selector' - was model trained correctly?")
+        X = var_selector.transform(X)
+
+        corr_keep_idx = state.get("corr_keep_idx")
+        if corr_keep_idx is None:
+            # Fallback: keep all features if correlation filter wasn't applied
+            corr_keep_idx = list(range(X.shape[1]))
+        X = X[:, corr_keep_idx]
+
+        pre_transform_scaler = state.get("pre_transform_scaler")
+        if pre_transform_scaler is None:
+            raise ValueError("dim_state missing 'pre_transform_scaler' - was model trained correctly?")
+        X_scaled = pre_transform_scaler.transform(X)
 
         method = state.get("method", "none")
 
@@ -2262,6 +2277,8 @@ def main():
             use_cross_assets=CONFIG.get("use_cross_assets", True),
             use_breadth_streaks=CONFIG.get("use_breadth_streaks", True),
             use_mag_breadth=CONFIG.get("use_mag_breadth", True),
+            use_sector_breadth=CONFIG.get("use_sector_breadth", True),
+            use_vol_regime=CONFIG.get("use_vol_regime", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
         )
         print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")
@@ -2392,9 +2409,32 @@ def main():
         return
 
     # ─────────────────────────────────────────────────────────────────────────
-    # LEGACY TRAINING PATH (has data leakage issues - use for comparison only)
+    # LEGACY TRAINING PATH - DISABLED (data leakage issues)
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[LEGACY PATH] Using pre-CV dimensionality reduction (may have data leakage)")
+    # The legacy path performed dimensionality reduction BEFORE cross-validation,
+    # which causes data leakage because the test set information leaks into the
+    # feature transformation. This produces unreliable metrics.
+    #
+    # To maintain pipeline integrity, the legacy path is now DISABLED.
+    # All training MUST use leak-proof CV which fits transformations inside each fold.
+    raise ValueError(
+        "CRITICAL: Legacy training path is DISABLED due to data leakage issues.\n"
+        "The legacy path performed dimensionality reduction BEFORE cross-validation,\n"
+        "causing test set information to leak into feature transformations.\n"
+        "\n"
+        "Solution: Set CONFIG['use_leak_proof_cv'] = True (default)\n"
+        "\n"
+        "The leak-proof path fits all transformations INSIDE each CV fold,\n"
+        "ensuring proper validation and reliable performance metrics."
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # LEGACY CODE BELOW (kept for reference but never executes)
+    # ─────────────────────────────────────────────────────────────────────────
+    # NOTE: The code below will NEVER execute due to the raise above.
+    # It is kept temporarily for reference during the migration period.
+    # TODO: Remove this dead code in a future cleanup.
+    print("\n[LEGACY PATH] This code should never execute")
 
     # Step 5: Advanced dimensionality reduction (passes y for MI-based methods)
     X_reduced, reduced_features, dim_state = reduce_dimensions(X, feature_cols, y=y, fit=True)

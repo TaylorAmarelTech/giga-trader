@@ -342,6 +342,77 @@ def api_backtests():
     ])
 
 
+@app.route("/api/trading-config")
+def api_trading_config():
+    """Get trading configuration including timing windows."""
+    from datetime import time as dt_time
+
+    # Training timing (from train_robust_model.py CONFIG)
+    training_config = {
+        "entry_window_minutes": (0, 120),  # Minutes from market open
+        "entry_window_time": ("09:30", "11:30"),  # ET
+        "exit_window_minutes": (180, 385),  # Minutes from market open
+        "exit_window_time": ("12:30", "15:55"),  # ET
+        "description": "Models trained to find entries 9:30-11:30 AM and exits 12:30-3:55 PM ET"
+    }
+
+    # Paper trading timing (from paper_trading.py TRADING_CONFIG)
+    paper_trading_config = {
+        "market_open": "09:30",
+        "market_close": "16:00",
+        "no_new_trades_after": "15:30",
+        "force_close_time": "15:55",
+        "entry_threshold": 0.65,
+        "exit_threshold": 0.45,
+        "strong_signal_threshold": 0.75,
+        "stop_loss_pct": 0.01,
+        "take_profit_pct": 0.02,
+        "trailing_stop_pct": 0.005,
+        "max_position_pct": 0.25,
+        "max_daily_loss_pct": 0.02,
+    }
+
+    # Current time info
+    from datetime import datetime
+    import pytz
+    try:
+        et_tz = pytz.timezone('US/Eastern')
+        now_et = datetime.now(et_tz)
+        current_time_et = now_et.strftime("%H:%M:%S")
+        market_open_time = dt_time(9, 30)
+        market_close_time = dt_time(16, 0)
+        current_t = now_et.time()
+
+        is_market_hours = market_open_time <= current_t <= market_close_time
+        is_entry_window = dt_time(9, 30) <= current_t <= dt_time(11, 30)
+        is_exit_window = dt_time(12, 30) <= current_t <= dt_time(15, 55)
+        is_no_new_trades = current_t >= dt_time(15, 30)
+
+        minutes_from_open = (now_et.hour * 60 + now_et.minute) - (9 * 60 + 30)
+        if minutes_from_open < 0:
+            minutes_from_open = 0
+    except:
+        current_time_et = "Unknown"
+        is_market_hours = False
+        is_entry_window = False
+        is_exit_window = False
+        is_no_new_trades = False
+        minutes_from_open = 0
+
+    return jsonify({
+        "training": training_config,
+        "paper_trading": paper_trading_config,
+        "current_state": {
+            "time_et": current_time_et,
+            "minutes_from_open": minutes_from_open,
+            "is_market_hours": is_market_hours,
+            "is_entry_window": is_entry_window,
+            "is_exit_window": is_exit_window,
+            "is_no_new_trades": is_no_new_trades,
+        }
+    })
+
+
 @app.route("/api/experiment")
 def api_experiment():
     """Get current experiment progress for real-time monitoring."""
@@ -480,6 +551,79 @@ def api_models_registry():
     except Exception as e:
         logger.error(f"Failed to load model registry: {e}")
         return jsonify({"models": [], "total": 0, "error": str(e)})
+
+
+@app.route("/api/models/dynamic-selector")
+def api_dynamic_selector():
+    """Get dynamic model selector status and available windows."""
+    try:
+        from src.dynamic_model_selector import DynamicModelSelector
+
+        selector = DynamicModelSelector()
+        n_loaded = selector.load_from_registry()
+
+        if n_loaded == 0:
+            return jsonify({
+                "available": False,
+                "message": "No models in registry. Run grid search first.",
+                "n_candidates": 0,
+                "windows": [],
+                "top_models": [],
+            })
+
+        status = selector.get_status()
+
+        return jsonify({
+            "available": True,
+            "n_candidates": status.get("n_candidates", 0),
+            "n_loaded": status.get("n_loaded", 0),
+            "min_test_auc": status.get("min_test_auc", 0.55),
+            "min_wmes": status.get("min_wmes", 0.45),
+            "ensemble_method": status.get("ensemble_method", "weighted_average"),
+            "windows": status.get("available_windows", []),
+            "top_models": status.get("top_models", []),
+        })
+
+    except ImportError:
+        return jsonify({
+            "available": False,
+            "message": "Dynamic model selector module not available",
+        })
+    except Exception as e:
+        logger.error(f"Failed to get dynamic selector status: {e}")
+        return jsonify({"available": False, "error": str(e)})
+
+
+@app.route("/api/grid-search/results")
+def api_grid_search_results():
+    """Get grid search results."""
+    try:
+        results_file = project_root / "experiments" / "grid_search_results.json"
+        if not results_file.exists():
+            return jsonify({
+                "available": False,
+                "message": "No grid search results. Run: python scripts/run_grid_search.py",
+                "results": [],
+            })
+
+        with open(results_file) as f:
+            results = json.load(f)
+
+        # Sort by test_auc
+        completed = [r for r in results if r.get("status") == "completed"]
+        completed.sort(key=lambda x: x.get("test_auc", 0), reverse=True)
+
+        return jsonify({
+            "available": True,
+            "total": len(results),
+            "completed": len(completed),
+            "best_configs": completed[:10],
+            "all_results": results,
+        })
+
+    except Exception as e:
+        logger.error(f"Failed to load grid search results: {e}")
+        return jsonify({"available": False, "error": str(e)})
 
 
 # =============================================================================

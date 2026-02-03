@@ -647,11 +647,19 @@ class GridSearchController:
 
 
 # =============================================================================
-# MAIN ENTRY POINT FOR TESTING
+# MAIN ENTRY POINT
 # =============================================================================
 
 def main():
-    """Test the grid search controller."""
+    """
+    Display grid search controller status.
+
+    IMPORTANT: This function does NOT run experiments with fake results.
+    To run actual grid search experiments, use:
+        python scripts/run_grid_search.py
+
+    This main() only shows current grid search statistics.
+    """
     from pathlib import Path
 
     state_file = Path(__file__).parent.parent.parent / "logs" / "grid_search_state.json"
@@ -664,27 +672,26 @@ def main():
         results_dir=results_dir,
     )
 
-    print(f"Total possible combinations: {grid.get_total_combinations():,}")
-    print(f"Current stats: {json.dumps(controller.get_stats(), indent=2)}")
+    print("=" * 70)
+    print("GRID SEARCH CONTROLLER STATUS")
+    print("=" * 70)
+    print(f"\nTotal possible combinations: {grid.get_total_combinations():,}")
+    print(f"\nCurrent stats:")
+    print(json.dumps(controller.get_stats(), indent=2))
 
-    # Generate some test experiments
-    for _ in range(5):
-        exp = controller.get_next_experiment()
-        if exp:
-            print(f"\nNext experiment: {exp.config_id}")
-            print(f"Parameters: {json.dumps(exp.parameters, indent=2)}")
+    # Show best experiment if any
+    best = controller.get_best_experiment()
+    if best:
+        print(f"\nBest experiment: {best.config_id}")
+        print(f"  Test AUC: {best.results.get('test_auc', 'N/A')}")
+        print(f"  Backtest Sharpe: {best.results.get('backtest_sharpe', 'N/A')}")
+    else:
+        print("\nNo completed experiments yet.")
 
-            # Simulate results
-            fake_results = {
-                "test_auc": random.uniform(0.55, 0.75),
-                "train_auc": random.uniform(0.60, 0.85),
-                "backtest_sharpe": random.uniform(0.5, 2.5),
-                "win_rate": random.uniform(0.50, 0.70),
-                "wmes_score": random.uniform(0.45, 0.70),
-            }
-            controller.mark_completed(exp.config_id, fake_results, success=True)
-
-    print(f"\nFinal stats: {json.dumps(controller.get_stats(), indent=2)}")
+    print("\n" + "=" * 70)
+    print("To run grid search experiments, use:")
+    print("  python scripts/run_grid_search.py")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

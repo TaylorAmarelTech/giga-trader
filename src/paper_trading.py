@@ -87,6 +87,14 @@ except ImportError:
     TRACKER_AVAILABLE = False
     print("[INFO] Position tracker not available")
 
+# Dynamic model selector
+try:
+    from src.dynamic_model_selector import DynamicModelSelector, EnsemblePrediction
+    DYNAMIC_SELECTOR_AVAILABLE = True
+except ImportError:
+    DYNAMIC_SELECTOR_AVAILABLE = False
+    print("[INFO] Dynamic model selector not available")
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -536,21 +544,131 @@ class SignalGenerator:
     """
     Generate trading signals from trained ML models.
 
-    Loads saved models and generates real-time predictions.
+    Supports two modes:
+    1. Static mode: Load a single hardcoded model (legacy)
+    2. Dynamic mode: Use DynamicModelSelector to select/ensemble from registry
+
+    Dynamic mode provides:
+    - Automatic model selection based on performance
+    - Intelligent ensembling of multiple models
+    - Adaptive entry/exit window matching
     """
 
-    def __init__(self, model_dir: Path = None):
+    def __init__(self, model_dir: Path = None, use_dynamic_selector: bool = True):
         self.model_dir = model_dir or TRADING_CONFIG["model_dir"]
         self.models = {}
         self.scaler = None
         self.dim_state = None
         self.feature_cols = None
-        self._load_models()
+
+        # Dynamic model selector - MANDATORY for proper signal generation
+        # No fallback to static models to ensure all signals use properly trained/validated models
+        self.use_dynamic_selector = use_dynamic_selector and DYNAMIC_SELECTOR_AVAILABLE
+        self.dynamic_selector = None
+
+        if self.use_dynamic_selector:
+            self._init_dynamic_selector()
+
+        # If dynamic selector is not available or empty, try to load static models
+        # but warn that this is a degraded mode that should be fixed
+        if not self.dynamic_selector or not self.dynamic_selector.candidates:
+            logger.warning("=" * 60)
+            logger.warning("DEGRADED MODE: Dynamic model selector not available")
+            logger.warning("Signals may not use properly validated models")
+            logger.warning("Run 'python scripts/run_grid_search.py' to populate registry")
+            logger.warning("=" * 60)
+            self._load_models()
+
+            # Verify we have BOTH swing AND timing models
+            has_swing = "swing_pipeline" in self.models or "swing_l2" in self.models or "swing" in self.models
+            has_timing = "timing_pipeline" in self.models or "timing_l2" in self.models or "timing" in self.models
+
+            if not has_swing or not has_timing:
+                raise ValueError(
+                    "CRITICAL: No valid models available. Both swing AND timing models are required. "
+                    "Run grid search to train and validate models: python scripts/run_grid_search.py"
+                )
+
+    def _init_dynamic_selector(self):
+        """Initialize the dynamic model selector from registry.
+
+        REQUIREMENTS (per CLAUDE.md):
+        - min_test_auc > 0.58 (target, allow 0.55 minimum)
+        - min_wmes > 0.55 (target, allow 0.50 minimum)
+        - Models must have both swing AND timing predictions
+        """
+        try:
+            self.dynamic_selector = DynamicModelSelector(
+                min_test_auc=0.55,  # Minimum required AUC (0.58 is target)
+                min_wmes=0.50,      # Minimum WMES (0.55 is target)
+                max_models_to_load=10,
+                ensemble_method="weighted_average",
+            )
+            n_loaded = self.dynamic_selector.load_from_registry()
+
+            if n_loaded > 0:
+                logger.info(f"Dynamic selector loaded {n_loaded} qualified model candidates")
+
+                # Verify models meet quality standards
+                status = self.dynamic_selector.get_status()
+                top_models = status.get("top_models", [])
+
+                if top_models:
+                    best_auc = max(m.get("test_auc", 0) for m in top_models)
+                    best_wmes = max(m.get("wmes", 0) for m in top_models)
+
+                    if best_auc < 0.58:
+                        logger.warning(f"Best model AUC ({best_auc:.3f}) below target (0.58)")
+                    if best_wmes < 0.55:
+                        logger.warning(f"Best model WMES ({best_wmes:.3f}) below target (0.55)")
+
+                # Get available entry/exit windows
+                windows = self.dynamic_selector.get_available_windows()
+                if windows:
+                    logger.info(f"Available entry/exit windows: {len(windows)}")
+                    for w in windows[:3]:
+                        logger.info(f"  Entry: {w['entry_window']}, Exit: {w['exit_window']}, Score: {w['best_score']:.3f}")
+            else:
+                logger.warning("No models in registry meet minimum quality requirements")
+                logger.warning("Run grid search to train validated models: python scripts/run_grid_search.py")
+                self.dynamic_selector = None
+
+        except Exception as e:
+            logger.error(f"Failed to initialize dynamic selector: {e}")
+            self.dynamic_selector = None
 
     def _load_models(self):
         """Load trained models from disk."""
+        self.use_leak_proof = False  # Track which model type is loaded
+
         try:
-            # Try loading from combined model file first (new format)
+            # PREFER leak-proof model (better model with correct feature handling)
+            leak_proof_path = self.model_dir / "spy_leak_proof_models.joblib"
+            if leak_proof_path.exists():
+                data = joblib.load(leak_proof_path)
+
+                # Leak-proof model uses sklearn Pipelines that handle transformation internally
+                if "swing_pipeline" in data:
+                    self.models["swing_pipeline"] = data["swing_pipeline"]
+                    logger.info("Loaded swing pipeline (leak-proof)")
+
+                if "timing_pipeline" in data:
+                    self.models["timing_pipeline"] = data["timing_pipeline"]
+                    logger.info("Loaded timing pipeline (leak-proof)")
+
+                # Feature columns are the RAW feature names (before transformation)
+                if "feature_columns" in data:
+                    self.feature_cols = data["feature_columns"]
+                    logger.info(f"Loaded {len(self.feature_cols)} raw feature columns (leak-proof)")
+
+                if "config" in data:
+                    self.model_config = data["config"]
+
+                self.use_leak_proof = True
+                logger.info(f"Models loaded from {leak_proof_path} (LEAK-PROOF)")
+                return
+
+            # Fallback: Try loading from combined model file (legacy format)
             combined_path = self.model_dir / "spy_robust_models.joblib"
             if combined_path.exists():
                 data = joblib.load(combined_path)
@@ -585,16 +703,22 @@ class SignalGenerator:
                     self.dim_state = data["dim_reduction_state"]
                     logger.info("Loaded dimensionality reduction state")
 
-                # Extract feature columns
+                # Extract feature columns (NOTE: These are TRANSFORMED names in legacy model)
                 if "feature_cols" in data:
                     self.feature_cols = data["feature_cols"]
-                    logger.info(f"Loaded {len(self.feature_cols)} feature columns")
+                    logger.info(f"Loaded {len(self.feature_cols)} feature columns (legacy - transformed)")
+
+                # Try to get original raw feature names from dim_state
+                if self.dim_state and "var_selector" in self.dim_state:
+                    # The var_selector knows the expected input dimension
+                    expected_n = self.dim_state["var_selector"].n_features_in_
+                    logger.info(f"Legacy model expects {expected_n} raw input features")
 
                 # Store config for reference
                 if "config" in data:
                     self.model_config = data["config"]
 
-                logger.info(f"Models loaded from {combined_path}")
+                logger.info(f"Models loaded from {combined_path} (LEGACY)")
                 return
 
             # Fallback: try loading individual files (legacy format)
@@ -723,12 +847,48 @@ class SignalGenerator:
             numeric_cols = df_daily.select_dtypes(include=[np.number]).columns
             exclude = ["target_up", "target_timing", "day_return", "sample_weight",
                        "is_up_day", "is_down_day", "low_before_high", "high_minutes", "low_minutes"]
-            feature_cols = [c for c in numeric_cols if c not in exclude]
+            all_feature_cols = [c for c in numeric_cols if c not in exclude]
 
-            if len(feature_cols) == 0:
+            if len(all_feature_cols) == 0:
                 logger.error("No numeric features found in df_daily")
                 return np.array([])
 
+            # ─────────────────────────────────────────────────────────────────────
+            # LEAK-PROOF MODEL: Use saved feature columns and return raw features
+            # The pipeline handles transformation internally
+            # ─────────────────────────────────────────────────────────────────────
+            if self.use_leak_proof and self.feature_cols:
+                # Select only the features that were used during training, in the same order
+                available_features = set(all_feature_cols)
+                missing_features = [f for f in self.feature_cols if f not in available_features]
+                if missing_features:
+                    logger.warning(f"Missing {len(missing_features)} features: {missing_features[:5]}...")
+
+                # Build feature array in the correct order, filling missing with 0
+                X_list = []
+                for feat in self.feature_cols:
+                    if feat in df_daily.columns:
+                        X_list.append(df_daily[feat].iloc[-1])
+                    else:
+                        X_list.append(0.0)  # Fill missing features with 0
+
+                X = np.array(X_list).reshape(1, -1)
+
+                # Handle NaN values
+                if np.isnan(X).any():
+                    nan_count = np.isnan(X).sum()
+                    nan_indices = np.where(np.isnan(X[0]))[0]
+                    nan_features = [self.feature_cols[i] for i in nan_indices[:5]]
+                    logger.warning(f"Found {nan_count} NaN values in features: {nan_features}")
+                    X = np.nan_to_num(X, nan=0.0)
+
+                logger.debug(f"Prepared {X.shape[1]} features for leak-proof model")
+                return X
+
+            # ─────────────────────────────────────────────────────────────────────
+            # LEGACY MODEL: Apply dimensionality reduction manually
+            # ─────────────────────────────────────────────────────────────────────
+            feature_cols = all_feature_cols
             X = df_daily[feature_cols].iloc[-1:].values
 
             # Handle NaN values - fill with 0
@@ -775,6 +935,8 @@ class SignalGenerator:
         self,
         df_1min: pd.DataFrame,
         current_price: float,
+        entry_window: Tuple[int, int] = None,
+        exit_window: Tuple[int, int] = None,
     ) -> TradingSignal:
         """
         Generate trading signal from current data.
@@ -782,6 +944,8 @@ class SignalGenerator:
         Args:
             df_1min: Recent 1-minute OHLCV data
             current_price: Current market price
+            entry_window: Optional entry window override (start_min, end_min)
+            exit_window: Optional exit window override (start_min, end_min)
 
         Returns:
             TradingSignal with recommendation
@@ -798,10 +962,34 @@ class SignalGenerator:
             confidence=0.0,
         )
 
-        # Check if we have swing models (either ensemble or single)
-        has_swing = "swing_l2" in self.models or "swing" in self.models
+        # ═══════════════════════════════════════════════════════════════════
+        # DYNAMIC MODEL SELECTOR PATH (REQUIRED)
+        # Uses registry to select/ensemble best validated models
+        # This is the ONLY proper path for production signal generation
+        # ═══════════════════════════════════════════════════════════════════
+        if self.dynamic_selector and self.dynamic_selector.candidates:
+            return self._generate_signal_dynamic(
+                df_1min, current_price, entry_window, exit_window, default_signal
+            )
+
+        # ═══════════════════════════════════════════════════════════════════
+        # STATIC MODEL PATH (DEGRADED MODE - NOT RECOMMENDED)
+        # Uses single model without proper registry validation
+        # WARNING: This path should only be used during initial setup
+        # Run grid search to populate registry: python scripts/run_grid_search.py
+        # ═══════════════════════════════════════════════════════════════════
+        logger.warning("DEGRADED MODE: Using static model without registry validation")
+
+        # Check if we have BOTH swing AND timing models (required)
+        has_swing = "swing_pipeline" in self.models or "swing_l2" in self.models or "swing" in self.models
+        has_timing = "timing_pipeline" in self.models or "timing_l2" in self.models or "timing" in self.models
+
         if not has_swing:
-            logger.warning("Swing model not loaded")
+            logger.error("No swing model available - cannot generate signal")
+            return default_signal
+
+        if not has_timing:
+            logger.error("No timing model available - cannot generate valid signal")
             return default_signal
 
         try:
@@ -826,9 +1014,27 @@ class SignalGenerator:
             if len(X) == 0:
                 return default_signal
 
-            # Get swing prediction (ensemble of L2 + GB if available)
-            # Advanced ensembling for swing prediction
-            if "swing_l2" in self.models and "swing_gb" in self.models:
+            # ─────────────────────────────────────────────────────────────────────
+            # LEAK-PROOF MODEL: Use sklearn Pipeline (handles transformation internally)
+            # ─────────────────────────────────────────────────────────────────────
+            if self.use_leak_proof and "swing_pipeline" in self.models:
+                swing_proba = self.models["swing_pipeline"].predict_proba(X)[0, 1]
+                confidence_penalty = 1.0
+
+                # Timing model - REQUIRED for proper signal generation
+                if "timing_pipeline" not in self.models:
+                    logger.warning("Timing model not available - cannot generate valid signal")
+                    return default_signal  # Reject signal without timing validation
+
+                timing_proba = self.models["timing_pipeline"].predict_proba(X)[0, 1]
+                timing_disagreement = 0.0
+
+                logger.debug(f"Leak-proof: swing={swing_proba:.3f}, timing={timing_proba:.3f}")
+
+            # ─────────────────────────────────────────────────────────────────────
+            # LEGACY MODEL: Manual ensemble of L2 + GB
+            # ─────────────────────────────────────────────────────────────────────
+            elif "swing_l2" in self.models and "swing_gb" in self.models:
                 proba_l2 = self.models["swing_l2"].predict_proba(X)[0, 1]
                 proba_gb = self.models["swing_gb"].predict_proba(X)[0, 1]
 
@@ -855,14 +1061,18 @@ class SignalGenerator:
 
                 # Log ensemble details for debugging
                 logger.debug(f"Ensemble: L2={proba_l2:.3f}, GB={proba_gb:.3f}, disagree={disagreement:.3f}, final={swing_proba:.3f}")
+
+                # Legacy timing models - REQUIRED
+                timing_proba = None  # Will be set below or signal rejected
+                timing_disagreement = 0.0
             else:
                 swing_proba = self.models["swing"].predict_proba(X)[0, 1]
                 confidence_penalty = 1.0
+                timing_proba = None  # Will be set below or signal rejected
+                timing_disagreement = 0.0
 
-            # Advanced ensembling for timing prediction
-            timing_proba = 0.5
-            timing_disagreement = 0.0
-            if "timing_l2" in self.models and "timing_gb" in self.models:
+            # Legacy timing ensemble - REQUIRED for valid signal
+            if not self.use_leak_proof and "timing_l2" in self.models and "timing_gb" in self.models:
                 proba_l2 = self.models["timing_l2"].predict_proba(X)[0, 1]
                 proba_gb = self.models["timing_gb"].predict_proba(X)[0, 1]
                 timing_disagreement = abs(proba_l2 - proba_gb)
@@ -878,6 +1088,11 @@ class SignalGenerator:
                     timing_proba = (proba_l2 + proba_gb) / 2
             elif "timing" in self.models:
                 timing_proba = self.models["timing"].predict_proba(X)[0, 1]
+
+            # REQUIRE timing model - reject signal if no timing validation
+            if timing_proba is None:
+                logger.warning("No timing model available - cannot generate valid signal")
+                return default_signal
 
             # Get dynamic thresholds based on current market conditions
             dyn_thresholds = dynamic_thresholds.get_adjusted_thresholds(current_price)
@@ -969,6 +1184,133 @@ class SignalGenerator:
         except Exception as e:
             logger.error(f"Signal generation failed: {e}")
             return default_signal
+
+    def _generate_signal_dynamic(
+        self,
+        df_1min: pd.DataFrame,
+        current_price: float,
+        entry_window: Tuple[int, int],
+        exit_window: Tuple[int, int],
+        default_signal: TradingSignal,
+    ) -> TradingSignal:
+        """
+        Generate signal using dynamic model selector.
+
+        Uses the registry to select/ensemble the best models for current conditions.
+        """
+        timestamp = datetime.now()
+        symbol = TRADING_CONFIG["symbol"]
+
+        try:
+            # Calculate volatility for dynamic thresholds
+            if len(df_1min) >= 14:
+                df_vol = df_1min.copy()
+                if "high" in df_vol.columns and "low" in df_vol.columns and "close" in df_vol.columns:
+                    tr = np.maximum(
+                        df_vol["high"] - df_vol["low"],
+                        np.maximum(
+                            abs(df_vol["high"] - df_vol["close"].shift(1)),
+                            abs(df_vol["low"] - df_vol["close"].shift(1))
+                        )
+                    )
+                    atr = tr.rolling(14).mean().iloc[-1]
+                    atr_pct = atr / current_price if current_price > 0 else 0
+                    dynamic_thresholds.update_volatility(atr_pct)
+
+            # Prepare features
+            X = self.prepare_features(df_1min)
+
+            if len(X) == 0:
+                return default_signal
+
+            # Get feature names for the dynamic selector
+            feature_names = self.feature_cols if self.feature_cols else []
+
+            # Get prediction from dynamic selector (ensembles best models)
+            prediction = self.dynamic_selector.predict(
+                features=X,
+                feature_names=feature_names,
+                entry_window=entry_window,
+                exit_window=exit_window,
+                n_models=5,
+            )
+
+            swing_proba = prediction.swing_probability
+            timing_proba = prediction.timing_probability
+            confidence = prediction.confidence
+            direction = prediction.direction
+
+            # Log ensemble details
+            logger.info(
+                f"Dynamic ensemble: direction={direction}, swing={swing_proba:.3f}, "
+                f"timing={timing_proba:.3f}, confidence={confidence:.3f}, "
+                f"n_models={prediction.n_models}, agreement={prediction.agreement_ratio:.2f}"
+            )
+
+            # Get dynamic thresholds
+            dyn_thresholds = dynamic_thresholds.get_adjusted_thresholds(current_price)
+            entry_threshold = dyn_thresholds["entry_threshold"]
+            stop_loss_pct = dyn_thresholds["stop_loss_pct"]
+            take_profit_pct = dyn_thresholds["take_profit_pct"]
+            max_position_pct = dyn_thresholds["max_position_pct"]
+
+            # Convert direction to signal type
+            if direction == "LONG" and swing_proba >= entry_threshold:
+                signal_type = SignalType.BUY
+            elif direction == "SHORT" and swing_proba <= (1 - entry_threshold):
+                signal_type = SignalType.SELL
+            else:
+                signal_type = SignalType.HOLD
+
+            # Use ensemble's position sizing suggestion, capped by risk limits
+            position_size = min(
+                prediction.confidence_adjusted_position_pct,
+                max_position_pct
+            )
+            position_size = max(position_size, TRADING_CONFIG["min_position_pct"])
+
+            # Calculate stop loss and take profit
+            if signal_type == SignalType.BUY:
+                stop_loss = current_price * (1 - stop_loss_pct)
+                take_profit = current_price * (1 + take_profit_pct)
+            elif signal_type == SignalType.SELL:
+                stop_loss = current_price * (1 + stop_loss_pct)
+                take_profit = current_price * (1 - take_profit_pct)
+            else:
+                stop_loss = None
+                take_profit = None
+
+            return TradingSignal(
+                timestamp=timestamp,
+                symbol=symbol,
+                signal_type=signal_type,
+                probability=swing_proba,
+                confidence=confidence,
+                entry_price=current_price,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                position_size_pct=position_size,
+                metadata={
+                    "timing_proba": timing_proba,
+                    "ensemble_method": prediction.ensemble_method,
+                    "n_models": prediction.n_models,
+                    "agreement_ratio": prediction.agreement_ratio,
+                    "entry_window": prediction.entry_window,
+                    "exit_window": prediction.exit_window,
+                    "model_predictions": prediction.model_predictions[:3],  # Top 3
+                    "dynamic_selector": True,
+                }
+            )
+
+        except Exception as e:
+            logger.error(f"Dynamic signal generation failed: {e}")
+            return default_signal
+
+    def get_selector_status(self) -> Dict:
+        """Get status of the dynamic model selector."""
+        if self.dynamic_selector:
+            return self.dynamic_selector.get_status()
+        return {"dynamic_selector": False, "mode": "static"}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

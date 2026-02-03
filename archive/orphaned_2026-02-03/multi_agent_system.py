@@ -868,12 +868,29 @@ class SignalValidatorAgent(BaseAgent):
         ]
 
     def tick(self):
-        """Validate pending signals."""
-        # Simulate signal validation
-        n_signals = random.randint(0, 5)
+        """Validate pending signals from the message bus.
 
-        for _ in range(n_signals):
-            signal = self._generate_mock_signal()
+        IMPORTANT: This agent only validates REAL signals from trained ML models.
+        Mock/fake signals are NOT allowed - all signals must come from:
+        - DynamicModelSelector ensemble
+        - Properly trained models from the registry
+        """
+        # Process signals from message bus (real signals only)
+        # Check for pending signals in the queue
+        pending_signals = self._get_pending_signals()
+
+        for signal in pending_signals:
+            # Verify signal has required model-generated fields
+            if not self._is_valid_ml_signal(signal):
+                self.signals_rejected += 1
+                self.message_bus.publish(Message(
+                    msg_type=MessageType.ALERT,
+                    sender=self.name,
+                    data={"signal_rejected": signal, "reasons": ["Invalid signal source - must be ML generated"]},
+                    priority=3,
+                ))
+                continue
+
             is_valid, reasons = self._validate_signal(signal)
 
             if is_valid:
@@ -893,16 +910,39 @@ class SignalValidatorAgent(BaseAgent):
                 ))
 
         self.stats.tasks_completed += 1
-        if n_signals > 0:
-            logger.info(f"[{self.name}] [OK] Validated {n_signals} signals: {self.signals_validated} approved, {self.signals_rejected} rejected")
+        if len(pending_signals) > 0:
+            logger.info(f"[{self.name}] [OK] Validated {len(pending_signals)} signals: {self.signals_validated} approved, {self.signals_rejected} rejected")
 
-    def _generate_mock_signal(self) -> Dict:
-        return {
-            "direction": random.choice(["LONG", "SHORT"]),
-            "confidence": random.uniform(0.4, 0.9),
-            "position_size": random.uniform(0.05, 0.30),
-            "timestamp": datetime.now().isoformat(),
-        }
+    def _get_pending_signals(self) -> List[Dict]:
+        """Get pending signals from the message bus queue."""
+        # In a real implementation, this would pull from a signal queue
+        # For now, return empty list - signals must come from real sources
+        return []
+
+    def _is_valid_ml_signal(self, signal: Dict) -> bool:
+        """Verify signal came from a trained ML model, not mock generation.
+
+        Required fields for valid ML signals:
+        - swing_probability: From swing model
+        - timing_probability: From timing model
+        - model_source: Either 'dynamic_selector' or 'registry'
+        - model_id or experiment_id: Traceability
+        """
+        required_fields = ["swing_probability", "timing_probability"]
+        valid_sources = ["dynamic_selector", "registry", "leak_proof_model"]
+
+        # Check required fields exist
+        for field in required_fields:
+            if field not in signal:
+                return False
+
+        # Check source is valid ML model
+        source = signal.get("model_source", "")
+        if source not in valid_sources:
+            logger.warning(f"Invalid signal source: {source}")
+            return False
+
+        return True
 
     def _validate_signal(self, signal: Dict) -> tuple:
         reasons = []

@@ -378,3 +378,73 @@ class PositionReconciler:
             "critical": sum(1 for r in self._last_reconciliation if r.severity == "critical"),
             "warnings": sum(1 for r in self._last_reconciliation if r.severity == "warning"),
         }
+
+    def sync_from_alpaca(self) -> int:
+        """
+        Sync all positions from Alpaca to internal tracking on startup.
+
+        This ensures we always start with accurate position state from the
+        source of truth (Alpaca).
+
+        Returns:
+            Number of positions synced
+        """
+        try:
+            alpaca_positions = self.get_alpaca_positions()
+
+            synced_count = 0
+            for symbol, pos_data in alpaca_positions.items():
+                if symbol not in self._internal_positions:
+                    logger.info(f"Syncing position from Alpaca: {symbol} qty={pos_data.get('quantity')}")
+                    self._internal_positions[symbol] = {
+                        "quantity": pos_data.get("quantity", 0),
+                        "side": pos_data.get("side", "long"),
+                        "avg_entry": pos_data.get("avg_entry", 0),
+                        "market_value": pos_data.get("market_value", 0),
+                        "unrealized_pl": pos_data.get("unrealized_pl", 0),
+                    }
+                    synced_count += 1
+                else:
+                    # Update existing position to match Alpaca (source of truth)
+                    self._internal_positions[symbol].update({
+                        "quantity": pos_data.get("quantity", 0),
+                        "side": pos_data.get("side", "long"),
+                        "avg_entry": pos_data.get("avg_entry", 0),
+                        "market_value": pos_data.get("market_value", 0),
+                        "unrealized_pl": pos_data.get("unrealized_pl", 0),
+                    })
+
+            if synced_count > 0:
+                logger.info(f"Synced {synced_count} positions from Alpaca")
+
+            return synced_count
+
+        except Exception as e:
+            logger.error(f"Failed to sync positions from Alpaca: {e}")
+            return 0
+
+    def auto_correct_missing_internal(self) -> int:
+        """
+        Auto-correct any MISSING_INTERNAL positions (Alpaca has, we don't track).
+
+        Call this after reconcile() to automatically add untracked positions.
+
+        Returns:
+            Number of positions auto-corrected
+        """
+        if not self._last_reconciliation:
+            return 0
+
+        corrected = 0
+        alpaca_positions = self.get_alpaca_positions()
+
+        for result in self._last_reconciliation:
+            if result.status == ReconciliationStatus.MISSING_INTERNAL:
+                symbol = result.symbol
+                if symbol in alpaca_positions:
+                    self.correct_internal_state(symbol, alpaca_positions[symbol])
+                    result.auto_corrected = True
+                    corrected += 1
+                    logger.info(f"Auto-corrected internal tracking for {symbol}")
+
+        return corrected

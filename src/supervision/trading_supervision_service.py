@@ -158,6 +158,12 @@ class TradingSupervisionService:
             alert_callback=alert_callback,
         ) if self.config.reconciliation_enabled else None
 
+        # Sync positions from Alpaca on startup (source of truth)
+        if self.reconciler:
+            synced = self.reconciler.sync_from_alpaca()
+            if synced > 0:
+                logger.info(f"Startup: Synced {synced} existing positions from Alpaca")
+
         self.circuit_breakers = CircuitBreakerEnforcer(
             config=CircuitBreakerConfig(),
             alpaca_client=alpaca_client,
@@ -249,6 +255,11 @@ class TradingSupervisionService:
                 status.positions_reconciled = True
                 status.last_reconciliation_time = datetime.now()
                 self._last_reconciliation = datetime.now()
+
+                # Auto-correct positions that exist in Alpaca but not tracked internally
+                corrected = self.reconciler.auto_correct_missing_internal()
+                if corrected > 0:
+                    logger.info(f"Auto-corrected {corrected} untracked positions")
 
                 if self.reconciler.has_critical_mismatch():
                     status.warnings.append("Critical position mismatch detected")
