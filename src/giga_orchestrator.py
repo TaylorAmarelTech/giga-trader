@@ -59,6 +59,12 @@ ORCHESTRATOR_CONFIG = {
     "experiment_interval_seconds": 60,  # Min time between experiments
     "max_experiments_per_day": 100,
 
+    # LIVE TRADING GATES
+    # Models from experiments are NOT used in live trading until these criteria are met
+    "min_experiments_before_live_trading": 50,  # At least 50 experiments must complete
+    "min_auc_for_live_trading": 0.60,  # Minimum test AUC for a model to be used in live trading
+    "min_models_above_threshold": 3,  # Need at least 3 models meeting the AUC threshold
+
     # Monitoring
     "status_update_interval": 30,  # seconds
     "health_check_interval": 300,  # 5 minutes
@@ -137,6 +143,14 @@ class SystemStatus:
     last_error: str = ""
     health_status: str = "HEALTHY"
 
+    # Experiment gates (for live trading)
+    experiments_completed: int = 0
+    experiments_required: int = 50
+    models_above_threshold: int = 0
+    models_required: int = 3
+    best_model_auc: float = 0.0
+    gates_passed: bool = False
+
     # Components
     components: Dict = None
 
@@ -171,6 +185,14 @@ class SystemStatus:
                 "status": self.health_status,
                 "consecutive_errors": self.consecutive_errors,
                 "last_error": self.last_error,
+            },
+            "experiment_gates": {
+                "gates_passed": self.gates_passed,
+                "experiments_completed": self.experiments_completed,
+                "experiments_required": self.experiments_required,
+                "models_above_threshold": self.models_above_threshold,
+                "models_required": self.models_required,
+                "best_model_auc": self.best_model_auc,
             },
             "components": self.components,
         }
@@ -527,6 +549,102 @@ class ExperimentRunner:
 
 
 # ===============================================================================
+# EXPERIMENT GATE CHECKER
+# ===============================================================================
+class ExperimentGateChecker:
+    """
+    Checks if experiment requirements are met before allowing live trading.
+
+    Gates:
+      1. Minimum 50 experiments completed
+      2. At least 3 models with test_auc >= 0.60
+      3. Best model test_auc >= 0.60
+    """
+
+    def __init__(self):
+        self.logger = logging.getLogger("GATE_CHECK")
+        self._cache = None
+        self._cache_time = None
+        self._cache_duration = 60  # Cache for 60 seconds
+
+    def check_gates(self) -> tuple:
+        """
+        Check all experiment gates.
+
+        Returns:
+            (gates_passed: bool, status: dict)
+        """
+        # Use cached result if recent
+        if self._cache_time and (datetime.now() - self._cache_time).seconds < self._cache_duration:
+            return self._cache
+
+        try:
+            from src.experiment_engine import ExperimentHistory, ModelRegistry
+
+            history = ExperimentHistory()
+            registry = ModelRegistry()
+
+            # Get stats
+            hist_stats = history.get_statistics()
+            completed_count = hist_stats.get("completed", 0)
+            best_auc = hist_stats.get("best_test_auc", 0.0)
+
+            # Count models above AUC threshold
+            min_auc = ORCHESTRATOR_CONFIG["min_auc_for_live_trading"]
+            models_above_threshold = sum(
+                1 for m in registry.models.values()
+                if m.test_auc >= min_auc
+            )
+
+            # Check gates
+            gate_results = {
+                "completed_experiments": completed_count,
+                "min_experiments_required": ORCHESTRATOR_CONFIG["min_experiments_before_live_trading"],
+                "experiments_gate_passed": completed_count >= ORCHESTRATOR_CONFIG["min_experiments_before_live_trading"],
+
+                "models_above_threshold": models_above_threshold,
+                "min_models_required": ORCHESTRATOR_CONFIG["min_models_above_threshold"],
+                "models_gate_passed": models_above_threshold >= ORCHESTRATOR_CONFIG["min_models_above_threshold"],
+
+                "best_model_auc": best_auc,
+                "min_auc_required": min_auc,
+                "auc_gate_passed": best_auc >= min_auc,
+            }
+
+            all_gates_passed = (
+                gate_results["experiments_gate_passed"] and
+                gate_results["models_gate_passed"] and
+                gate_results["auc_gate_passed"]
+            )
+
+            gate_results["all_gates_passed"] = all_gates_passed
+
+            # Log status
+            if not all_gates_passed:
+                missing = []
+                if not gate_results["experiments_gate_passed"]:
+                    missing.append(f"experiments ({completed_count}/{ORCHESTRATOR_CONFIG['min_experiments_before_live_trading']})")
+                if not gate_results["models_gate_passed"]:
+                    missing.append(f"models ({models_above_threshold}/{ORCHESTRATOR_CONFIG['min_models_above_threshold']})")
+                if not gate_results["auc_gate_passed"]:
+                    missing.append(f"AUC ({best_auc:.3f}/{min_auc})")
+                self.logger.info(f"Live trading gates NOT met: {', '.join(missing)}")
+            else:
+                self.logger.info(f"All live trading gates PASSED! ({completed_count} experiments, {models_above_threshold} good models, best AUC {best_auc:.3f})")
+
+            # Cache result
+            self._cache = (all_gates_passed, gate_results)
+            self._cache_time = datetime.now()
+
+            return all_gates_passed, gate_results
+
+        except Exception as e:
+            self.logger.error(f"Gate check error: {e}")
+            # Default to NOT passing gates if we can't check
+            return False, {"error": str(e), "all_gates_passed": False}
+
+
+# ===============================================================================
 # TRADING ENGINE
 # ===============================================================================
 class TradingEngine:
@@ -536,6 +654,7 @@ class TradingEngine:
         self.bot = None
         self.is_running = False
         self.trade_count = 0
+        self.gate_checker = ExperimentGateChecker()
 
     def start(self):
         """Start the trading bot."""
@@ -544,6 +663,23 @@ class TradingEngine:
             return
 
         self.logger.info("Starting trading engine...")
+
+        # CHECK EXPERIMENT GATES BEFORE TRADING
+        gates_passed, gate_status = self.gate_checker.check_gates()
+
+        if not gates_passed:
+            self.logger.warning("=" * 60)
+            self.logger.warning("LIVE TRADING BLOCKED - EXPERIMENT GATES NOT MET")
+            self.logger.warning("=" * 60)
+            self.logger.warning(f"  Experiments: {gate_status.get('completed_experiments', 0)}/{gate_status.get('min_experiments_required', 50)}")
+            self.logger.warning(f"  Good models: {gate_status.get('models_above_threshold', 0)}/{gate_status.get('min_models_required', 3)}")
+            self.logger.warning(f"  Best AUC:    {gate_status.get('best_model_auc', 0):.3f}/{gate_status.get('min_auc_required', 0.60):.3f}")
+            self.logger.warning("Continue running experiments to meet the gates.")
+            self.logger.warning("=" * 60)
+            self.status.components["trading_bot"] = "BLOCKED_BY_GATES"
+            self.status.save()
+            return
+
         self.status.components["trading_bot"] = "STARTING"
         self.status.save()
 
@@ -559,7 +695,7 @@ class TradingEngine:
             self.status.components["risk_manager"] = "RUNNING"
             self.status.save()
 
-            self.logger.info("Trading engine started successfully")
+            self.logger.info("Trading engine started successfully (gates passed)")
 
         except Exception as e:
             self.logger.error(f"Failed to start trading: {e}")
@@ -721,6 +857,17 @@ class StatusDisplay:
         print(f"   Loaded: {s.model_loaded}")
         print(f"   Last Train: {s.last_train_date or 'Never'}")
 
+        # Experiment Gates
+        print(f"\n [EXPERIMENT GATES]")
+        gate_icon = "[PASS]" if s.gates_passed else "[WAIT]"
+        print(f"   {gate_icon} Experiments: {s.experiments_completed}/{s.experiments_required}")
+        print(f"   {gate_icon} Good Models: {s.models_above_threshold}/{s.models_required}")
+        print(f"   {gate_icon} Best AUC: {s.best_model_auc:.3f} (need >=0.60)")
+        if not s.gates_passed:
+            print(f"   >>> Live trading BLOCKED until gates pass <<<")
+        else:
+            print(f"   >>> Live trading ENABLED <<<")
+
         # Health
         print(f"\n [HEALTH]")
         print(f"   Status: {s.health_status}")
@@ -777,12 +924,26 @@ class GigaOrchestrator:
         self.last_experiment_date = None
         self.last_comprehensive_backtest = None  # Track when we last ran comprehensive backtest
         self._status_thread = None
+        self.gate_checker = None  # Initialized in startup()
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._handle_shutdown)
         signal.signal(signal.SIGTERM, self._handle_shutdown)
 
         logger.info("GigaOrchestrator initialized")
+
+    def _update_gate_status(self):
+        """Update experiment gate status in the system status."""
+        try:
+            passed, gate_info = self.gate_checker.check_gates()
+            self.status.gates_passed = passed
+            self.status.experiments_completed = gate_info.get("completed_experiments", 0)
+            self.status.experiments_required = gate_info.get("min_experiments_required", 50)
+            self.status.models_above_threshold = gate_info.get("models_above_threshold", 0)
+            self.status.models_required = gate_info.get("min_models_required", 3)
+            self.status.best_model_auc = gate_info.get("best_model_auc", 0.0)
+        except Exception as e:
+            logger.warning(f"Failed to update gate status: {e}")
 
     def _should_run_comprehensive_backtest(self) -> bool:
         """Check if we should run comprehensive backtesting."""
@@ -846,10 +1007,17 @@ class GigaOrchestrator:
         self.experiment_runner.initialize()
         self.last_experiment_date = datetime.now().date()
 
+        # Initialize gate checker and update initial gate status
+        self.gate_checker = ExperimentGateChecker()
+        self._update_gate_status()
+
         self.status.mode = "READY"
         self.status.save()
 
         logger.info("Startup complete - system will NEVER be idle!")
+        logger.info(f"Experiment gates: {self.status.experiments_completed}/{self.status.experiments_required} experiments")
+        if not self.status.gates_passed:
+            logger.info("Live trading will be BLOCKED until experiment gates pass")
 
     def run_forever(self):
         """Main loop - runs until shutdown."""
@@ -935,6 +1103,8 @@ class GigaOrchestrator:
                 # PERIODIC: STATUS UPDATES
                 # ─────────────────────────────────────────────────────────
                 if (now - last_status_update).seconds >= ORCHESTRATOR_CONFIG["status_update_interval"]:
+                    # Update gate status
+                    self._update_gate_status()
                     self.status.save()
                     self.display.print_status()
                     last_status_update = now
