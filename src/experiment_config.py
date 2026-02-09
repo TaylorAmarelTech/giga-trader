@@ -289,6 +289,35 @@ class EntryExitConfig:
 
 
 @dataclass
+class TemporalCascadeConfig:
+    """Temporal cascade model configuration for anti-overfitting."""
+    # Master switch
+    use_temporal_cascade: bool = True
+
+    # Temporal slices to train (minutes from market open)
+    temporal_slices: List[int] = field(
+        default_factory=lambda: [0, 30, 60, 90, 120, 180]
+    )
+
+    # Model settings
+    model_type: str = "gradient_boosting"  # "gradient_boosting", "logistic", "ensemble"
+    regularization_strength: float = 0.1
+
+    # Training settings
+    cv_folds: int = 5
+    purge_days: int = 5
+    embargo_days: int = 2
+
+    # Thresholds for model registration
+    min_cv_auc: float = 0.55
+    min_slices_passing: int = 3
+
+    # Prediction weighting
+    weight_by_recency: bool = True  # More recent temporal slices get higher weight
+    min_agreement_for_signal: float = 0.6  # Minimum model agreement to generate signal
+
+
+@dataclass
 class TradingConfig:
     """Trading strategy configuration."""
     entry_threshold: float = 0.6
@@ -326,6 +355,7 @@ class ExperimentConfig:
     anti_overfit: AntiOverfitConfig = field(default_factory=AntiOverfitConfig)
     robustness_ensemble: RobustnessEnsembleConfig = field(default_factory=RobustnessEnsembleConfig)
     entry_exit: EntryExitConfig = field(default_factory=EntryExitConfig)
+    temporal_cascade: TemporalCascadeConfig = field(default_factory=TemporalCascadeConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
 
     def __post_init__(self):
@@ -373,6 +403,7 @@ class ExperimentConfig:
             anti_overfit=AntiOverfitConfig(**d.get("anti_overfit", {})),
             robustness_ensemble=RobustnessEnsembleConfig(**d.get("robustness_ensemble", {})),
             entry_exit=EntryExitConfig(**d.get("entry_exit", {})),
+            temporal_cascade=TemporalCascadeConfig(**d.get("temporal_cascade", {})),
             trading=TradingConfig(**d.get("trading", {})),
         )
         return config

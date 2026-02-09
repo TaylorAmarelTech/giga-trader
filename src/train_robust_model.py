@@ -194,6 +194,29 @@ CONFIG = {
     "exit_window": (180, 385),  # Exit window (minutes from open)
     "min_position_pct": 0.05,  # Minimum position size (5%)
     "max_position_pct": 0.25,  # Maximum position size (25%)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # TEMPORAL INTEGRATED TRAINING (anti-overfitting through temporal diversity)
+    # ─────────────────────────────────────────────────────────────────────────
+    "use_temporal_integration": True,  # Train temporal cascade and masked variants
+    "temporal_slices": [0, 30, 60, 90, 120, 180],  # Minutes from market open
+    "temporal_mask_prob": 0.2,  # 20% temporal masking
+    "n_masked_models": 5,  # Number of masked model variants
+    "train_temporal_cascade": True,  # Train T0, T30, T60, etc. models
+    "train_masked_variants": True,  # Train models with temporal masking
+    "train_attention_cascade": True,  # Train attention-weighted cascade
+    "min_temporal_agreement": 0.6,  # Minimum agreement between temporal models
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # FEATURE GROUP PROTECTION (hierarchical dim reduction)
+    # Protects important feature categories from being eliminated by dim reduction.
+    # ─────────────────────────────────────────────────────────────────────────
+    "use_feature_groups": True,
+    "feature_group_mode": "grouped_protected",  # flat, protected, grouped, grouped_protected
+    "protected_groups": ["premarket", "calendar"],  # These survive dim reduction
+    "feature_group_budget_mode": "proportional",  # proportional or equal
+    "feature_group_total_components": 40,  # Total components for non-protected groups
+    "feature_group_min_components": 2,  # Minimum components per group
 }
 
 
@@ -2331,6 +2354,17 @@ def main():
             "random_state": 42,
         }
 
+        # Feature group protection (hierarchical dim reduction)
+        if CONFIG.get("use_feature_groups", False):
+            leak_proof_config["feature_names"] = feature_cols
+            leak_proof_config["group_mode"] = CONFIG.get("feature_group_mode", "flat")
+            leak_proof_config["protected_groups"] = CONFIG.get("protected_groups", [])
+            leak_proof_config["budget_mode"] = CONFIG.get("feature_group_budget_mode", "proportional")
+            leak_proof_config["total_components"] = CONFIG.get("feature_group_total_components", 40)
+            leak_proof_config["min_components_per_group"] = CONFIG.get("feature_group_min_components", 2)
+            print(f"[INFO] Feature group protection: mode={leak_proof_config['group_mode']}, "
+                  f"protected={leak_proof_config['protected_groups']}")
+
         # Train swing model with leak-proof CV
         print("\n[SWING MODEL - Leak-Proof Training]")
         swing_pipeline, swing_cv_results = train_with_leak_proof_cv(
@@ -2707,6 +2741,89 @@ def main():
             import traceback
             traceback.print_exc()
             entry_exit_model = None
+
+    # Step 9E: Temporal Integrated Training (anti-overfitting through temporal diversity)
+    temporal_results = None
+    if CONFIG.get("use_temporal_integration", True):
+        print("\n" + "=" * 70)
+        print("STEP 9E: TEMPORAL INTEGRATED TRAINING")
+        print("=" * 70)
+        print("[INFO] Training temporal cascade and masked variants for anti-overfitting")
+        print("  This trains multiple model variants:")
+        print("    - BASE models (standard)")
+        print("    - MASKED variants (5 models with 20% temporal masking)")
+        print("    - TEMPORAL CASCADE (T0, T30, T60, T90, T120, T180)")
+        print("    - INTERMITTENT MASKED (dropout regularization)")
+        print("    - ATTENTION-WEIGHTED (learned importance)")
+        print()
+
+        try:
+            from src.temporal_integrated_training import (
+                TemporalIntegratedTrainer,
+                TemporalModelRegistry,
+                train_all_temporal_models,
+            )
+
+            # Prepare intraday data dictionary for temporal cascade
+            print("[INFO] Preparing intraday data for temporal cascade...")
+            df_1min_dict = None
+            if CONFIG.get("train_temporal_cascade", True) and df_1min is not None:
+                df_1min_dict = {}
+                df_1min['date_str'] = pd.to_datetime(df_1min['timestamp']).dt.date.astype(str)
+                for date_str, group in df_1min.groupby('date_str'):
+                    df_1min_dict[date_str] = group.copy().reset_index(drop=True)
+                print(f"  Prepared {len(df_1min_dict)} days of intraday data")
+
+            # Get train/test splits from earlier
+            # X_robust, y arrays already available
+            train_end = int(len(X_robust) * 0.8) - CONFIG["purge_days"]
+            test_start = int(len(X_robust) * 0.8)
+
+            X_train_temporal = X_robust[:train_end]
+            X_test_temporal = X_robust[test_start:]
+            y_swing_train = y[:train_end]
+            y_swing_test = y[test_start:]
+            y_timing_train = y_timing[:train_end]
+            y_timing_test = y_timing[test_start:]
+            w_swing_train = weights[:train_end] if weights is not None else None
+            w_timing_train = timing_weights[:train_end] if timing_weights is not None else None
+
+            print(f"  Train samples: {len(X_train_temporal)}")
+            print(f"  Test samples: {len(X_test_temporal)}")
+
+            # Train all temporal variants
+            temporal_results = train_all_temporal_models(
+                X_train=X_train_temporal,
+                y_swing_train=y_swing_train,
+                y_timing_train=y_timing_train,
+                X_test=X_test_temporal,
+                y_swing_test=y_swing_test,
+                y_timing_test=y_timing_test,
+                df_daily=df_clean if CONFIG.get("train_temporal_cascade", True) else None,
+                df_1min_dict=df_1min_dict,
+                swing_weights=w_swing_train,
+                timing_weights=w_timing_train,
+            )
+
+            # Store in results
+            results["temporal_integration"] = {
+                "n_swing_models": len([r for r in temporal_results['swing']['records']]),
+                "n_timing_models": len([r for r in temporal_results['timing']['records']]),
+                "best_swing_auc": max(r.cv_auc for r in temporal_results['swing']['records']),
+                "best_timing_auc": max(r.cv_auc for r in temporal_results['timing']['records']),
+            }
+
+            # Log summary
+            registry = temporal_results['registry']
+            print("\n" + registry.summary())
+
+            print("\n  [PASS] Temporal Integrated Training complete")
+
+        except Exception as e:
+            print(f"  [WARN] Temporal Integrated Training failed: {e}")
+            import traceback
+            traceback.print_exc()
+            temporal_results = None
 
     # Step 10: Save (use robust_feature_names which are the transformed feature names)
     model_path = save_models(models, results, scaler, robust_feature_names,

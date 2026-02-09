@@ -67,6 +67,23 @@ STEP_DESCRIPTIONS = {
     ExperimentStep.FAILED: "Experiment failed",
 }
 
+# Expected duration ranges per step (min_seconds, typical_seconds, max_seconds)
+# Used by dashboard to show "this step normally takes X" instead of "STUCK"
+STEP_EXPECTED_DURATIONS = {
+    ExperimentStep.IDLE: (0, 0, 0),
+    ExperimentStep.LOADING_DATA: (10, 30, 120),
+    ExperimentStep.FEATURE_ENGINEERING: (15, 60, 300),
+    ExperimentStep.ANTI_OVERFIT: (60, 600, 3600),        # 1-60 min (downloads + synthetic universes)
+    ExperimentStep.DIM_REDUCTION: (10, 60, 300),
+    ExperimentStep.TRAIN_TEST_SPLIT: (1, 5, 30),
+    ExperimentStep.MODEL_TRAINING: (30, 300, 3600),      # 0.5-60 min (depends on model type)
+    ExperimentStep.CROSS_VALIDATION: (60, 600, 7200),    # 1-120 min (leak-proof CV is expensive)
+    ExperimentStep.EVALUATION: (30, 300, 3600),           # 0.5-60 min (includes stability + fragility)
+    ExperimentStep.BACKTEST: (5, 30, 180),
+    ExperimentStep.COMPLETE: (0, 0, 0),
+    ExperimentStep.FAILED: (0, 0, 0),
+}
+
 
 @dataclass
 class ExperimentProgress:
@@ -291,13 +308,32 @@ class ExperimentProgressTracker:
         with self._lock:
             data = self.progress.to_dict()
 
-            # Add computed fields
+            # Look up expected duration for current step
+            step_enum = None
+            for s in ExperimentStep:
+                if s.value == self.progress.step:
+                    step_enum = s
+                    break
+            expected = STEP_EXPECTED_DURATIONS.get(step_enum, (60, 300, 1800))
+            data["step_expected_min"] = expected[0]
+            data["step_expected_typical"] = expected[1]
+            data["step_expected_max"] = expected[2]
+
+            # Add computed fields with step-aware stuck thresholds
             if self.progress.last_activity:
                 try:
                     last = datetime.fromisoformat(self.progress.last_activity)
-                    data["seconds_since_activity"] = (datetime.now() - last).total_seconds()
-                    data["stuck_warning"] = data["seconds_since_activity"] > 120  # 2 min
-                    data["stuck_critical"] = data["seconds_since_activity"] > 300  # 5 min
+                    secs = (datetime.now() - last).total_seconds()
+                    data["seconds_since_activity"] = secs
+                    # Stuck thresholds scale with expected step duration
+                    # Warning: 2x the typical duration for this step (min 10 min)
+                    # Critical: 3x the max duration for this step (min 30 min)
+                    warn_threshold = max(600, expected[1] * 2)
+                    crit_threshold = max(1800, expected[2] * 3)
+                    data["stuck_warning"] = secs > warn_threshold
+                    data["stuck_critical"] = secs > crit_threshold
+                    data["stuck_warn_threshold"] = warn_threshold
+                    data["stuck_crit_threshold"] = crit_threshold
                 except (ValueError, TypeError):
                     data["seconds_since_activity"] = 0
                     data["stuck_warning"] = False
@@ -331,13 +367,33 @@ def get_experiment_progress() -> Dict:
             with open(progress_file) as f:
                 data = json.load(f)
 
-            # Add computed fields
+            # Look up expected duration for current step
+            step_str = data.get("step", "idle")
+            step_enum = None
+            for s in ExperimentStep:
+                if s.value == step_str:
+                    step_enum = s
+                    break
+            expected = STEP_EXPECTED_DURATIONS.get(step_enum, (60, 300, 1800))
+            data["step_expected_min"] = expected[0]
+            data["step_expected_typical"] = expected[1]
+            data["step_expected_max"] = expected[2]
+
+            # Add computed fields with step-aware stuck thresholds
             if data.get("last_activity"):
                 try:
                     last = datetime.fromisoformat(data["last_activity"])
-                    data["seconds_since_activity"] = (datetime.now() - last).total_seconds()
-                    data["stuck_warning"] = data["seconds_since_activity"] > 120  # 2 min
-                    data["stuck_critical"] = data["seconds_since_activity"] > 300  # 5 min
+                    secs = (datetime.now() - last).total_seconds()
+                    data["seconds_since_activity"] = secs
+                    # Stuck thresholds scale with expected step duration
+                    # Warning: 2x the typical duration (min 10 min)
+                    # Critical: 3x the max duration (min 30 min)
+                    warn_threshold = max(600, expected[1] * 2)
+                    crit_threshold = max(1800, expected[2] * 3)
+                    data["stuck_warning"] = secs > warn_threshold
+                    data["stuck_critical"] = secs > crit_threshold
+                    data["stuck_warn_threshold"] = warn_threshold
+                    data["stuck_crit_threshold"] = crit_threshold
                 except Exception:
                     data["seconds_since_activity"] = 0
                     data["stuck_warning"] = False

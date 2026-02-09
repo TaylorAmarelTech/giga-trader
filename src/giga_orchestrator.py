@@ -65,6 +65,11 @@ ORCHESTRATOR_CONFIG = {
     "min_auc_for_live_trading": 0.60,  # Minimum test AUC for a model to be used in live trading
     "min_models_above_threshold": 3,  # Need at least 3 models meeting the AUC threshold
 
+    # PAPER TRADING GATES (less strict - paper money is for learning)
+    "min_experiments_before_paper_trading": 5,  # Only 5 experiments needed for paper
+    "min_auc_for_paper_trading": 0.55,  # Lower AUC bar for paper
+    "min_models_above_threshold_paper": 1,  # Just 1 model needed for paper
+
     # Monitoring
     "status_update_interval": 30,  # seconds
     "health_check_interval": 300,  # 5 minutes
@@ -397,6 +402,58 @@ class TrainingEngine:
             self.logger.error(f"Improvement error: {e}")
             return False
 
+    def run_temporal_cascade_training(self) -> bool:
+        """
+        Train temporal cascade models for anti-overfitting.
+
+        Temporal cascade models use different temporal slices (T0, T30, T60, etc.)
+        to reduce overfitting and provide real-time prediction updates.
+        """
+        self.logger.info("=" * 60)
+        self.logger.info("TRAINING TEMPORAL CASCADE MODELS")
+        self.logger.info("=" * 60)
+
+        try:
+            from src.temporal_cascade_trainer import (
+                train_temporal_cascade,
+                load_temporal_cascade,
+            )
+            from src.data_manager import get_spy_data
+
+            # Load data
+            self.logger.info("Loading data for temporal cascade training...")
+            df_1min = get_spy_data(years=3)
+
+            if df_1min is None or len(df_1min) == 0:
+                self.logger.error("No data available for temporal cascade training")
+                return False
+
+            self.logger.info(f"Loaded {len(df_1min):,} bars")
+
+            # Train
+            result = train_temporal_cascade(
+                df_1min=df_1min,
+                save_model=True,
+            )
+
+            if result.success:
+                self.logger.info("Temporal cascade training successful!")
+                self.logger.info(f"  Slices trained: {result.n_slices_trained}")
+                self.logger.info(f"  Slices passing: {result.n_slices_passing}")
+                self.logger.info(f"  Ensemble CV AUC: {result.ensemble_cv_auc:.4f}")
+                return True
+            else:
+                self.logger.warning(f"Temporal cascade training failed: {result.error_message}")
+                return False
+
+        except ImportError as e:
+            self.logger.warning(f"Temporal cascade module not available: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Temporal cascade training error: {e}")
+            self.logger.error(traceback.format_exc())
+            return False
+
 
 # ===============================================================================
 # EXPERIMENT RUNNER (NEVER IDLE)
@@ -489,7 +546,7 @@ class ExperimentRunner:
 
         finally:
             self.is_running = False
-            self.status.components["experiment_engine"] = "IDLE"
+            self.status.components["experiment_engine"] = "WAITING_NEXT"
             self.status.save()
 
     def run_quick_backtest(self) -> bool:
@@ -553,30 +610,55 @@ class ExperimentRunner:
 # ===============================================================================
 class ExperimentGateChecker:
     """
-    Checks if experiment requirements are met before allowing live trading.
+    Checks if experiment requirements are met before allowing trading.
 
-    Gates:
+    Live gates (strict):
       1. Minimum 50 experiments completed
       2. At least 3 models with test_auc >= 0.60
       3. Best model test_auc >= 0.60
+
+    Paper gates (relaxed):
+      1. Minimum 5 experiments completed
+      2. At least 1 model with test_auc >= 0.55
+      3. Best model test_auc >= 0.55
     """
 
     def __init__(self):
         self.logger = logging.getLogger("GATE_CHECK")
-        self._cache = None
-        self._cache_time = None
+        self._cache = {}  # keyed by mode
+        self._cache_time = {}
         self._cache_duration = 60  # Cache for 60 seconds
 
-    def check_gates(self) -> tuple:
+    def check_gates(self, trading_mode: str = None) -> tuple:
         """
-        Check all experiment gates.
+        Check experiment gates for the given trading mode.
+
+        Args:
+            trading_mode: "paper" or "live". If None, reads from env TRADING_MODE.
 
         Returns:
             (gates_passed: bool, status: dict)
         """
+        if trading_mode is None:
+            trading_mode = os.getenv("TRADING_MODE", "paper")
+
         # Use cached result if recent
-        if self._cache_time and (datetime.now() - self._cache_time).seconds < self._cache_duration:
-            return self._cache
+        cache_key = trading_mode
+        if cache_key in self._cache_time and (datetime.now() - self._cache_time[cache_key]).seconds < self._cache_duration:
+            return self._cache[cache_key]
+
+        # Select thresholds based on trading mode
+        is_paper = trading_mode == "paper"
+        if is_paper:
+            min_experiments = ORCHESTRATOR_CONFIG["min_experiments_before_paper_trading"]
+            min_auc = ORCHESTRATOR_CONFIG["min_auc_for_paper_trading"]
+            min_models = ORCHESTRATOR_CONFIG["min_models_above_threshold_paper"]
+            mode_label = "PAPER"
+        else:
+            min_experiments = ORCHESTRATOR_CONFIG["min_experiments_before_live_trading"]
+            min_auc = ORCHESTRATOR_CONFIG["min_auc_for_live_trading"]
+            min_models = ORCHESTRATOR_CONFIG["min_models_above_threshold"]
+            mode_label = "LIVE"
 
         try:
             from src.experiment_engine import ExperimentHistory, ModelRegistry
@@ -589,22 +671,39 @@ class ExperimentGateChecker:
             completed_count = hist_stats.get("completed", 0)
             best_auc = hist_stats.get("best_test_auc", 0.0)
 
-            # Count models above AUC threshold
-            min_auc = ORCHESTRATOR_CONFIG["min_auc_for_live_trading"]
+            # Count models above AUC threshold AND meeting tier requirement
+            # Paper mode: need Tier >= 2 (stability-verified)
+            # Live mode: need Tier >= 3 (fragility-verified)
+            min_tier = 2 if is_paper else 3
             models_above_threshold = sum(
+                1 for m in registry.models.values()
+                if m.test_auc >= min_auc and getattr(m, 'tier', 1) >= min_tier
+            )
+
+            # Also count ALL models above AUC (for backward compat during transition)
+            # If no tiered models exist yet, fall back to AUC-only count
+            models_above_auc_only = sum(
                 1 for m in registry.models.values()
                 if m.test_auc >= min_auc
             )
+            # Transition: if no tiered models exist, use AUC-only count
+            if models_above_threshold == 0 and models_above_auc_only >= min_models:
+                models_above_threshold = models_above_auc_only
+                self.logger.info(f"  (Using AUC-only count during tier transition: {models_above_auc_only} models)")
 
             # Check gates
             gate_results = {
+                "trading_mode": trading_mode,
+                "mode_label": mode_label,
+
                 "completed_experiments": completed_count,
-                "min_experiments_required": ORCHESTRATOR_CONFIG["min_experiments_before_live_trading"],
-                "experiments_gate_passed": completed_count >= ORCHESTRATOR_CONFIG["min_experiments_before_live_trading"],
+                "min_experiments_required": min_experiments,
+                "experiments_gate_passed": completed_count >= min_experiments,
 
                 "models_above_threshold": models_above_threshold,
-                "min_models_required": ORCHESTRATOR_CONFIG["min_models_above_threshold"],
-                "models_gate_passed": models_above_threshold >= ORCHESTRATOR_CONFIG["min_models_above_threshold"],
+                "min_models_required": min_models,
+                "min_tier_required": min_tier,
+                "models_gate_passed": models_above_threshold >= min_models,
 
                 "best_model_auc": best_auc,
                 "min_auc_required": min_auc,
@@ -623,18 +722,18 @@ class ExperimentGateChecker:
             if not all_gates_passed:
                 missing = []
                 if not gate_results["experiments_gate_passed"]:
-                    missing.append(f"experiments ({completed_count}/{ORCHESTRATOR_CONFIG['min_experiments_before_live_trading']})")
+                    missing.append(f"experiments ({completed_count}/{min_experiments})")
                 if not gate_results["models_gate_passed"]:
-                    missing.append(f"models ({models_above_threshold}/{ORCHESTRATOR_CONFIG['min_models_above_threshold']})")
+                    missing.append(f"models ({models_above_threshold}/{min_models})")
                 if not gate_results["auc_gate_passed"]:
                     missing.append(f"AUC ({best_auc:.3f}/{min_auc})")
-                self.logger.info(f"Live trading gates NOT met: {', '.join(missing)}")
+                self.logger.info(f"{mode_label} trading gates NOT met: {', '.join(missing)}")
             else:
-                self.logger.info(f"All live trading gates PASSED! ({completed_count} experiments, {models_above_threshold} good models, best AUC {best_auc:.3f})")
+                self.logger.info(f"All {mode_label} trading gates PASSED! ({completed_count} experiments, {models_above_threshold} good models, best AUC {best_auc:.3f})")
 
             # Cache result
-            self._cache = (all_gates_passed, gate_results)
-            self._cache_time = datetime.now()
+            self._cache[cache_key] = (all_gates_passed, gate_results)
+            self._cache_time[cache_key] = datetime.now()
 
             return all_gates_passed, gate_results
 
@@ -662,18 +761,20 @@ class TradingEngine:
             self.logger.warning("Trading already running")
             return
 
-        self.logger.info("Starting trading engine...")
+        trading_mode = os.getenv("TRADING_MODE", "paper")
+        self.logger.info(f"Starting trading engine (mode={trading_mode})...")
 
-        # CHECK EXPERIMENT GATES BEFORE TRADING
-        gates_passed, gate_status = self.gate_checker.check_gates()
+        # CHECK EXPERIMENT GATES BEFORE TRADING (mode-aware thresholds)
+        gates_passed, gate_status = self.gate_checker.check_gates(trading_mode=trading_mode)
+        mode_label = gate_status.get("mode_label", trading_mode.upper())
 
         if not gates_passed:
             self.logger.warning("=" * 60)
-            self.logger.warning("LIVE TRADING BLOCKED - EXPERIMENT GATES NOT MET")
+            self.logger.warning(f"{mode_label} TRADING BLOCKED - EXPERIMENT GATES NOT MET")
             self.logger.warning("=" * 60)
-            self.logger.warning(f"  Experiments: {gate_status.get('completed_experiments', 0)}/{gate_status.get('min_experiments_required', 50)}")
-            self.logger.warning(f"  Good models: {gate_status.get('models_above_threshold', 0)}/{gate_status.get('min_models_required', 3)}")
-            self.logger.warning(f"  Best AUC:    {gate_status.get('best_model_auc', 0):.3f}/{gate_status.get('min_auc_required', 0.60):.3f}")
+            self.logger.warning(f"  Experiments: {gate_status.get('completed_experiments', 0)}/{gate_status.get('min_experiments_required')}")
+            self.logger.warning(f"  Good models: {gate_status.get('models_above_threshold', 0)}/{gate_status.get('min_models_required')}")
+            self.logger.warning(f"  Best AUC:    {gate_status.get('best_model_auc', 0):.3f}/{gate_status.get('min_auc_required', 0.55):.3f}")
             self.logger.warning("Continue running experiments to meet the gates.")
             self.logger.warning("=" * 60)
             self.status.components["trading_bot"] = "BLOCKED_BY_GATES"
