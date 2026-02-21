@@ -36,11 +36,17 @@ def mock_prices():
     prices["^IRX"] = 2.5 + np.cumsum(np.random.normal(0, 0.01, n_days))
 
     # Bond ETFs: start at 100, random walk
-    for etf in ["SHY", "LQD", "JNK", "TIP"]:
+    for etf in ["SHY", "LQD", "JNK", "TIP", "AGG"]:
         prices[etf] = 100 * np.exp(np.cumsum(np.random.normal(0.0001, 0.003, n_days)))
+
+    # Volatility term structure
+    prices["^VXV"] = 22.0 + np.cumsum(np.random.normal(0, 0.4, n_days))
+    prices["^VXV"] = np.clip(prices["^VXV"], 12, 55)
 
     # Other ETFs
     prices["USO"] = 60 * np.exp(np.cumsum(np.random.normal(0, 0.01, n_days)))
+    prices["DBC"] = 20 * np.exp(np.cumsum(np.random.normal(0, 0.007, n_days)))
+    prices["GLD"] = 180 * np.exp(np.cumsum(np.random.normal(0.0002, 0.005, n_days)))
     prices["XLF"] = 35 * np.exp(np.cumsum(np.random.normal(0.0003, 0.008, n_days)))
 
     return prices
@@ -74,7 +80,7 @@ class TestEconomicFeaturesInit:
 
     def test_default_sources(self):
         ef = EconomicFeatures()
-        assert len(ef.sources) == 11
+        assert len(ef.sources) == 15
 
     def test_custom_sources(self):
         ef = EconomicFeatures(sources=["^VIX", "^TNX"])
@@ -167,6 +173,23 @@ class TestDerivedFeatures:
         result = econ_features.create_economic_features(spy_daily)
         assert "econ_oil_fin_diverge" in result.columns
 
+    def test_vix_term_structure_created(self, econ_features, spy_daily):
+        result = econ_features.create_economic_features(spy_daily)
+        assert "econ_vix_term_ratio" in result.columns
+        assert "econ_vix_term_zscore" in result.columns
+
+    def test_gold_equity_signal_created(self, econ_features, spy_daily):
+        result = econ_features.create_economic_features(spy_daily)
+        assert "econ_gold_equity_signal" in result.columns
+
+    def test_bond_equity_rotation_created(self, econ_features, spy_daily):
+        result = econ_features.create_economic_features(spy_daily)
+        assert "econ_bond_equity_rotation" in result.columns
+
+    def test_commodity_breadth_created(self, econ_features, spy_daily):
+        result = econ_features.create_economic_features(spy_daily)
+        assert "econ_commodity_breadth" in result.columns
+
 
 # ─── Condition Analysis Tests ────────────────────────────────────────────────
 
@@ -190,6 +213,11 @@ class TestConditionAnalysis:
         signal = econ_features.analyze_current_conditions(spy_daily)
         assert "credit_signal" in signal
         assert signal["credit_signal"] in ("RISK_ON", "RISK_OFF")
+
+    def test_vix_term_structure_present(self, econ_features, spy_daily):
+        signal = econ_features.analyze_current_conditions(spy_daily)
+        assert "vix_term_structure" in signal
+        assert signal["vix_term_structure"] in ("BACKWARDATION", "CONTANGO", "STEEP_CONTANGO")
 
     def test_none_prices_returns_none(self, spy_daily):
         ef = EconomicFeatures()

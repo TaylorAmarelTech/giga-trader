@@ -32,8 +32,9 @@ warnings.filterwarnings("ignore")
 # ─── yfinance Sources ─────────────────────────────────────────────────────────
 
 YFINANCE_SOURCES = {
-    # Volatility
+    # Volatility complex
     "^VIX": {"desc": "CBOE Volatility Index", "category": "volatility"},
+    "^VXV": {"desc": "3-Month VIX (term structure)", "category": "volatility"},
     # Treasury yields
     "^TNX": {"desc": "10-Year Treasury Yield", "category": "rates"},
     "^TYX": {"desc": "30-Year Treasury Yield", "category": "rates"},
@@ -44,8 +45,11 @@ YFINANCE_SOURCES = {
     "LQD": {"desc": "Investment Grade Corp Bonds", "category": "bonds"},
     "JNK": {"desc": "High Yield (Junk) Bonds", "category": "bonds"},
     "TIP": {"desc": "TIPS (Inflation-Protected)", "category": "bonds"},
+    "AGG": {"desc": "US Aggregate Bond ETF", "category": "bonds"},
     # Commodities
     "USO": {"desc": "Oil ETF", "category": "commodities"},
+    "DBC": {"desc": "Broad Commodities ETF", "category": "commodities"},
+    "GLD": {"desc": "Gold ETF", "category": "commodities"},
     # Sector
     "XLF": {"desc": "Financials Sector ETF", "category": "sector"},
 }
