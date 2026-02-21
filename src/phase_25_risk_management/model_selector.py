@@ -65,6 +65,7 @@ class DynamicModelSelector:
         min_tier: int = 1,
         max_models_to_load: int = 10,
         ensemble_method: str = "weighted_average",
+        max_model_age_days: int = 180,
     ):
         self.registry_path = registry_path or (project_root / "experiments" / "model_registry.json")
         self.models_dir = models_dir or (project_root / "models")
@@ -73,6 +74,7 @@ class DynamicModelSelector:
         self.min_tier = min_tier
         self.max_models_to_load = max_models_to_load
         self.ensemble_method = ensemble_method
+        self.max_model_age_days = max_model_age_days
 
         self.candidates: List[ModelCandidate] = []
         self.loaded_models: Dict[str, ModelCandidate] = {}
@@ -90,27 +92,31 @@ class DynamicModelSelector:
         self.timing_threshold = 0.50
 
     def load_from_registry(self) -> int:
-        """Load model candidates from registry."""
-        if not self.registry_path.exists():
-            logger.warning(f"Registry not found: {self.registry_path}")
-            return 0
-
-        try:
-            with open(self.registry_path) as f:
-                registry_data = json.load(f)
-        except Exception as e:
-            logger.error(f"Failed to load registry: {e}")
-            return 0
+        """Load model candidates from SQLite models table + V2 model entries."""
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
 
         self.candidates = []
+        n_leaky = 0
 
-        for model_id, record in registry_data.items():
-            # Extract entry/exit windows from config
+        # Load from models table (tiered models)
+        try:
+            records = db.get_models(
+                min_tier=self.min_tier,
+                min_auc=self.min_test_auc,
+                max_auc=0.85,
+                max_age_days=self.max_model_age_days if self.max_model_age_days > 0 else None,
+            )
+        except Exception as e:
+            logger.error(f"Failed to load models from DB: {e}")
+            records = []
+
+        for record in records:
             config = record.get("config", {})
             entry_exit = config.get("entry_exit", config.get("trading", {}))
 
             candidate = ModelCandidate(
-                model_id=model_id,
+                model_id=record.get("model_id", ""),
                 model_path=record.get("model_path", ""),
                 config=config,
                 cv_auc=record.get("cv_auc", 0),
@@ -127,12 +133,8 @@ class DynamicModelSelector:
                 exit_window_end=entry_exit.get("exit_window_end", 385),
             )
 
-            # Filter by minimum requirements
-            if candidate.tier < self.min_tier:
-                continue
-            if candidate.test_auc >= self.min_test_auc:
-                if candidate.wmes_score >= self.min_wmes or candidate.wmes_score == 0:
-                    self.candidates.append(candidate)
+            if candidate.wmes_score >= self.min_wmes or candidate.wmes_score == 0:
+                self.candidates.append(candidate)
 
         # Sort by score
         self.candidates.sort(key=lambda c: c.score(), reverse=True)
@@ -156,16 +158,18 @@ class DynamicModelSelector:
         """
         try:
             from src.model_registry_v2 import ModelRegistryV2, get_registry
-            v2_registry = get_registry()
+            from src.core.registry_db import get_registry_db
+            v2_registry = get_registry(db=get_registry_db())
 
             if not v2_registry.models:
                 logger.info("ModelRegistryV2 is empty")
                 return 0
 
             new_candidates = 0
+            existing_ids = {c.model_id for c in self.candidates}
+
             for model_id, entry in v2_registry.models.items():
                 # Skip if already loaded
-                existing_ids = {c.model_id for c in self.candidates}
                 if model_id in existing_ids:
                     continue
 
@@ -176,6 +180,21 @@ class DynamicModelSelector:
 
                 test_auc = getattr(metrics, 'test_auc', 0) or getattr(metrics, 'cv_auc', 0)
                 wmes = getattr(metrics, 'wmes_score', 0)
+
+                # Skip leaky models
+                if test_auc >= 0.85:
+                    continue
+
+                # Staleness check (Wave 17)
+                trained_at = getattr(entry, 'trained_at', '') or getattr(entry, 'created_at', '')
+                if trained_at and self.max_model_age_days > 0:
+                    try:
+                        from datetime import datetime as _dt
+                        created = _dt.fromisoformat(str(trained_at))
+                        if (_dt.now() - created).days > self.max_model_age_days:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
 
                 # Filter by minimum requirements
                 if test_auc < self.min_test_auc:
@@ -273,13 +292,72 @@ class DynamicModelSelector:
             logger.error(f"Failed to load model {candidate.model_id}: {e}")
             return False
 
+    def _config_fingerprint(self, candidate: ModelCandidate) -> Dict[str, str]:
+        """Extract key config dimensions for diversity comparison."""
+        config = candidate.config or {}
+        fp = {}
+        # Dimensionality reduction method
+        dr = config.get("dim_reduction", config.get("dimensionality_reduction", {}))
+        if isinstance(dr, dict):
+            fp["dim_method"] = dr.get("method", "unknown")
+            fp["n_components"] = str(dr.get("n_components", dr.get("kpca_n_components", "?")))
+            fp["feature_sel"] = dr.get("feature_selection_method", "unknown")
+        elif isinstance(dr, str):
+            fp["dim_method"] = dr
+        # Model type
+        fp["model_type"] = config.get("model_type", config.get("algorithm", "unknown"))
+        # Data period
+        dc = config.get("data_config", config.get("data", {}))
+        if isinstance(dc, dict):
+            fp["period"] = dc.get("period", "unknown")
+        # Entry/exit windows
+        fp["entry"] = f"{candidate.entry_window_start}-{candidate.entry_window_end}"
+        fp["exit"] = f"{candidate.exit_window_start}-{candidate.exit_window_end}"
+        # Source
+        fp["source"] = config.get("source", "unknown")
+        return fp
+
+    def _diversity_score(
+        self,
+        candidate: ModelCandidate,
+        selected: List[ModelCandidate],
+    ) -> float:
+        """Compute how different a candidate is from already selected models.
+        Returns 0-1 where 1 = maximally diverse."""
+        if not selected:
+            return 1.0
+        fp = self._config_fingerprint(candidate)
+        distances = []
+        for s in selected:
+            s_fp = self._config_fingerprint(s)
+            all_keys = set(fp.keys()) | set(s_fp.keys())
+            if not all_keys:
+                distances.append(0.0)
+                continue
+            n_diff = sum(1 for k in all_keys if fp.get(k) != s_fp.get(k))
+            distances.append(n_diff / len(all_keys))
+        # Min distance to any selected model (bottleneck diversity)
+        return min(distances)
+
     def get_best_models(
         self,
         n: int = 5,
         entry_window: Tuple[int, int] = None,
         exit_window: Tuple[int, int] = None,
+        diversity_weight: float = 0.3,
     ) -> List[ModelCandidate]:
-        """Get top N models matching the specified windows."""
+        """Get top N models matching the specified windows with diversity.
+
+        Uses greedy selection: picks the best model first, then iteratively
+        adds models that balance quality and diversity to avoid a homogeneous
+        ensemble.
+
+        Args:
+            n: Number of models to select
+            entry_window: Desired entry window
+            exit_window: Desired exit window
+            diversity_weight: Weight for diversity vs quality (0=pure quality, 1=pure diversity)
+        """
         matching = [
             c for c in self.candidates
             if c.matches_window(entry_window, exit_window)
@@ -289,7 +367,34 @@ class DynamicModelSelector:
             # Fall back to all candidates if no exact match
             matching = self.candidates
 
-        return matching[:n]
+        if len(matching) <= n:
+            return matching
+
+        # Greedy diversity-aware selection
+        # Normalize scores for fair comparison
+        scores = [c.score() for c in matching]
+        max_score = max(scores) if scores else 1.0
+        min_score = min(scores) if scores else 0.0
+        score_range = max_score - min_score if max_score > min_score else 1.0
+
+        selected = [matching[0]]  # Start with best model
+        remaining = list(matching[1:])
+
+        while len(selected) < n and remaining:
+            best_idx = 0
+            best_combined = -1.0
+
+            for i, cand in enumerate(remaining):
+                quality = (cand.score() - min_score) / score_range
+                diversity = self._diversity_score(cand, selected)
+                combined = (1 - diversity_weight) * quality + diversity_weight * diversity
+                if combined > best_combined:
+                    best_combined = combined
+                    best_idx = i
+
+            selected.append(remaining.pop(best_idx))
+
+        return selected
 
     def predict(
         self,
@@ -368,9 +473,14 @@ class DynamicModelSelector:
         )
         swing_proba, timing_proba = strategy.combine(predictions, weights)
 
-        # Calculate confidence and agreement
+        # Calculate confidence: combines prediction strength AND model agreement
         swing_probas = [p["swing_proba"] for p in predictions]
-        confidence = 1 - np.std(swing_probas) * 2  # Lower std = higher confidence
+        # Prediction strength: how far from 0.5 (random)
+        prediction_strength = abs(swing_proba - 0.5) * 2  # 0-1 scale
+        # Model agreement: low std among models = high agreement
+        model_agreement = max(0.0, 1 - np.std(swing_probas) * 4)  # Steeper penalty
+        # Combined: 60% strength, 40% agreement
+        confidence = 0.6 * prediction_strength + 0.4 * model_agreement
         confidence = max(0.0, min(1.0, confidence))
 
         # Determine direction

@@ -13,23 +13,21 @@ Usage:
 """
 
 import sys
-import json
 from pathlib import Path
 from datetime import datetime
 
 import joblib
-import numpy as np
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from src.experiment_config import ExperimentConfig, create_default_config
-from src.experiment_engine import (
+from src.experiment_config import create_default_config
+from src.phase_21_continuous.experiment_tracking import (
     ExperimentHistory,
     ExperimentResult,
     ExperimentStatus,
-    ModelRegistry,
 )
+from src.core.registry_db import get_registry_db
 
 
 def register_leak_proof_models():
@@ -61,9 +59,8 @@ def register_leak_proof_models():
     exp_config.description = "Pre-trained leak-proof model (train_robust_model.py)"
     exp_config.model.model_type = "leak_proof_pipeline"
 
-    # Register swing model experiment
-    history = ExperimentHistory()
-    registry = ModelRegistry()
+    db = get_registry_db()
+    history = ExperimentHistory(db=db)
 
     # Check if already registered
     existing_ids = {r.experiment_id for r in history.results}
@@ -99,7 +96,7 @@ def register_leak_proof_models():
         )
 
         history.add(result)
-        model_id = registry.register_model(result)
+        model_id = db.register_model_from_experiment(result.to_dict())
         models_registered.append((model_name, model_id, auc_value))
         print(f"  [OK] Registered {model_name} model as {model_id} (AUC={auc_value:.3f})")
 
@@ -123,8 +120,8 @@ def register_robust_models():
     exp_config = create_default_config("robust_baseline")
     exp_config.description = "Pre-trained robust model (legacy format)"
 
-    history = ExperimentHistory()
-    registry = ModelRegistry()
+    db = get_registry_db()
+    history = ExperimentHistory(db=db)
 
     existing_ids = {r.experiment_id for r in history.results}
 
@@ -159,7 +156,7 @@ def register_robust_models():
         )
 
         history.add(result)
-        model_id = registry.register_model(result)
+        model_id = db.register_model_from_experiment(result.to_dict())
         models_registered.append((model_name, model_id, auc_value))
         print(f"  [OK] Registered {model_name} model as {model_id} (AUC={auc_value:.3f})")
 
@@ -172,31 +169,33 @@ def check_gates_after_registration():
     print("GATE CHECK AFTER REGISTRATION")
     print("=" * 60)
 
-    history = ExperimentHistory()
-    registry = ModelRegistry()
+    db = get_registry_db()
+    history = ExperimentHistory(db=db)
 
     stats = history.get_statistics()
-    print(f"  Experiments completed: {stats.get('completed', 0)}")
-    print(f"  Best test AUC:        {stats.get('best_test_auc', 0):.3f}")
-    print(f"  Models in registry:   {len(registry.models)}")
+    completed = stats.get("completed", 0)
+    best_auc = stats.get("best_test_auc", 0)
+
+    print(f"  Experiments completed: {completed}")
+    print(f"  Best test AUC:        {best_auc:.3f}")
 
     # Check paper gates
     paper_min_exp = 5
     paper_min_auc = 0.55
     paper_min_models = 1
 
-    models_above = sum(1 for m in registry.models.values() if m.test_auc >= paper_min_auc)
+    models_above = db.get_active_model_count(min_auc=paper_min_auc, max_auc=0.85)
 
     paper_passed = (
-        stats.get("completed", 0) >= paper_min_exp and
+        completed >= paper_min_exp and
         models_above >= paper_min_models and
-        stats.get("best_test_auc", 0) >= paper_min_auc
+        best_auc >= paper_min_auc
     )
 
     print(f"\n  PAPER GATES (5 exp, 1 model @ AUC>=0.55):")
-    print(f"    Experiments: {stats.get('completed', 0)}/5 {'PASS' if stats.get('completed', 0) >= 5 else 'FAIL'}")
+    print(f"    Experiments: {completed}/5 {'PASS' if completed >= 5 else 'FAIL'}")
     print(f"    Models:      {models_above}/1 {'PASS' if models_above >= 1 else 'FAIL'}")
-    print(f"    Best AUC:    {stats.get('best_test_auc', 0):.3f}/0.55 {'PASS' if stats.get('best_test_auc', 0) >= 0.55 else 'FAIL'}")
+    print(f"    Best AUC:    {best_auc:.3f}/0.55 {'PASS' if best_auc >= 0.55 else 'FAIL'}")
     print(f"    Overall:     {'PASS' if paper_passed else 'FAIL'}")
 
     # Check live gates
@@ -204,18 +203,18 @@ def check_gates_after_registration():
     live_min_auc = 0.60
     live_min_models = 3
 
-    models_above_live = sum(1 for m in registry.models.values() if m.test_auc >= live_min_auc)
+    models_above_live = db.get_active_model_count(min_auc=live_min_auc, max_auc=0.85)
 
     live_passed = (
-        stats.get("completed", 0) >= live_min_exp and
+        completed >= live_min_exp and
         models_above_live >= live_min_models and
-        stats.get("best_test_auc", 0) >= live_min_auc
+        best_auc >= live_min_auc
     )
 
     print(f"\n  LIVE GATES (50 exp, 3 models @ AUC>=0.60):")
-    print(f"    Experiments: {stats.get('completed', 0)}/50 {'PASS' if stats.get('completed', 0) >= 50 else 'FAIL'}")
+    print(f"    Experiments: {completed}/50 {'PASS' if completed >= 50 else 'FAIL'}")
     print(f"    Models:      {models_above_live}/3 {'PASS' if models_above_live >= 3 else 'FAIL'}")
-    print(f"    Best AUC:    {stats.get('best_test_auc', 0):.3f}/0.60 {'PASS' if stats.get('best_test_auc', 0) >= 0.60 else 'FAIL'}")
+    print(f"    Best AUC:    {best_auc:.3f}/0.60 {'PASS' if best_auc >= 0.60 else 'FAIL'}")
     print(f"    Overall:     {'PASS' if live_passed else 'FAIL'}")
 
     return paper_passed, live_passed

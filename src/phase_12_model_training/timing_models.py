@@ -650,9 +650,9 @@ class EntryExitTimingModel:
 
     def _print_metrics(self):
         """Print training metrics summary."""
-        print("\n  ═══════════════════════════════════════════════")
+        print("\n  ===============================================")
         print("  ENTRY/EXIT TIMING MODEL - Training Summary")
-        print("  ═══════════════════════════════════════════════")
+        print("  ===============================================")
 
         if "entry" in self.training_metrics:
             entry = self.training_metrics["entry"]
@@ -686,7 +686,7 @@ class EntryExitTimingModel:
             print(f"    Should Batch Accuracy: {batch.get('should_batch_accuracy', {}).get('mean', 0)*100:.1f}%")
             print(f"    N Batches Accuracy: {batch.get('n_batches_accuracy', {}).get('mean', 0)*100:.1f}%")
 
-        print("  ═══════════════════════════════════════════════")
+        print("  ===============================================")
 
     def predict(
         self,

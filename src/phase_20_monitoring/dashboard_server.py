@@ -147,6 +147,48 @@ def api_health():
     })
 
 
+@app.route("/api/health/staleness")
+def api_staleness():
+    """Check freshness of key data files used by the dashboard.
+
+    Returns age in seconds for each monitored file and an overall
+    staleness verdict: fresh (<300s), stale (<900s), or critical (>=900s).
+    """
+    logs_dir = project_root / "logs"
+    files = {
+        "status": logs_dir / "status.json",
+        "paper_performance": logs_dir / "paper_performance.json",
+        "position_history": logs_dir / "position_history.json",
+        "risk_state": logs_dir / "risk_state.json",
+    }
+
+    now = time.time()
+    results = {}
+    max_age = 0.0
+
+    for name, path in files.items():
+        if path.is_file():
+            age = now - path.stat().st_mtime
+            results[name] = {"exists": True, "age_seconds": round(age, 1)}
+            max_age = max(max_age, age)
+        else:
+            results[name] = {"exists": False, "age_seconds": None}
+
+    if max_age < 300:
+        verdict = "fresh"
+    elif max_age < 900:
+        verdict = "stale"
+    else:
+        verdict = "critical"
+
+    return jsonify({
+        "verdict": verdict,
+        "max_age_seconds": round(max_age, 1),
+        "files": results,
+        "timestamp": datetime.now().isoformat(),
+    })
+
+
 # =============================================================================
 # LOGS ENDPOINT
 # =============================================================================
@@ -448,18 +490,15 @@ def api_experiment():
 def api_experiments_history():
     """Get experiment history for browsing."""
     try:
-        history_file = project_root / "experiments" / "experiment_history.json"
-        if not history_file.exists():
-            return jsonify([])
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
 
-        with open(history_file) as f:
-            experiments = json.load(f)
-
-        # Extract key fields for display (full config is too large)
         limit = request.args.get("limit", 50, type=int)
         offset = request.args.get("offset", 0, type=int)
         sort_by = request.args.get("sort", "started_at")
         sort_order = request.args.get("order", "desc")
+
+        experiments = db.get_experiments(limit=limit, offset=offset)
 
         # Build summary list
         summaries = []
@@ -494,12 +533,10 @@ def api_experiments_history():
 
         # Sort
         reverse = sort_order == "desc"
-        if sort_by in summaries[0] if summaries else {}:
+        if summaries and sort_by in summaries[0]:
             summaries.sort(key=lambda x: x.get(sort_by, 0) or 0, reverse=reverse)
 
-        # Paginate
-        total = len(summaries)
-        summaries = summaries[offset:offset + limit]
+        total = db.get_experiment_count()
 
         return jsonify({
             "experiments": summaries,
@@ -516,25 +553,22 @@ def api_experiments_history():
 def api_models_registry():
     """Get model registry for browsing."""
     try:
-        registry_file = project_root / "experiments" / "model_registry.json"
-        if not registry_file.exists():
-            return jsonify([])
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
 
-        with open(registry_file) as f:
-            registry = json.load(f)
-
-        # Extract key fields for display
         limit = request.args.get("limit", 50, type=int)
         offset = request.args.get("offset", 0, type=int)
         sort_by = request.args.get("sort", "created_at")
         sort_order = request.args.get("order", "desc")
 
+        models = db.get_models()
+
         # Build summary list
         summaries = []
-        for model_id, model in registry.items():
+        for model in models:
             config = model.get("config", {})
             summary = {
-                "model_id": model_id,
+                "model_id": model.get("model_id", ""),
                 "experiment_id": model.get("experiment_id", ""),
                 "experiment_type": config.get("experiment_type", ""),
                 "created_at": model.get("created_at", ""),
@@ -544,7 +578,7 @@ def api_models_registry():
                 "backtest_win_rate": model.get("backtest_win_rate", 0),
                 "backtest_total_return": model.get("backtest_total_return", 0),
                 "wmes_score": model.get("wmes_score", 0),
-                "is_promoted": model.get("is_promoted", False),
+                "tier": model.get("tier", 1),
                 "model_type": config.get("model", {}).get("model_type", ""),
                 "dim_reduction": config.get("dim_reduction", {}).get("method", ""),
             }
@@ -1515,13 +1549,13 @@ DASHBOARD_HTML = """
                 // Update step info
                 stepEl.textContent = `Step ${data.step_number}/${data.total_steps}`;
 
-                // Format elapsed time with estimated remaining
+                // Format elapsed time with step-specific context
                 const elapsed = Math.floor(data.elapsed_seconds || 0);
                 let elapsedText = data.is_running ? formatDuration(elapsed) : '--';
-                if (data.is_running && data.estimated_remaining > 0) {
-                    elapsedText += ` (~${formatDuration(data.estimated_remaining)} remaining)`;
-                } else if (data.is_running && data.avg_experiment_duration > 0) {
-                    elapsedText += ` (avg ${formatDuration(data.avg_experiment_duration)})`;
+                if (data.is_running && expectedTypical > 0) {
+                    // Show step-specific expected range instead of misleading global average
+                    const stepMin = data.step_expected_min || 60;
+                    elapsedText += ` (step: ${formatDuration(stepMin)}-${formatDuration(expectedMax)})`;
                 }
                 elapsedEl.textContent = elapsedText;
 
@@ -1542,7 +1576,7 @@ DASHBOARD_HTML = """
 
                         // Add color coding for known metrics
                         if (key.includes('auc') && typeof value === 'number') {
-                            valueClass = value > 0.7 ? 'good' : (value < 0.55 ? 'bad' : 'warning');
+                            valueClass = value > 0.58 ? 'good' : (value < 0.52 ? 'bad' : 'warning');
                             displayValue = (value * 100).toFixed(1) + '%';
                         } else if (key.includes('sharpe') && typeof value === 'number') {
                             valueClass = value > 1.0 ? 'good' : (value < 0.5 ? 'warning' : '');

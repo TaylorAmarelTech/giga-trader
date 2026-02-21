@@ -61,14 +61,16 @@ ORCHESTRATOR_CONFIG = {
 
     # LIVE TRADING GATES
     # Models from experiments are NOT used in live trading until these criteria are met
-    "min_experiments_before_live_trading": 50,  # At least 50 experiments must complete
-    "min_auc_for_live_trading": 0.60,  # Minimum test AUC for a model to be used in live trading
-    "min_models_above_threshold": 3,  # Need at least 3 models meeting the AUC threshold
+    # Wave 35: 2-week experiment campaign before any trading
+    "min_experiments_before_live_trading": 500,  # ~2 weeks at 5-7/hr
+    "min_auc_for_live_trading": 0.57,  # Minimum test AUC for live trading (v4: lowered from 0.58)
+    "min_models_above_threshold": 5,  # Need at least 5 Tier 3 models
 
     # PAPER TRADING GATES (less strict - paper money is for learning)
-    "min_experiments_before_paper_trading": 5,  # Only 5 experiments needed for paper
-    "min_auc_for_paper_trading": 0.55,  # Lower AUC bar for paper
-    "min_models_above_threshold_paper": 1,  # Just 1 model needed for paper
+    # Wave 35: Still need substantial experiments before paper trading
+    "min_experiments_before_paper_trading": 200,  # ~3-4 days of experiments
+    "min_auc_for_paper_trading": 0.56,  # Solid AUC bar for paper
+    "min_models_above_threshold_paper": 3,  # Need 3 good models for paper
 
     # Monitoring
     "status_update_interval": 30,  # seconds
@@ -101,8 +103,11 @@ def setup_logging():
         datefmt="%Y-%m-%d %H:%M:%S"
     )
 
-    # File handler
-    file_handler = logging.FileHandler(main_log)
+    # File handler with rotation (50 MB cap, 5 backups)
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        main_log, maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
+    )
     file_handler.setFormatter(formatter)
     file_handler.setLevel(logging.DEBUG)
 
@@ -481,7 +486,8 @@ class ExperimentRunner:
         """Initialize the experiment engine."""
         try:
             from src.experiment_engine import ExperimentEngine
-            self.experiment_engine = ExperimentEngine()
+            from src.core.registry_db import get_registry_db
+            self.experiment_engine = ExperimentEngine(db=get_registry_db())
             self.logger.info("Experiment engine initialized")
             return True
         except Exception as e:
@@ -644,7 +650,7 @@ class ExperimentGateChecker:
 
         # Use cached result if recent
         cache_key = trading_mode
-        if cache_key in self._cache_time and (datetime.now() - self._cache_time[cache_key]).seconds < self._cache_duration:
+        if cache_key in self._cache_time and (datetime.now() - self._cache_time[cache_key]).total_seconds() < self._cache_duration:
             return self._cache[cache_key]
 
         # Select thresholds based on trading mode
@@ -661,31 +667,35 @@ class ExperimentGateChecker:
             mode_label = "LIVE"
 
         try:
-            from src.experiment_engine import ExperimentHistory, ModelRegistry
+            from src.experiment_engine import ExperimentHistory
+            from src.core.registry_db import get_registry_db
+            _db = get_registry_db()
 
-            history = ExperimentHistory()
-            registry = ModelRegistry()
+            history = ExperimentHistory(db=_db)
 
-            # Get stats
+            # Get stats (Wave 16: prefer realistic AUC that excludes leaky models)
             hist_stats = history.get_statistics()
             completed_count = hist_stats.get("completed", 0)
-            best_auc = hist_stats.get("best_test_auc", 0.0)
+            best_realistic = hist_stats.get("best_realistic_auc", 0)
+            best_auc = best_realistic if best_realistic > 0 else hist_stats.get("best_test_auc", 0.0)
 
             # Count models above AUC threshold AND meeting tier requirement
             # Paper mode: need Tier >= 2 (stability-verified)
             # Live mode: need Tier >= 3 (fragility-verified)
+            # Wave 16: exclude models with AUC >= 0.85 (likely feature leakage from pre-Wave-14)
             min_tier = 2 if is_paper else 3
-            models_above_threshold = sum(
-                1 for m in registry.models.values()
-                if m.test_auc >= min_auc and getattr(m, 'tier', 1) >= min_tier
+            models_above_threshold = _db.get_active_model_count(
+                min_auc=min_auc, max_auc=0.85, min_tier=min_tier
             )
 
             # Also count ALL models above AUC (for backward compat during transition)
-            # If no tiered models exist yet, fall back to AUC-only count
-            models_above_auc_only = sum(
-                1 for m in registry.models.values()
-                if m.test_auc >= min_auc
+            models_above_auc_only = _db.get_auc_only_model_count(
+                min_auc=min_auc, max_auc=0.85
             )
+            # Count stale models for logging
+            stale_model_count = _db.get_stale_model_count(min_auc=0.85)
+            if stale_model_count > 0:
+                self.logger.info(f"  (Excluded {stale_model_count} models with AUC >= 0.85 — likely pre-Wave-14 leakage)")
             # Transition: if no tiered models exist, use AUC-only count
             if models_above_threshold == 0 and models_above_auc_only >= min_models:
                 models_above_threshold = models_above_auc_only
@@ -1023,7 +1033,9 @@ class GigaOrchestrator:
         self.running = False
         self.shutdown_requested = False
         self.last_experiment_date = None
-        self.last_comprehensive_backtest = None  # Track when we last ran comprehensive backtest
+        # Skip initial comprehensive backtest on startup — go straight to experiments.
+        # The backtest will run after 8 PM ET once the first day completes.
+        self.last_comprehensive_backtest = datetime.now()
         self._status_thread = None
         self.gate_checker = None  # Initialized in startup()
 
@@ -1203,7 +1215,7 @@ class GigaOrchestrator:
                 # ─────────────────────────────────────────────────────────
                 # PERIODIC: STATUS UPDATES
                 # ─────────────────────────────────────────────────────────
-                if (now - last_status_update).seconds >= ORCHESTRATOR_CONFIG["status_update_interval"]:
+                if (now - last_status_update).total_seconds() >= ORCHESTRATOR_CONFIG["status_update_interval"]:
                     # Update gate status
                     self._update_gate_status()
                     self.status.save()
@@ -1213,7 +1225,7 @@ class GigaOrchestrator:
                 # ─────────────────────────────────────────────────────────
                 # PERIODIC: HEALTH CHECKS
                 # ─────────────────────────────────────────────────────────
-                if (now - last_health_check).seconds >= ORCHESTRATOR_CONFIG["health_check_interval"]:
+                if (now - last_health_check).total_seconds() >= ORCHESTRATOR_CONFIG["health_check_interval"]:
                     if not self.health_monitor.check_health():
                         self.health_monitor.self_heal()
                     last_health_check = now

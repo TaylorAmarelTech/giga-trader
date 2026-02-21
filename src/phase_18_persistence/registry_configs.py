@@ -52,8 +52,8 @@ class DataConfig:
     additional_symbols: List[str] = field(default_factory=list)  # For cross-asset features
 
     # Time period
-    period: str = DataPeriod.YEARS_3.value
-    years: float = 3.0
+    period: str = DataPeriod.YEARS_10.value
+    years: float = 10.0
     start_date: Optional[str] = None
     end_date: Optional[str] = None
 

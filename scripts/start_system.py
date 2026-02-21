@@ -16,16 +16,19 @@ Usage:
     python scripts/start_system.py --no-thick-weave   # Skip thick weave search
 """
 
+import gc
 import os
 import sys
 import json
 import time
+import shutil
 import signal
 import logging
 import argparse
 import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Dict, Optional
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -42,13 +45,17 @@ def setup_logging():
 
     log_file = log_dir / f"system_{datetime.now().strftime('%Y%m%d')}.log"
 
+    from logging.handlers import RotatingFileHandler
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
+    )
+    file_handler.setFormatter(
+        logging.Formatter("%(asctime)s [%(name)s] %(levelname)s: %(message)s")
+    )
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(),
-        ]
+        handlers=[file_handler, logging.StreamHandler()],
     )
     return logging.getLogger("SystemLauncher")
 
@@ -208,10 +215,12 @@ def write_status_json(components: dict, mode: str = "INITIALIZING", logger=None)
                 "models_required": gate_status.get("min_models_required", 0),
                 "best_model_auc": gate_status.get("best_model_auc", 0.0),
             }
-        except Exception:
-            pass
+        except Exception as e:
+            if logger:
+                logger.debug(f"Gate check for status.json failed: {e}")
 
-        (logs_dir / "status.json").write_text(json.dumps(status, indent=2, default=str))
+        from src.core.state_manager import atomic_write_json
+        atomic_write_json(logs_dir / "status.json", status)
     except Exception as e:
         if logger:
             logger.debug(f"Could not write status.json: {e}")
@@ -225,9 +234,24 @@ _component_state = {
     "training_engine": "STOPPED",
     "experiment_engine": "STOPPED",
     "thick_weave_search": "STOPPED",
+    "health_checker": "STOPPED",
     "monitor": "RUNNING",
 }
 _component_lock = threading.Lock()
+
+# Graceful shutdown flag
+_shutdown_requested = threading.Event()
+_active_bot: Optional = None  # type: ignore[assignment]
+
+
+def _shutdown_handler(signum, frame):
+    """Handle SIGINT/SIGTERM for graceful shutdown."""
+    sig_name = signal.Signals(signum).name if hasattr(signal, 'Signals') else str(signum)
+    logger_ref = logging.getLogger("SystemLauncher")
+    logger_ref.info(f"Received {sig_name}, initiating graceful shutdown...")
+    _shutdown_requested.set()
+    if _active_bot is not None:
+        _active_bot.stop()
 
 
 def update_component(name: str, status: str, logger=None):
@@ -238,39 +262,252 @@ def update_component(name: str, status: str, logger=None):
         write_status_json(_component_state.copy(), mode=mode, logger=logger)
 
 
-def start_experiment_runner(logger=None):
-    """Start the experiment runner in a background thread for continuous training."""
+def cleanup_old_experiment_models(max_age_days=7, logger=None):
+    """Remove old experiment model files below Tier 2 to prevent disk bloat.
+
+    Wave 28: For 2-6 week unattended operation, prune models/experiments/*.joblib
+    files that are older than max_age_days and not associated with Tier 2+ models.
+    """
+    models_dir = project_root / "models" / "experiments"
+    if not models_dir.exists():
+        return 0
+
+    try:
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
+
+        # Get all model paths for Tier 2+ models (we want to KEEP these)
+        protected_paths = set()
+        try:
+            models = db.query_models()
+            for m in models:
+                tier = m.get("tier", 1)
+                model_path = m.get("model_path", "")
+                if tier >= 2 and model_path:
+                    protected_paths.add(Path(model_path).name)
+        except Exception:
+            pass
+
+        cutoff = time.time() - (max_age_days * 86400)
+        removed = 0
+        freed_bytes = 0
+
+        for f in models_dir.glob("*.joblib"):
+            if f.name in protected_paths:
+                continue
+            if f.stat().st_mtime < cutoff:
+                size = f.stat().st_size
+                f.unlink()
+                removed += 1
+                freed_bytes += size
+
+        if removed > 0 and logger:
+            logger.info(
+                f"[CLEANUP] Removed {removed} old experiment models "
+                f"({freed_bytes / 1024 / 1024:.1f} MB freed)"
+            )
+        return removed
+    except Exception as e:
+        if logger:
+            logger.warning(f"[CLEANUP] Model cleanup failed: {e}")
+        return 0
+
+
+def run_periodic_maintenance(logger=None):
+    """Run periodic DB maintenance and model cleanup in a background thread.
+
+    Wave 28: Runs every 6 hours:
+    - VACUUM/ANALYZE the SQLite database
+    - Clean up old experiment model files
+    - Force garbage collection
+    - Check disk space (halt experiments if < 500MB)
+    """
+    def _maintenance():
+        while not _shutdown_requested.is_set():
+            try:
+                # 1. DB maintenance (VACUUM + ANALYZE)
+                try:
+                    from src.core.registry_db import get_registry_db
+                    db = get_registry_db()
+                    db.vacuum()
+                    if logger:
+                        logger.info("[MAINTENANCE] Database VACUUM completed")
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"[MAINTENANCE] DB vacuum failed: {e}")
+
+                # 2. Recompute model tiers (fix mismatches)
+                try:
+                    tier_stats = db.recompute_all_tiers()
+                    promoted = tier_stats.get("promoted", 0)
+                    demoted = tier_stats.get("demoted", 0)
+                    if promoted or demoted:
+                        if logger:
+                            logger.info(
+                                f"[MAINTENANCE] Tier recomputation: {promoted} promoted, "
+                                f"{demoted} demoted out of {tier_stats['checked']} models"
+                            )
+                    else:
+                        if logger:
+                            logger.info(
+                                f"[MAINTENANCE] Tier check: all {tier_stats['checked']} models correct"
+                            )
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"[MAINTENANCE] Tier recomputation failed: {e}")
+
+                # 3. Model file cleanup (>7 days, below Tier 2)
+                cleanup_old_experiment_models(max_age_days=7, logger=logger)
+
+                # 4. Force garbage collection
+                collected = gc.collect()
+                if logger:
+                    logger.info(f"[MAINTENANCE] GC collected {collected} objects")
+
+                # 5. Disk space check
+                try:
+                    usage = shutil.disk_usage(str(project_root))
+                    free_mb = usage.free / (1024 * 1024)
+                    if free_mb < 500:
+                        if logger:
+                            logger.critical(
+                                f"[MAINTENANCE] CRITICAL: Only {free_mb:.0f}MB disk space remaining! "
+                                f"Halting experiments until space freed."
+                            )
+                        # Signal shutdown to stop new experiments
+                        _shutdown_requested.set()
+                    elif free_mb < 2000:
+                        if logger:
+                            logger.warning(
+                                f"[MAINTENANCE] Low disk space: {free_mb:.0f}MB remaining"
+                            )
+                        # Aggressive cleanup - reduce model age to 3 days
+                        cleanup_old_experiment_models(max_age_days=3, logger=logger)
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"[MAINTENANCE] Disk check failed: {e}")
+
+            except Exception as e:
+                if logger:
+                    logger.error(f"[MAINTENANCE] Error: {e}")
+
+            # Run every 6 hours
+            for _ in range(6 * 60 * 2):  # 6 hours in 30-second increments
+                if _shutdown_requested.is_set():
+                    return
+                time.sleep(30)
+
+    thread = threading.Thread(target=_maintenance, name="Maintenance", daemon=True)
+    thread.start()
+    return thread
+
+
+def check_memory_usage(logger=None):
+    """Check current process memory usage and alert if high.
+
+    Wave 28: Returns memory in MB. Triggers gc.collect() if > 1.5GB.
+    """
+    try:
+        import psutil
+        process = psutil.Process(os.getpid())
+        mem_mb = process.memory_info().rss / (1024 * 1024)
+
+        if mem_mb > 2000:
+            if logger:
+                logger.critical(f"[MEMORY] Process using {mem_mb:.0f}MB (>2GB) - forcing GC")
+            gc.collect()
+        elif mem_mb > 1500:
+            if logger:
+                logger.warning(f"[MEMORY] Process using {mem_mb:.0f}MB (>1.5GB) - forcing GC")
+            gc.collect()
+
+        return mem_mb
+    except ImportError:
+        # psutil not available, use rough approximation
+        return 0
+    except Exception:
+        return 0
+
+
+def start_experiment_runner(logger=None, timeout_minutes=240):
+    """Start the experiment runner in a background thread for continuous training.
+
+    Wave 28: Added per-experiment timeout to prevent hung experiments from
+    blocking the pipeline during unattended operation.
+    """
     def _run():
         try:
             from src.experiment_engine import ExperimentEngine
-            engine = ExperimentEngine()
+            from src.core.registry_db import get_registry_db
+            engine = ExperimentEngine(db=get_registry_db())
 
             if logger:
                 logger.info("Experiment runner started (continuous training)")
             update_component("experiment_engine", "RUNNING", logger)
 
             cycle = 0
-            while True:
+            while not _shutdown_requested.is_set():
                 cycle += 1
+                exp_start = time.time()
                 try:
                     if logger:
                         logger.info(f"[EXPERIMENT] Starting experiment cycle {cycle}...")
                     update_component("training_engine", "RUNNING", logger)
-                    result = engine.run_one_experiment()
+
+                    # Run experiment in a sub-thread with timeout
+                    result_holder = [None]
+                    error_holder = [None]
+
+                    def _run_one():
+                        try:
+                            result_holder[0] = engine.run_one_experiment()
+                        except Exception as ex:
+                            error_holder[0] = ex
+
+                    exp_thread = threading.Thread(target=_run_one, name="ExperimentWorker", daemon=True)
+                    exp_thread.start()
+                    exp_thread.join(timeout=timeout_minutes * 60)
+
+                    if exp_thread.is_alive():
+                        elapsed_min = (time.time() - exp_start) / 60
+                        if logger:
+                            logger.warning(
+                                f"[EXPERIMENT] Cycle {cycle} TIMED OUT after {elapsed_min:.1f} min "
+                                f"(limit: {timeout_minutes} min) - abandoning"
+                            )
+                        # Thread is daemon, it will be cleaned up eventually
+                        # Force GC to reclaim memory from abandoned experiment
+                        gc.collect()
+                    elif error_holder[0] is not None:
+                        raise error_holder[0]
+                    else:
+                        result = result_holder[0]
+                        if result and logger:
+                            elapsed_min = (time.time() - exp_start) / 60
+                            logger.info(
+                                f"[EXPERIMENT] Cycle {cycle} complete ({elapsed_min:.1f} min): "
+                                f"AUC={result.test_auc:.3f}, "
+                                f"WMES={result.wmes_score:.3f}"
+                            )
+
                     update_component("training_engine", "STOPPED", logger)
-                    if result and logger:
-                        logger.info(
-                            f"[EXPERIMENT] Cycle {cycle} complete: "
-                            f"AUC={result.test_auc:.3f}, "
-                            f"WMES={result.wmes_score:.3f}"
-                        )
+
                 except Exception as e:
                     update_component("training_engine", "STOPPED", logger)
                     if logger:
                         logger.warning(f"[EXPERIMENT] Cycle {cycle} failed: {e}")
 
-                # Wait between experiments
-                time.sleep(60)
+                # Memory check every 5 experiments
+                if cycle % 5 == 0:
+                    mem_mb = check_memory_usage(logger)
+                    if mem_mb > 0 and logger:
+                        logger.info(f"[EXPERIMENT] Memory: {mem_mb:.0f}MB after {cycle} experiments")
+
+                # Brief cooldown between experiments
+                for _ in range(10):
+                    if _shutdown_requested.is_set():
+                        break
+                    time.sleep(1)
 
         except Exception as e:
             update_component("experiment_engine", "ERROR", logger)
@@ -282,37 +519,117 @@ def start_experiment_runner(logger=None):
     return thread
 
 
-def _register_thick_weave_candidates(report, registry, logger=None):
-    """Bridge thick weave production candidates into ModelRegistry with tier scoring.
+def start_watchdog(logger=None, restart_delay=120):
+    """Monitor all worker threads and restart if they die.
 
-    Maps ThickWeave metrics to ExperimentResult fields:
+    Wave 26: Ensures 10-day unattended training campaigns survive crashes.
+    Wave 28: Extended to also monitor dashboard + web monitor threads.
+    Checks every 30s, restarts dead threads after restart_delay seconds.
+    """
+    _watched_threads: Dict[str, Optional[threading.Thread]] = {
+        "experiment_runner": None,
+        "thick_weave_search": None,
+        "dashboard_server": None,
+        "web_monitor": None,
+    }
+
+    # Track restart ports for dashboard/monitor
+    _dashboard_port = [8050]
+    _monitor_port = [5000]
+
+    def _watchdog():
+        while not _shutdown_requested.is_set():
+            # Check experiment runner
+            exp_thread = _watched_threads.get("experiment_runner")
+            if exp_thread is not None and not exp_thread.is_alive():
+                if logger:
+                    logger.warning(
+                        f"[WATCHDOG] Experiment runner died, restarting in {restart_delay}s..."
+                    )
+                update_component("experiment_engine", "RESTARTING", logger)
+                time.sleep(restart_delay)
+                if not _shutdown_requested.is_set():
+                    new_thread = start_experiment_runner(logger=logger)
+                    _watched_threads["experiment_runner"] = new_thread
+                    if logger:
+                        logger.info("[WATCHDOG] Experiment runner restarted")
+
+            # Check thick weave
+            tw_thread = _watched_threads.get("thick_weave_search")
+            if tw_thread is not None and not tw_thread.is_alive():
+                if logger:
+                    logger.warning(
+                        f"[WATCHDOG] Thick weave search died, restarting in {restart_delay}s..."
+                    )
+                update_component("thick_weave_search", "RESTARTING", logger)
+                time.sleep(restart_delay)
+                if not _shutdown_requested.is_set():
+                    new_thread = start_thick_weave_search(logger=logger)
+                    _watched_threads["thick_weave_search"] = new_thread
+                    if logger:
+                        logger.info("[WATCHDOG] Thick weave search restarted")
+
+            # Check dashboard server
+            dash_thread = _watched_threads.get("dashboard_server")
+            if dash_thread is not None and not dash_thread.is_alive():
+                if logger:
+                    logger.warning("[WATCHDOG] Dashboard server died, restarting...")
+                time.sleep(5)
+                if not _shutdown_requested.is_set():
+                    new_thread = start_dashboard_server(
+                        port=_dashboard_port[0], logger=logger
+                    )
+                    _watched_threads["dashboard_server"] = new_thread
+                    if logger:
+                        logger.info("[WATCHDOG] Dashboard server restarted")
+
+            # Check web monitor
+            mon_thread = _watched_threads.get("web_monitor")
+            if mon_thread is not None and not mon_thread.is_alive():
+                if logger:
+                    logger.warning("[WATCHDOG] Web monitor died, restarting...")
+                time.sleep(5)
+                if not _shutdown_requested.is_set():
+                    new_thread = start_web_monitor(
+                        port=_monitor_port[0], logger=logger
+                    )
+                    _watched_threads["web_monitor"] = new_thread
+                    if logger:
+                        logger.info("[WATCHDOG] Web monitor restarted")
+
+            time.sleep(30)
+
+    thread = threading.Thread(target=_watchdog, name="Watchdog", daemon=True)
+    thread.start()
+    return thread, _watched_threads, _dashboard_port, _monitor_port
+
+
+def _register_thick_weave_candidates(report, db, logger=None):
+    """Bridge thick weave production candidates into RegistryDB with tier scoring.
+
+    Maps ThickWeave metrics to model record fields:
       - wmes_score ← candidate wmes
       - stability_score ← candidate pts (Path Thickness Score maps to HP stability)
       - fragility_score ← candidate fragility (from Tier 3 robustness check)
       - test_auc ← looked up from ModelRegistryV2 by config_hash
     """
-    from src.phase_21_continuous.experiment_tracking import (
-        ExperimentResult, ExperimentConfig, ExperimentStatus,
-        create_default_config,
-    )
-
     candidates = report.get("production_candidates", [])
     if not candidates:
         return 0
 
-    # Try to look up test_auc from ModelRegistryV2
+    # Try to look up test_auc from ModelRegistryV2 entries in SQLite
     v2_aucs = {}
     try:
-        from src.model_registry_v2 import ModelRegistryV2, get_registry
-        v2_registry = get_registry()
-        for model_id, entry in v2_registry.models.items():
-            if hasattr(entry, 'metrics') and entry.metrics:
-                config_hash = entry.get_config_hash() if hasattr(entry, 'get_config_hash') else ""
-                auc = getattr(entry.metrics, 'test_auc', 0) or getattr(entry.metrics, 'cv_auc', 0)
-                if config_hash:
-                    v2_aucs[config_hash] = auc
-    except Exception:
-        pass
+        entries = db.query_model_entries()
+        for d in entries:
+            metrics = d.get("metrics", {})
+            config_hash = d.get("config_hash", "")
+            auc = metrics.get("test_auc", 0) or metrics.get("cv_auc", 0)
+            if config_hash:
+                v2_aucs[config_hash] = auc
+    except Exception as e:
+        if logger:
+            logger.debug(f"V2 AUC lookup failed: {e}")
 
     registered = 0
     for cand in candidates:
@@ -326,24 +643,27 @@ def _register_thick_weave_candidates(report, registry, logger=None):
         if wmes < 0.50 or test_auc < 0.55:
             continue
 
-        # Create ExperimentResult to register through standard pipeline
-        config = create_default_config(f"thick_weave_{cand.get('thread_id', 'unknown')}")
-        result = ExperimentResult(
-            experiment_id=f"tw_{config_hash[:16]}_{datetime.now().strftime('%H%M%S')}",
-            config=config,
-            status=ExperimentStatus.COMPLETED,
-            test_auc=test_auc,
-            train_auc=test_auc + 0.03,  # Conservative estimate
-            cv_auc_mean=test_auc,
-            wmes_score=wmes,
-            stability_score=pts,       # PTS >= 0.5 means thick/stable plateau
-            fragility_score=fragility,
-            model_path="",  # Models already in ModelRegistryV2
-        )
+        # Register directly via RegistryDB
+        result_dict = {
+            "experiment_id": f"tw_{config_hash[:16]}_{datetime.now().strftime('%H%M%S')}",
+            "status": "completed",
+            "test_auc": test_auc,
+            "train_auc": test_auc + 0.03,  # Conservative estimate
+            "cv_auc_mean": test_auc,
+            "wmes_score": wmes,
+            "stability_score": pts,       # PTS >= 0.5 means thick/stable plateau
+            "fragility_score": fragility,
+            "backtest_sharpe": 0,
+            "backtest_win_rate": 0,
+            "backtest_total_return": 0,
+            "model_path": "",  # Models already in ModelRegistryV2
+            "config": {},
+        }
 
         try:
-            model_id = registry.register_model(result)
-            tier = registry.models[model_id].tier
+            from src.core.registry_db import compute_tier
+            model_id = db.register_model_from_experiment(result_dict)
+            tier = compute_tier(pts, fragility, test_auc)
             if logger:
                 logger.info(
                     f"[THICK_WEAVE] Registered {model_id}: "
@@ -365,9 +685,9 @@ def start_thick_weave_search(budget=50, logger=None):
             from src.phase_23_analytics.thick_weave_search import (
                 ThickWeaveSearch, ThickWeaveConfig,
             )
-            from src.phase_21_continuous.experiment_tracking import ModelRegistry
+            from src.core.registry_db import get_registry_db
 
-            registry = ModelRegistry()
+            _db = get_registry_db()
 
             if logger:
                 logger.info(f"Thick weave search started (budget={budget} per cycle)")
@@ -400,8 +720,8 @@ def start_thick_weave_search(budget=50, logger=None):
                     with open(report_file, "w") as f:
                         json.dump(report, f, indent=2, default=str)
 
-                    # Bridge production candidates into ModelRegistry with tier scoring
-                    n_registered = _register_thick_weave_candidates(report, registry, logger)
+                    # Bridge production candidates into RegistryDB with tier scoring
+                    n_registered = _register_thick_weave_candidates(report, _db, logger)
 
                     stats = report.get("search_stats", {})
                     thick_paths = report.get("thick_paths", [])
@@ -435,6 +755,7 @@ def start_thick_weave_search(budget=50, logger=None):
 
 def run_trading_bot(logger):
     """Run the trading bot in the main thread."""
+    global _active_bot
     from src.paper_trading import TradingBot, ALPACA_AVAILABLE
 
     if not ALPACA_AVAILABLE:
@@ -443,6 +764,7 @@ def run_trading_bot(logger):
 
     try:
         bot = TradingBot()
+        _active_bot = bot  # Register for graceful shutdown handler
 
         # Print account info
         account = bot.client.get_account()
@@ -458,6 +780,28 @@ def run_trading_bot(logger):
     except Exception as e:
         logger.error(f"Trading bot error: {e}")
         return False
+    finally:
+        _active_bot = None
+        # Flush performance tracker and risk state on shutdown
+        if bot:
+            try:
+                bot.performance_tracker._save()
+                logger.info("Performance tracker flushed to disk")
+            except Exception as e:
+                logger.debug(f"Shutdown: perf tracker flush failed: {e}")
+            try:
+                bot.risk_manager._persist_state()
+                logger.info("Risk manager state persisted")
+            except Exception as e:
+                logger.debug(f"Shutdown: risk state persist failed: {e}")
+            # Cancel any pending orders
+            try:
+                pending = list(bot.order_manager.pending_orders.keys())
+                for order_id in pending:
+                    bot.client.cancel_order(order_id)
+                    logger.info(f"Cancelled pending order: {order_id}")
+            except Exception as e:
+                logger.debug(f"Shutdown: order cancellation failed: {e}")
 
 
 def main():
@@ -467,6 +811,7 @@ def main():
     parser.add_argument("--with-training", action="store_true", default=True, help="Run experiments in background (default: True)")
     parser.add_argument("--no-training", action="store_true", help="Disable background experiments")
     parser.add_argument("--no-web-monitor", action="store_true", help="Skip web monitor")
+    parser.add_argument("--no-trading", action="store_true", help="Skip trading bot (experiment-only mode)")
     parser.add_argument("--no-thick-weave", action="store_true", help="Skip thick weave search")
     parser.add_argument("--thick-weave-budget", type=int, default=50, help="Thick weave evals per cycle (default: 50)")
     parser.add_argument("--dashboard-port", type=int, default=8050, help="Dashboard port")
@@ -474,6 +819,11 @@ def main():
     args = parser.parse_args()
 
     logger = setup_logging()
+
+    # Register graceful shutdown handlers
+    signal.signal(signal.SIGINT, _shutdown_handler)
+    if hasattr(signal, 'SIGTERM'):
+        signal.signal(signal.SIGTERM, _shutdown_handler)
 
     print()
     print("=" * 60)
@@ -483,7 +833,8 @@ def main():
 
     # Check prerequisites
     checks = check_prerequisites(logger)
-    all_ok = all(v for k, v in checks.items() if k not in ("paper_mode", "flask", "experiments_dir"))
+    # models check is non-blocking for experiment-only mode (fresh campaigns have no production models yet)
+    all_ok = all(v for k, v in checks.items() if k not in ("paper_mode", "flask", "experiments_dir", "models"))
 
     for check, passed in checks.items():
         status = "OK" if passed else "FAIL"
@@ -498,8 +849,8 @@ def main():
     # Write initial status.json (clears stale data from previous runs)
     write_status_json(_component_state, mode="INITIALIZING", logger=logger)
 
-    # Check gates
-    if not args.dashboard_only:
+    # Check gates (skip in experiment-only or dashboard-only mode)
+    if not args.dashboard_only and not args.no_trading:
         gates_ok = check_gates(logger)
         if not gates_ok:
             print("\n  Trading gates not met. Run experiments first:")
@@ -531,11 +882,13 @@ def main():
             print("  [SKIP] Dashboards (Flask not installed)")
 
     # Start experiment runner (continuous training in background)
+    experiment_thread = None
+    thick_weave_thread = None
+    watchdog_thread = None
+
     if args.with_training and not args.no_training and not args.dashboard_only:
         experiment_thread = start_experiment_runner(logger=logger)
         logger.info("Background training enabled (experiments run continuously)")
-    else:
-        experiment_thread = None
 
     # Start thick weave search (intelligent plateau discovery)
     if not args.no_thick_weave and not args.dashboard_only:
@@ -543,11 +896,46 @@ def main():
             budget=args.thick_weave_budget, logger=logger
         )
         logger.info(f"Thick weave search enabled (budget={args.thick_weave_budget} per cycle)")
-    else:
-        thick_weave_thread = None
 
-    # Start trading bot
+    # Start watchdog to auto-restart crashed threads (Wave 26, extended Wave 28)
+    if experiment_thread or thick_weave_thread or dashboard_thread or monitor_thread:
+        watchdog_thread, watched, dash_port_ref, mon_port_ref = start_watchdog(logger=logger)
+        if experiment_thread:
+            watched["experiment_runner"] = experiment_thread
+        if thick_weave_thread:
+            watched["thick_weave_search"] = thick_weave_thread
+        if dashboard_thread:
+            watched["dashboard_server"] = dashboard_thread
+            dash_port_ref[0] = args.dashboard_port
+        if monitor_thread:
+            watched["web_monitor"] = monitor_thread
+            mon_port_ref[0] = args.monitor_port
+        logger.info("Watchdog enabled (auto-restart on crash)")
+
+    # Start periodic maintenance (model cleanup, DB vacuum, disk check)
+    maintenance_thread = None
     if not args.dashboard_only:
+        maintenance_thread = run_periodic_maintenance(logger=logger)
+        logger.info("Periodic maintenance enabled (every 6 hours)")
+
+        # Run initial cleanup on startup
+        cleanup_old_experiment_models(max_age_days=7, logger=logger)
+
+    # Start health checker (periodic system monitoring)
+    health_checker = None
+    if not args.dashboard_only:
+        try:
+            from src.phase_20_monitoring.health_checker import HealthChecker
+            health_checker = HealthChecker(check_interval_seconds=60)
+            health_checker.start_background()
+            update_component("health_checker", "RUNNING", logger)
+            logger.info("Health checker started (interval: 60s)")
+        except Exception as e:
+            logger.warning(f"Health checker not started: {e}")
+            update_component("health_checker", "FAILED", logger)
+
+    # Start trading bot (unless --no-trading or --dashboard-only)
+    if not args.dashboard_only and not args.no_trading:
         update_component("trading_bot", "RUNNING", logger)
         update_component("signal_generator", "RUNNING", logger)
         update_component("risk_manager", "RUNNING", logger)
@@ -556,12 +944,22 @@ def main():
         update_component("signal_generator", "STOPPED", logger)
         update_component("risk_manager", "STOPPED", logger)
     else:
-        print("  Dashboard-only mode. Press Ctrl+C to stop.")
+        mode = "experiment-only" if args.no_trading else "dashboard-only"
+        update_component("trading_bot", "DISABLED", logger)
+        print(f"  {mode.title()} mode — trading disabled. Press Ctrl+C to stop.")
         try:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
             print("\n  Shutting down...")
+
+    # Stop health checker
+    if health_checker is not None:
+        try:
+            health_checker.stop_background()
+            update_component("health_checker", "STOPPED", logger)
+        except Exception as e:
+            logger.debug(f"Health checker stop: {e}")
 
     return 0
 

@@ -1,0 +1,311 @@
+"""
+GIGA TRADER - Economic Features
+=================================
+Add features from treasury yields, volatility indices, credit spreads,
+and derived economic indicators.
+
+Downloads data via yfinance (no API key needed). Each source produces:
+  - Level (raw value or close price)
+  - Daily change
+  - 5-day change
+  - 20-day change
+  - Z-score (rolling 60-day standardized)
+  - Percentile rank (rolling 252-day)
+
+Derived features from combinations:
+  - yield_curve_slope: 10Y - 5Y yield
+  - yield_curve_steep: 10Y - 13W yield
+  - credit_spread: JNK return - SHY return (5d rolling)
+  - real_yield_proxy: TNX z-score - TIP 20d return
+  - vix_regime: VIX z-score relative to 20d MA
+  - oil_fin_divergence: USO 5d return - XLF 5d return
+"""
+
+import warnings
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional
+
+import numpy as np
+import pandas as pd
+
+warnings.filterwarnings("ignore")
+
+
+class EconomicFeatures:
+    """
+    Download economic data via yfinance and create predictive features.
+
+    Follows the same pattern as CrossAssetFeatures: download → feature engineer → merge.
+    """
+
+    # Sources to download via yfinance
+    SOURCES = {
+        "^VIX": {"desc": "CBOE Volatility Index", "category": "volatility", "prefix": "vix"},
+        "^TNX": {"desc": "10-Year Treasury Yield", "category": "rates", "prefix": "tnx"},
+        "^TYX": {"desc": "30-Year Treasury Yield", "category": "rates", "prefix": "tyx"},
+        "^FVX": {"desc": "5-Year Treasury Yield", "category": "rates", "prefix": "fvx"},
+        "^IRX": {"desc": "13-Week Treasury Bill", "category": "rates", "prefix": "irx"},
+        "SHY": {"desc": "1-3 Year Treasury ETF", "category": "bonds", "prefix": "shy"},
+        "LQD": {"desc": "Investment Grade Corp Bonds", "category": "bonds", "prefix": "lqd"},
+        "JNK": {"desc": "High Yield (Junk) Bonds", "category": "bonds", "prefix": "jnk"},
+        "TIP": {"desc": "TIPS (Inflation-Protected)", "category": "bonds", "prefix": "tip"},
+        "USO": {"desc": "Oil ETF", "category": "commodities", "prefix": "uso"},
+        "XLF": {"desc": "Financials Sector ETF", "category": "sector", "prefix": "xlf"},
+    }
+
+    def __init__(self, sources: Optional[List[str]] = None):
+        """
+        Args:
+            sources: List of yfinance symbols to use. Defaults to all SOURCES.
+        """
+        if sources is not None:
+            self.sources = {k: v for k, v in self.SOURCES.items() if k in sources}
+        else:
+            self.sources = dict(self.SOURCES)
+
+        self._prices: Optional[pd.DataFrame] = None
+
+    def download_economic_data(
+        self,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> pd.DataFrame:
+        """Download all economic data via yfinance."""
+        import yfinance as yf
+
+        print("\n[ECONOMIC] Downloading economic indicator data via yfinance...")
+
+        symbols = list(self.sources.keys())
+        results = {}
+
+        for symbol in symbols:
+            try:
+                data = yf.download(
+                    symbol,
+                    start=start_date.strftime("%Y-%m-%d"),
+                    end=(end_date + timedelta(days=1)).strftime("%Y-%m-%d"),
+                    auto_adjust=True,
+                    progress=False,
+                )
+                if data.empty:
+                    print(f"  {symbol}: NO DATA")
+                    continue
+
+                # Handle multi-level columns from yfinance
+                if isinstance(data.columns, pd.MultiIndex):
+                    data.columns = data.columns.get_level_values(0)
+
+                close = data["Close"].copy()
+                close.index = pd.to_datetime(close.index).tz_localize(None)
+                results[symbol] = close
+                print(f"  {symbol}: {len(close)} days - {self.sources[symbol]['desc']}")
+            except Exception as e:
+                print(f"  {symbol}: ERROR - {e}")
+
+        if not results:
+            print("  [WARN] No economic data downloaded")
+            return pd.DataFrame()
+
+        self._prices = pd.DataFrame(results)
+        print(f"  Total: {len(self._prices)} days, {len(self._prices.columns)} sources")
+        return self._prices
+
+    def create_economic_features(
+        self,
+        spy_daily: pd.DataFrame,
+    ) -> pd.DataFrame:
+        """
+        Create features from downloaded economic data and merge into spy_daily.
+
+        For each source, creates 6 features:
+          - {prefix}_level: Raw level (z-scored 252d)
+          - {prefix}_chg_1d: Daily change
+          - {prefix}_chg_5d: 5-day change
+          - {prefix}_chg_20d: 20-day change
+          - {prefix}_zscore: 60-day z-score
+          - {prefix}_pctile: 252-day percentile rank
+
+        Plus derived combination features.
+        """
+        if self._prices is None or self._prices.empty:
+            return spy_daily
+
+        print("\n[ECONOMIC] Engineering features...")
+
+        features = spy_daily.copy()
+        n_features_added = 0
+
+        for symbol, meta in self.sources.items():
+            if symbol not in self._prices.columns:
+                continue
+
+            prices = self._prices[symbol].dropna()
+            if len(prices) < 60:
+                continue
+
+            prefix = meta["prefix"]
+            returns = prices.pct_change()
+
+            asset_features = pd.DataFrame(index=prices.index)
+
+            # 1. Level z-scored (252d)
+            asset_features[f"econ_{prefix}_level_z"] = (
+                (prices - prices.rolling(252, min_periods=60).mean())
+                / (prices.rolling(252, min_periods=60).std() + 1e-10)
+            )
+
+            # 2. Daily change
+            asset_features[f"econ_{prefix}_chg_1d"] = returns
+
+            # 3. 5-day change
+            asset_features[f"econ_{prefix}_chg_5d"] = returns.rolling(5).sum()
+
+            # 4. 20-day change
+            asset_features[f"econ_{prefix}_chg_20d"] = returns.rolling(20).sum()
+
+            # 5. 60-day z-score
+            asset_features[f"econ_{prefix}_zscore"] = (
+                (prices - prices.rolling(60).mean()) / (prices.rolling(60).std() + 1e-10)
+            )
+
+            # 6. 252-day percentile rank
+            asset_features[f"econ_{prefix}_pctile"] = prices.rolling(252, min_periods=60).apply(
+                lambda x: pd.Series(x).rank(pct=True).iloc[-1], raw=False
+            )
+
+            # Convert index to date for merge
+            asset_features["date"] = pd.to_datetime(asset_features.index.date)
+
+            features = features.merge(
+                asset_features.reset_index(drop=True),
+                on="date",
+                how="left",
+            )
+            n_features_added += 6
+
+        # ── Derived Combination Features ──
+        derived_count = self._add_derived_features(features)
+        n_features_added += derived_count
+
+        # Fill NaN with 0 for economic features
+        econ_cols = [c for c in features.columns if c.startswith("econ_")]
+        features[econ_cols] = features[econ_cols].fillna(0)
+
+        print(f"  Added {n_features_added} economic features ({len(econ_cols)} columns)")
+        return features
+
+    def _add_derived_features(self, features: pd.DataFrame) -> int:
+        """Add derived combination features. Returns count of features added."""
+        count = 0
+        prices = self._prices
+        if prices is None:
+            return 0
+
+        # Yield curve slope: 10Y - 5Y
+        if "^TNX" in prices.columns and "^FVX" in prices.columns:
+            slope = prices["^TNX"] - prices["^FVX"]
+            slope_z = (slope - slope.rolling(60).mean()) / (slope.rolling(60).std() + 1e-10)
+            feat = pd.DataFrame({"econ_yield_curve_10_5": slope_z})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_yield_curve_10_5"] = features_merged["econ_yield_curve_10_5"]
+            count += 1
+
+        # Yield curve steepness: 10Y - 13W
+        if "^TNX" in prices.columns and "^IRX" in prices.columns:
+            steep = prices["^TNX"] - prices["^IRX"]
+            steep_z = (steep - steep.rolling(60).mean()) / (steep.rolling(60).std() + 1e-10)
+            feat = pd.DataFrame({"econ_yield_curve_10_13w": steep_z})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_yield_curve_10_13w"] = features_merged["econ_yield_curve_10_13w"]
+            count += 1
+
+        # Credit spread proxy: JNK 5d return - SHY 5d return
+        if "JNK" in prices.columns and "SHY" in prices.columns:
+            jnk_5d = prices["JNK"].pct_change().rolling(5).sum()
+            shy_5d = prices["SHY"].pct_change().rolling(5).sum()
+            spread = jnk_5d - shy_5d
+            feat = pd.DataFrame({"econ_credit_spread": spread})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_credit_spread"] = features_merged["econ_credit_spread"]
+            count += 1
+
+        # Real yield proxy: TNX z-score - TIP 20d return
+        if "^TNX" in prices.columns and "TIP" in prices.columns:
+            tnx_z = (prices["^TNX"] - prices["^TNX"].rolling(60).mean()) / (
+                prices["^TNX"].rolling(60).std() + 1e-10
+            )
+            tip_ret = prices["TIP"].pct_change(20)
+            real_yield = tnx_z - tip_ret * 100  # Scale TIP return
+            feat = pd.DataFrame({"econ_real_yield_proxy": real_yield})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_real_yield_proxy"] = features_merged["econ_real_yield_proxy"]
+            count += 1
+
+        # VIX regime: z-score of VIX vs 20d MA
+        if "^VIX" in prices.columns:
+            vix = prices["^VIX"]
+            vix_regime = (vix - vix.rolling(20).mean()) / (vix.rolling(20).std() + 1e-10)
+            feat = pd.DataFrame({"econ_vix_regime": vix_regime})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_vix_regime"] = features_merged["econ_vix_regime"]
+            count += 1
+
+        # Oil-Financials divergence
+        if "USO" in prices.columns and "XLF" in prices.columns:
+            uso_5d = prices["USO"].pct_change(5)
+            xlf_5d = prices["XLF"].pct_change(5)
+            div = uso_5d - xlf_5d
+            feat = pd.DataFrame({"econ_oil_fin_diverge": div})
+            feat["date"] = pd.to_datetime(prices.index.date)
+            features_merged = features.merge(feat.reset_index(drop=True), on="date", how="left")
+            features["econ_oil_fin_diverge"] = features_merged["econ_oil_fin_diverge"]
+            count += 1
+
+        return count
+
+    def analyze_current_conditions(self, spy_daily: pd.DataFrame) -> Optional[dict]:
+        """Analyze current economic conditions for dashboard display."""
+        if self._prices is None or self._prices.empty:
+            return None
+
+        conditions = {}
+
+        # VIX level
+        if "^VIX" in self._prices.columns:
+            vix = self._prices["^VIX"].dropna()
+            if len(vix) > 0:
+                current_vix = vix.iloc[-1]
+                vix_pctile = (vix.iloc[-252:] <= current_vix).mean() if len(vix) >= 252 else 0.5
+                conditions["vix_level"] = float(current_vix)
+                conditions["vix_percentile"] = float(vix_pctile)
+                if vix_pctile > 0.8:
+                    conditions["vix_regime"] = "HIGH_VOL"
+                elif vix_pctile < 0.2:
+                    conditions["vix_regime"] = "LOW_VOL"
+                else:
+                    conditions["vix_regime"] = "NORMAL"
+
+        # Yield curve
+        if "^TNX" in self._prices.columns and "^FVX" in self._prices.columns:
+            tnx = self._prices["^TNX"].dropna()
+            fvx = self._prices["^FVX"].dropna()
+            if len(tnx) > 0 and len(fvx) > 0:
+                slope = float(tnx.iloc[-1] - fvx.iloc[-1])
+                conditions["yield_curve_10_5"] = slope
+                conditions["yield_curve_signal"] = "INVERTED" if slope < 0 else "NORMAL"
+
+        # Credit conditions
+        if "JNK" in self._prices.columns and "SHY" in self._prices.columns:
+            jnk_ret5 = self._prices["JNK"].pct_change().rolling(5).sum().dropna()
+            shy_ret5 = self._prices["SHY"].pct_change().rolling(5).sum().dropna()
+            if len(jnk_ret5) > 0 and len(shy_ret5) > 0:
+                spread = float(jnk_ret5.iloc[-1] - shy_ret5.iloc[-1])
+                conditions["credit_spread_5d"] = spread
+                conditions["credit_signal"] = "RISK_ON" if spread > 0 else "RISK_OFF"
+
+        return conditions if conditions else None

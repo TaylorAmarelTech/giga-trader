@@ -2,11 +2,13 @@
 GIGA TRADER - Model Registry v2: Registry Class
 =================================================
 ModelRegistryV2 class and get_registry() singleton.
+
+Storage is fully backed by SQLite via RegistryDB.
 """
 
 import json
 import logging
-import shutil
+import uuid
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -45,66 +47,45 @@ class ModelRegistryV2:
 
     def __init__(
         self,
-        registry_dir: Path = None,
+        db,
         models_dir: Path = None,
+        **_kwargs,
     ):
-        self.registry_dir = registry_dir or (project_root / "models" / "registry_v2")
         self.models_dir = models_dir or (project_root / "models" / "artifacts")
+        self._db = db
 
-        self.registry_dir.mkdir(parents=True, exist_ok=True)
         self.models_dir.mkdir(parents=True, exist_ok=True)
-
-        self.registry_file = self.registry_dir / "registry.json"
         self.models: Dict[str, ModelEntry] = {}
 
         self._load_registry()
 
     def _load_registry(self):
-        """Load registry from disk."""
-        if self.registry_file.exists():
-            try:
-                with open(self.registry_file) as f:
-                    data = json.load(f)
-
-                self.models = {
-                    model_id: ModelEntry.from_dict(entry)
-                    for model_id, entry in data.get('models', {}).items()
-                }
-                logger.info(f"Loaded {len(self.models)} models from registry")
-            except Exception as e:
-                logger.warning(f"Failed to load registry: {e}")
-                self.models = {}
-        else:
-            logger.info("Creating new model registry")
-            self.models = {}
-
-    def _save_registry(self):
-        """Save registry to disk."""
-        data = {
-            'version': '2.0',
-            'updated_at': datetime.now().isoformat(),
-            'n_models': len(self.models),
-            'models': {
-                model_id: entry.to_dict()
-                for model_id, entry in self.models.items()
+        """Load registry from SQLite."""
+        try:
+            entries = self._db.query_model_entries()
+            self.models = {
+                d["model_id"]: ModelEntry.from_dict(d)
+                for d in entries
             }
-        }
-
-        with open(self.registry_file, 'w') as f:
-            json.dump(data, f, indent=2)
-
-        logger.info(f"Saved {len(self.models)} models to registry")
+            logger.info(f"Loaded {len(self.models)} models from SQLite")
+        except Exception as e:
+            logger.warning(f"Could not load model registry: {e}")
+            self.models = {}
 
     def register(self, entry: ModelEntry) -> str:
         """
         Register a new model entry.
 
+        Auto-generates a unique model_id if one isn't provided.
+
         Returns:
             model_id
         """
+        if not entry.model_id:
+            entry.model_id = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
         entry.updated_at = datetime.now().isoformat()
         self.models[entry.model_id] = entry
-        self._save_registry()
+        self._db.add_model_entry(entry.to_dict())
 
         logger.info(f"Registered model: {entry.model_id}")
         return entry.model_id
@@ -123,7 +104,7 @@ class ModelRegistryV2:
                 setattr(entry.metrics, key, value)
 
         entry.updated_at = datetime.now().isoformat()
-        self._save_registry()
+        self._db.update_model_entry(model_id, entry.to_dict())
 
     def update_metrics(self, model_id: str, metrics: ModelMetrics):
         """Update model metrics."""
@@ -132,7 +113,7 @@ class ModelRegistryV2:
 
         self.models[model_id].metrics = metrics
         self.models[model_id].updated_at = datetime.now().isoformat()
-        self._save_registry()
+        self._db.update_model_entry(model_id, self.models[model_id].to_dict())
 
     def update_artifacts(self, model_id: str, artifacts: ModelArtifacts):
         """Update model artifacts."""
@@ -141,7 +122,7 @@ class ModelRegistryV2:
 
         self.models[model_id].artifacts = artifacts
         self.models[model_id].updated_at = datetime.now().isoformat()
-        self._save_registry()
+        self._db.update_model_entry(model_id, self.models[model_id].to_dict())
 
     def set_status(self, model_id: str, status: ModelStatus):
         """Set model status."""
@@ -150,7 +131,7 @@ class ModelRegistryV2:
 
         self.models[model_id].status = status.value
         self.models[model_id].updated_at = datetime.now().isoformat()
-        self._save_registry()
+        self._db.update_model_entry(model_id, self.models[model_id].to_dict())
 
     def get(self, model_id: str) -> Optional[ModelEntry]:
         """Get model by ID."""
@@ -169,7 +150,7 @@ class ModelRegistryV2:
                     Path(path).unlink()
 
         del self.models[model_id]
-        self._save_registry()
+        self._db.delete_model_entry(model_id)
 
         logger.info(f"Deleted model: {model_id}")
 
@@ -383,7 +364,7 @@ class ModelRegistryV2:
         logger.info(f"Exported registry to {filepath}")
 
     def import_registry(self, filepath: Path, merge: bool = True):
-        """Import registry from file."""
+        """Import registry from a JSON file."""
         with open(filepath) as f:
             data = json.load(f)
 
@@ -397,21 +378,21 @@ class ModelRegistryV2:
         else:
             self.models = imported
 
-        self._save_registry()
+        # Sync all entries to SQLite
+        for model_id, entry in imported.items():
+            self._db.add_model_entry(entry.to_dict())
+
         logger.info(f"Imported {len(imported)} models")
 
-    def reset(self, backup: bool = True):
-        """Reset registry (with optional backup)."""
-        if backup and self.registry_file.exists():
-            backup_path = self.registry_dir / f"registry_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-            shutil.copy(self.registry_file, backup_path)
-            logger.info(f"Backed up registry to {backup_path}")
+    def reset(self):
+        """Reset registry (delete all entries from SQLite)."""
+        for model_id in list(self.models.keys()):
+            self._db.delete_model_entry(model_id)
 
         self.models = {}
-        self._save_registry()
         logger.info("Registry reset")
 
 
-def get_registry() -> ModelRegistryV2:
+def get_registry(db=None) -> ModelRegistryV2:
     """Get the global model registry instance."""
-    return ModelRegistryV2()
+    return ModelRegistryV2(db=db)

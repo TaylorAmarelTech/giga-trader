@@ -30,6 +30,8 @@ from enum import Enum
 
 import numpy as np
 
+from src.core.state_manager import atomic_write_json
+
 logger = logging.getLogger("HEALTH_CHECKER")
 
 project_root = Path(__file__).parent.parent.parent
@@ -356,6 +358,7 @@ class HealthChecker:
         self.register_check("status_file", self._check_status_file)
         self.register_check("model_performance", self._check_model_performance)
         self.register_check("api_connectivity", self._check_api_connectivity)
+        self.register_check("process_memory", self._check_process_memory)
 
     def register_check(self, name: str, check_fn: Callable[[], HealthCheckResult]):
         """Register a custom health check."""
@@ -531,45 +534,23 @@ class HealthChecker:
             )
 
     def _check_model_performance(self) -> HealthCheckResult:
-        """Check model performance metrics from registry."""
+        """Check model performance metrics from SQLite registry."""
         try:
-            registry_path = project_root / "models" / "registry_v2" / "registry.json"
-            if not registry_path.exists():
-                return HealthCheckResult(
-                    name="model_performance",
-                    status=HealthStatus.UNKNOWN,
-                    message="Model registry not found",
-                )
+            from src.core.registry_db import get_registry_db
+            db = get_registry_db()
+            stats = db.get_model_statistics()
 
-            with open(registry_path) as f:
-                registry = json.load(f)
-
-            models = registry.get("models", {})
-            if not models:
+            total = stats.get("total_models", 0)
+            if total == 0:
                 return HealthCheckResult(
                     name="model_performance",
                     status=HealthStatus.UNKNOWN,
                     message="No models in registry",
                 )
 
-            # Check AUC of production models
-            production_aucs = []
-            for model_id, entry in models.items():
-                if entry.get("status") in ("production", "trained"):
-                    metrics = entry.get("metrics", {})
-                    auc = metrics.get("cv_auc") or metrics.get("test_auc")
-                    if auc:
-                        production_aucs.append(auc)
-
-            if not production_aucs:
-                return HealthCheckResult(
-                    name="model_performance",
-                    status=HealthStatus.UNKNOWN,
-                    message="No AUC metrics found",
-                )
-
-            best_auc = max(production_aucs)
-            avg_auc = np.mean(production_aucs)
+            best_auc = stats.get("best_cv_auc", 0)
+            avg_auc = stats.get("avg_cv_auc", 0)
+            by_tier = stats.get("by_tier", {})
             min_auc = self.config["min_model_auc"]
             warn_auc = self.config["auc_warning_threshold"]
 
@@ -580,19 +561,72 @@ class HealthChecker:
             else:
                 status = HealthStatus.HEALTHY
 
+            tier_summary = ", ".join(f"T{t}:{c}" for t, c in sorted(by_tier.items()))
             return HealthCheckResult(
                 name="model_performance",
                 status=status,
-                message=f"Best AUC: {best_auc:.3f}, Avg: {avg_auc:.3f} ({len(production_aucs)} models)",
+                message=f"Best AUC: {best_auc:.3f}, Avg: {avg_auc:.3f} ({total} models, {tier_summary})",
                 value=best_auc,
                 threshold=min_auc,
-                metadata={"model_count": len(production_aucs), "avg_auc": avg_auc},
+                metadata={"model_count": total, "avg_auc": avg_auc, "by_tier": by_tier},
             )
         except Exception as e:
             return HealthCheckResult(
                 name="model_performance",
                 status=HealthStatus.UNKNOWN,
                 message=f"Error checking model performance: {e}",
+            )
+
+    def _check_process_memory(self) -> HealthCheckResult:
+        """Check process memory usage.
+
+        Wave 28: Monitors RAM usage to detect memory leaks during long runs.
+        Alerts if process exceeds 2GB.
+        """
+        try:
+            import psutil
+            process = psutil.Process(os.getpid())
+            mem_info = process.memory_info()
+            rss_mb = mem_info.rss / (1024 * 1024)
+
+            # Also check all child processes
+            children = process.children(recursive=True)
+            total_mb = rss_mb + sum(
+                c.memory_info().rss / (1024 * 1024) for c in children
+            )
+
+            max_mb = self.config.get("max_process_memory_mb", 4096)
+
+            if total_mb > max_mb:
+                status = HealthStatus.UNHEALTHY
+            elif total_mb > max_mb * 0.75:
+                status = HealthStatus.DEGRADED
+            else:
+                status = HealthStatus.HEALTHY
+
+            return HealthCheckResult(
+                name="process_memory",
+                status=status,
+                message=f"Main: {rss_mb:.0f}MB, Total (+ {len(children)} children): {total_mb:.0f}MB",
+                value=total_mb,
+                threshold=max_mb,
+                metadata={
+                    "rss_mb": rss_mb,
+                    "total_mb": total_mb,
+                    "child_count": len(children),
+                },
+            )
+        except ImportError:
+            return HealthCheckResult(
+                name="process_memory",
+                status=HealthStatus.UNKNOWN,
+                message="psutil not installed - memory monitoring unavailable",
+            )
+        except Exception as e:
+            return HealthCheckResult(
+                name="process_memory",
+                status=HealthStatus.UNKNOWN,
+                message=f"Error checking memory: {e}",
             )
 
     def _check_api_connectivity(self) -> HealthCheckResult:
@@ -741,9 +775,7 @@ class HealthChecker:
                 # Save status to file
                 status_report = self.get_status_report()
                 health_path = project_root / "logs" / "health_status.json"
-                health_path.parent.mkdir(parents=True, exist_ok=True)
-                with open(health_path, "w") as f:
-                    json.dump(status_report, f, indent=2, default=str)
+                atomic_write_json(health_path, status_report)
 
             except Exception as e:
                 logger.error(f"Health check loop error: {e}")

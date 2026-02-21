@@ -80,7 +80,8 @@ def main():
 
     # Initialize grid search runner
     print("\nInitializing experiment engine...")
-    engine = ExperimentEngine()
+    from src.core.registry_db import get_registry_db
+    engine = ExperimentEngine(db=get_registry_db())
     runner = EntryExitGridSearchRunner(experiment_engine=engine)
 
     # Show all configurations that will be tested

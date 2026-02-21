@@ -39,6 +39,8 @@ sys.path.insert(0, str(project_root))
 from dotenv import load_dotenv
 load_dotenv(project_root / ".env")
 
+web_logger = logging.getLogger("WebMonitor")
+
 # Flask imports
 try:
     from flask import Flask, render_template_string, jsonify, request, Response
@@ -1425,8 +1427,8 @@ def get_logs():
                 with open(log_file, 'r', encoding='utf-8', errors='ignore') as f:
                     file_lines = f.readlines()
                     lines.extend(file_lines[-limit:])
-            except Exception:
-                pass
+            except Exception as e:
+                web_logger.debug(f"Could not read log file {log_file}: {e}")
 
     # Sort by timestamp if possible, otherwise just use last N lines
     lines = lines[-limit:]
@@ -1502,24 +1504,21 @@ def get_account():
 @app.route('/api/experiments')
 def get_experiments():
     """Get experiment history."""
-    experiments_dir = WEB_CONFIG["experiments_dir"]
-    history_file = experiments_dir / "experiment_history.json"
-
-    experiments = []
-    if history_file.exists():
-        try:
-            with open(history_file) as f:
-                experiments = json.load(f)
-        except Exception:
-            pass
+    try:
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
+        experiments = db.get_experiments()
+    except Exception as e:
+        web_logger.warning(f"Could not load experiment history: {e}")
+        experiments = []
 
     # Calculate stats
     completed = [e for e in experiments if e.get('status') == 'completed']
     running = [e for e in experiments if e.get('status') == 'running']
-    best_auc = max([e.get('test_score', 0) for e in completed], default=0)
+    best_auc = max([e.get('test_auc', e.get('test_score', 0)) for e in completed], default=0)
 
-    # Sort by test_score for leaderboard
-    leaderboard = sorted(completed, key=lambda x: x.get('test_score', 0), reverse=True)
+    # Sort by test_auc for leaderboard
+    leaderboard = sorted(completed, key=lambda x: x.get('test_auc', 0), reverse=True)
 
     return jsonify({
         "experiments": experiments,
@@ -1534,36 +1533,30 @@ def get_experiments():
 @app.route('/api/experiments/stats')
 def get_experiments_stats():
     """Get quick experiment stats for dashboard."""
-    experiments_dir = WEB_CONFIG["experiments_dir"]
-    history_file = experiments_dir / "experiment_history.json"
-
-    if history_file.exists():
-        try:
-            with open(history_file) as f:
-                experiments = json.load(f)
-            return jsonify({"total_experiments": len(experiments)})
-        except Exception:
-            pass
-
-    return jsonify({"total_experiments": 0})
+    try:
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
+        return jsonify({"total_experiments": db.get_experiment_count()})
+    except Exception as e:
+        web_logger.warning(f"Could not load experiment stats: {e}")
+        return jsonify({"total_experiments": 0})
 
 
 @app.route('/api/models')
 def get_models():
     """Get model registry."""
     models_dir = WEB_CONFIG["models_dir"]
-    registry_file = models_dir / "model_registry.json"
 
     models = []
     production = None
 
-    # Load registry if exists
-    if registry_file.exists():
-        try:
-            with open(registry_file) as f:
-                models = json.load(f)
-        except Exception:
-            pass
+    # Load models from SQLite
+    try:
+        from src.core.registry_db import get_registry_db
+        db = get_registry_db()
+        models = db.get_models()
+    except Exception as e:
+        web_logger.warning(f"Could not load model registry: {e}")
 
     # Scan for model files
     production_dir = models_dir / "production"
@@ -1619,8 +1612,8 @@ def get_backtests():
         try:
             with open(backtests_file) as f:
                 backtests = json.load(f)
-        except Exception:
-            pass
+        except Exception as e:
+            web_logger.warning(f"Could not load backtest results: {e}")
 
     # Calculate stats
     profitable = [b for b in backtests if b.get('total_return', 0) > 0]

@@ -22,6 +22,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.model_registry_v2 import ModelRegistryV2, ModelEntry
+from src.core.registry_db import get_registry_db
 from src.training_pipeline_v2 import TrainingPipelineV2, DataLoader, FeatureEngineer, TargetCreator
 from src.mega_ensemble.extended_grid_search import ExtendedGridConfig, ExtendedGridSearchGenerator, create_quick_extended_grid
 from src.mega_ensemble.comprehensive_grid_search import ComprehensiveGridSearchGenerator, GRID_LEVELS
@@ -81,7 +82,7 @@ class MegaEnsemblePipeline:
         registry: ModelRegistryV2 = None,
         config: MegaPipelineConfig = None,
     ):
-        self.registry = registry or ModelRegistryV2()
+        self.registry = registry or ModelRegistryV2(db=get_registry_db())
         self.config = config or MegaPipelineConfig()
 
         self.base_pipeline = TrainingPipelineV2(self.registry)
@@ -433,7 +434,7 @@ def main():
     )
 
     # Run pipeline
-    registry = ModelRegistryV2()
+    registry = ModelRegistryV2(db=get_registry_db())
     pipeline = MegaEnsemblePipeline(registry, config)
 
     ensemble, metrics = pipeline.train_full_mega_ensemble(target_type="swing")

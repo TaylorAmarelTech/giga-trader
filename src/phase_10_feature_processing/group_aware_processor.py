@@ -423,7 +423,7 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         # Stage 5: Dim reduction
         actual_reduce = min(n_reduce, X_scaled.shape[1] - 1, X_scaled.shape[0] - 1)
         if actual_reduce > 0 and X_scaled.shape[1] > actual_reduce:
-            reducer = self._create_reducer(actual_reduce)
+            reducer = self._create_reducer(actual_reduce, n_samples=X_scaled.shape[0])
             try:
                 reducer.fit(X_scaled)
             except Exception:
@@ -486,9 +486,22 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         top_idx = np.argsort(scores)[::-1][:n_select]
         return np.sort(top_idx)
 
-    def _create_reducer(self, n_components: int):
+    def _create_reducer(self, n_components: int, n_samples: int = 0):
         """Create a dimensionality reducer based on configured method."""
         if self.reduction_method == "kernel_pca":
+            if n_samples > 5000:
+                # Use Nystroem approximation to avoid O(n^2) memory
+                from sklearn.kernel_approximation import Nystroem
+                from sklearn.pipeline import Pipeline
+                n_nystroem = min(1000, n_samples // 5)
+                return Pipeline([
+                    ("nystroem", Nystroem(
+                        kernel="rbf", gamma=0.01,
+                        n_components=n_nystroem,
+                        random_state=self.random_state, n_jobs=-1
+                    )),
+                    ("pca", PCA(n_components=n_components, random_state=self.random_state)),
+                ])
             return KernelPCA(
                 n_components=n_components,
                 kernel="rbf",

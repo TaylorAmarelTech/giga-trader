@@ -171,10 +171,11 @@ class BarResampler:
         # Sort by timestamp if available
         if "timestamp" in result.columns:
             result = result.sort_values("timestamp").reset_index(drop=True)
-            # Rebuild hour/minute from timestamp
+            # Rebuild hour/minute/time from timestamp
             ts = pd.to_datetime(result["timestamp"])
             result["hour"] = ts.dt.hour
             result["minute"] = ts.dt.minute
+            result["time"] = ts.dt.time
 
         return result
 
@@ -200,6 +201,10 @@ class BarResampler:
         result = pd.concat(chunks, ignore_index=True)
         if "timestamp" in result.columns:
             result = result.sort_values("timestamp").reset_index(drop=True)
+            ts = pd.to_datetime(result["timestamp"])
+            result["hour"] = ts.dt.hour
+            result["minute"] = ts.dt.minute
+            result["time"] = ts.dt.time
 
         return result
 

@@ -56,6 +56,29 @@ class SystemState:
         return cls(**filtered)
 
 
+def atomic_write_json(path: Path, data: Any, indent: int = 2) -> None:
+    """Write JSON to a file atomically (temp + rename).
+
+    Prevents partial reads by the dashboard or other consumers.
+    On Windows, os.replace is atomic at the file-system level.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(".tmp")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=indent, default=str)
+        os.replace(tmp_path, path)  # Atomic on NTFS and POSIX
+    except Exception:
+        # Clean up temp file on failure
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+        raise
+
+
 class StateManager:
     """
     Thread-safe state persistence manager.

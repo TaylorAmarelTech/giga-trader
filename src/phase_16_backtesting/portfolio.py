@@ -126,11 +126,13 @@ class Portfolio:
         initial_capital: float = 100000,
         commission_per_share: float = 0.005,
         slippage_pct: float = 0.0001,
+        dynamic_slippage: bool = True,
     ):
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.commission_per_share = commission_per_share
         self.slippage_pct = slippage_pct
+        self.dynamic_slippage = dynamic_slippage
 
         # Positions
         self.open_trades: List[Trade] = []
@@ -147,13 +149,22 @@ class Portfolio:
         self.total_commission = 0.0
         self.total_slippage = 0.0
 
+        # Last known close for mark-to-market
+        self._last_close: float = 0.0
+
     @property
     def equity(self) -> float:
-        """Current portfolio value."""
-        open_value = sum(
-            t.position_size * t.entry_price  # Simplified - should use current price
-            for t in self.open_trades
-        )
+        """Current portfolio value (mark-to-market)."""
+        if self._last_close > 0 and self.open_trades:
+            open_value = 0.0
+            for t in self.open_trades:
+                if t.direction == "LONG":
+                    open_value += t.position_size * self._last_close
+                else:
+                    open_value += t.entry_cost + (t.entry_price - self._last_close) * t.position_size
+            return self.cash + open_value
+        # Fallback when no market price available yet
+        open_value = sum(t.entry_cost for t in self.open_trades)
         return self.cash + open_value
 
     @property
@@ -163,6 +174,29 @@ class Portfolio:
     @property
     def position_count(self) -> int:
         return len(self.open_trades)
+
+    def calculate_slippage(self, order_value: float, volatility: float = 0.0) -> float:
+        """Calculate slippage percentage based on order size and volatility.
+
+        Args:
+            order_value: Dollar value of the order
+            volatility: Recent annualized volatility (0-1 scale)
+
+        Returns:
+            Slippage as a fraction (e.g. 0.0002 = 2 basis points)
+        """
+        if not self.dynamic_slippage:
+            return self.slippage_pct
+
+        base = self.slippage_pct  # 1 bps default
+
+        # Size impact: orders > $50K get up to 2x base slippage
+        size_factor = 1.0 + min(1.0, order_value / 100_000)
+
+        # Volatility impact: high vol (>20% annualized) increases slippage
+        vol_factor = 1.0 + max(0.0, (volatility - 0.15)) * 5.0
+
+        return base * size_factor * vol_factor
 
     def can_open_position(self, cost: float) -> bool:
         """Check if we have enough cash."""
@@ -176,13 +210,15 @@ class Portfolio:
         position_value: float,
         stop_loss: Optional[float] = None,
         take_profit: Optional[float] = None,
+        volatility: float = 0.0,
     ) -> Optional[Trade]:
         """Open a new trade."""
-        # Apply slippage
+        # Apply slippage (dynamic or fixed)
+        slip = self.calculate_slippage(position_value, volatility)
         if direction == "LONG":
-            entry_price = price * (1 + self.slippage_pct)
+            entry_price = price * (1 + slip)
         else:
-            entry_price = price * (1 - self.slippage_pct)
+            entry_price = price * (1 - slip)
 
         # Calculate position size
         position_size = position_value / entry_price
@@ -221,16 +257,18 @@ class Portfolio:
         date: datetime,
         price: float,
         reason: str,
+        volatility: float = 0.0,
     ):
         """Close an existing trade."""
         if trade not in self.open_trades:
             return
 
-        # Apply slippage
+        # Apply slippage (dynamic or fixed)
+        slip = self.calculate_slippage(trade.entry_cost, volatility)
         if trade.direction == "LONG":
-            exit_price = price * (1 - self.slippage_pct)
+            exit_price = price * (1 - slip)
         else:
-            exit_price = price * (1 + self.slippage_pct)
+            exit_price = price * (1 + slip)
 
         # Commission
         commission = trade.position_size * self.commission_per_share
@@ -261,6 +299,7 @@ class Portfolio:
 
     def record_daily(self, date: datetime, close_price: float):
         """Record daily equity and update drawdown."""
+        self._last_close = close_price
         # Calculate current equity with mark-to-market
         open_value = 0
         for trade in self.open_trades:

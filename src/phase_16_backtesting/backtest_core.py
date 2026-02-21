@@ -108,13 +108,21 @@ class BacktestEngine:
             low_price = row['low']
             close_price = row['close']
 
+            # Estimate recent volatility for dynamic slippage
+            idx = common_dates.get_loc(date)
+            if idx >= 20:
+                recent_returns = daily_data['close'].iloc[idx-20:idx].pct_change().dropna()
+                volatility = float(recent_returns.std() * np.sqrt(252)) if len(recent_returns) > 1 else 0.15
+            else:
+                volatility = 0.15  # default ~15% annualized
+
             # Check for stop loss / take profit hits on open positions
             for trade in list(self.portfolio.open_trades):
                 should_close, close_reason, close_price_used = self._check_exit_conditions(
                     trade, high_price, low_price, close_price
                 )
                 if should_close:
-                    self.portfolio.close_trade(trade, date, close_price_used, close_reason)
+                    self.portfolio.close_trade(trade, date, close_price_used, close_reason, volatility=volatility)
 
             # Generate signal
             signal = self._generate_signal(
@@ -154,6 +162,7 @@ class BacktestEngine:
                     position_value=position_value,
                     stop_loss=stop_loss,
                     take_profit=take_profit,
+                    volatility=volatility,
                 )
 
                 if trade:
@@ -161,7 +170,7 @@ class BacktestEngine:
 
             # Close all positions at end of day (no overnight)
             for trade in list(self.portfolio.open_trades):
-                self.portfolio.close_trade(trade, date, close_price, "eod")
+                self.portfolio.close_trade(trade, date, close_price, "eod", volatility=volatility)
 
             # Record daily
             self.portfolio.record_daily(date, close_price)
@@ -235,12 +244,14 @@ class BacktestEngine:
 
         # Risk metrics
         if len(daily_returns) > 1:
-            sharpe_ratio = np.sqrt(252) * np.mean(daily_returns) / (np.std(daily_returns) + 1e-8)
+            risk_free_daily = 0.04 / 252  # ~4% annual risk-free rate
+            excess_returns = np.mean(daily_returns) - risk_free_daily
+            sharpe_ratio = np.sqrt(252) * excess_returns / (np.std(daily_returns) + 1e-8)
 
             # Sortino (downside deviation)
             downside_returns = daily_returns[daily_returns < 0]
             downside_std = np.std(downside_returns) if len(downside_returns) > 0 else 1e-8
-            sortino_ratio = np.sqrt(252) * np.mean(daily_returns) / downside_std
+            sortino_ratio = np.sqrt(252) * excess_returns / downside_std
         else:
             sharpe_ratio = 0
             sortino_ratio = 0

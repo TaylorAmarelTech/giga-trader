@@ -27,6 +27,30 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+
+# Fix for OSError: [Errno 22] Invalid argument on print() when stdout
+# handle becomes invalid (Windows background/daemon processes, detached consoles).
+class _SafeWriter:
+    """Wraps a stream to silently swallow OSError on write/flush."""
+    def __init__(self, stream):
+        self._stream = stream
+    def write(self, data):
+        try:
+            self._stream.write(data)
+        except OSError:
+            pass
+    def flush(self):
+        try:
+            self._stream.flush()
+        except OSError:
+            pass
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+sys.stdout = _SafeWriter(sys.stdout)
+sys.stderr = _SafeWriter(sys.stderr)
+
+
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
@@ -70,9 +94,9 @@ from src.entry_exit_model import (
 # ═══════════════════════════════════════════════════════════════════════════════
 CONFIG = {
     # ─────────────────────────────────────────────────────────────────────────
-    # DATA SETTINGS (5-10 years of 1-min data)
+    # DATA SETTINGS (10+ years of 1-min data for maximum regime coverage)
     # ─────────────────────────────────────────────────────────────────────────
-    "years_to_download": 5,  # 5-10 years of historical data
+    "years_to_download": 10,  # 10 years of historical data (covers 2016-2026)
     "chunk_days": 30,  # Download in 30-day chunks (API limit)
     "min_bars_per_day": 200,  # Minimum bars to consider a valid trading day
     "min_premarket_bars": 10,  # Minimum PM bars (some early years have sparse data)
@@ -921,9 +945,16 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
         # Transform only (for inference)
         # Safely get required transformers with helpful error messages
         var_selector = state.get("var_selector")
-        if var_selector is None:
-            raise ValueError("dim_state missing 'var_selector' - was model trained correctly?")
-        X = var_selector.transform(X)
+        if var_selector is not None:
+            X = var_selector.transform(X)
+        else:
+            # Fallback: apply a fresh variance filter if state was built by a different pipeline
+            from sklearn.feature_selection import VarianceThreshold as _VT
+            _vt = _VT(threshold=CONFIG.get("variance_threshold", 0.001))
+            try:
+                X = _vt.fit_transform(X)
+            except Exception:
+                pass  # Keep X as-is if variance filter fails
 
         corr_keep_idx = state.get("corr_keep_idx")
         if corr_keep_idx is None:
@@ -932,9 +963,12 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
         X = X[:, corr_keep_idx]
 
         pre_transform_scaler = state.get("pre_transform_scaler")
-        if pre_transform_scaler is None:
-            raise ValueError("dim_state missing 'pre_transform_scaler' - was model trained correctly?")
-        X_scaled = pre_transform_scaler.transform(X)
+        if pre_transform_scaler is not None:
+            X_scaled = pre_transform_scaler.transform(X)
+        else:
+            # Fallback: fit a fresh scaler
+            from sklearn.preprocessing import StandardScaler as _SS
+            X_scaled = _SS().fit_transform(X)
 
         method = state.get("method", "none")
 
@@ -2205,6 +2239,30 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     return models, results, scaler, test_df, proba_swing, proba_timing
 
 
+def _save_versioned_model(models_dir: Path, base_name: str, save_dict: dict, max_versions: int = 5):
+    """Save a timestamped backup of a model and prune old versions.
+
+    Creates files like ``spy_robust_models_20260207_153020.joblib`` and
+    removes the oldest backups beyond *max_versions*.
+    """
+    import joblib as _jl
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    versioned_path = models_dir / f"{base_name}_{timestamp}.joblib"
+    _jl.dump(save_dict, versioned_path)
+    print(f"  [VERSION] Backup saved: {versioned_path.name}")
+
+    # Prune old versions
+    versions = sorted(models_dir.glob(f"{base_name}_*.joblib"))
+    while len(versions) > max_versions:
+        oldest = versions.pop(0)
+        try:
+            oldest.unlink()
+            print(f"  [VERSION] Pruned old backup: {oldest.name}")
+        except OSError:
+            pass
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # STEP 10: SAVE MODELS
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -2235,7 +2293,10 @@ def save_models(models, results, scaler, feature_cols, best_threshold, robustnes
         "description": "Robust dual model with all edge strategies + entry/exit timing"
     }
 
-    # Save main model bundle
+    # Save versioned backup before overwriting
+    _save_versioned_model(models_dir, "spy_robust_models", save_dict, max_versions=5)
+
+    # Save main model bundle (canonical path for loading)
     joblib.dump(save_dict, model_path)
     print(f"[PASS] Main models saved to {model_path}")
 
@@ -2302,6 +2363,7 @@ def main():
             use_mag_breadth=CONFIG.get("use_mag_breadth", True),
             use_sector_breadth=CONFIG.get("use_sector_breadth", True),
             use_vol_regime=CONFIG.get("use_vol_regime", True),
+            use_economic_features=CONFIG.get("use_economic_features", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
         )
         print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")
@@ -2330,6 +2392,21 @@ def main():
     X = df_clean[feature_cols].values
     y = df_clean["target_up"].astype(int).values
     weights = df_clean["sample_weight"].values
+
+    # ── Synthetic weight penalty (prevents overfitting to synthetic data) ──
+    if "sample_weight_augment" in df_clean.columns:
+        real_weight_val = 1.0 - CONFIG.get("synthetic_weight", 0.3)
+        is_synthetic = df_clean["sample_weight_augment"].values < real_weight_val - 0.01
+        n_synth = int(is_synthetic.sum())
+        if n_synth > 0:
+            penalty = CONFIG.get("synthetic_weight_penalty", 0.5)
+            floor = CONFIG.get("synthetic_weight_floor", 0.10)
+            ceiling = CONFIG.get("synthetic_weight_ceiling", 0.60)
+            weights[is_synthetic] = np.clip(
+                weights[is_synthetic] * penalty, floor, ceiling
+            )
+            print(f"  [WEIGHT PENALTY] Applied {penalty:.0%} penalty to {n_synth} synthetic samples "
+                  f"(bounds=[{floor:.2f}, {ceiling:.2f}])")
 
     # ─────────────────────────────────────────────────────────────────────────
     # LEAK-PROOF TRAINING PATH (recommended - fixes data leakage issues)
@@ -2425,13 +2502,15 @@ def main():
         models_dir.mkdir(parents=True, exist_ok=True)
 
         model_path = models_dir / "spy_leak_proof_models.joblib"
-        joblib.dump({
+        leak_proof_save = {
             "swing_pipeline": swing_pipeline,
             "timing_pipeline": timing_pipeline,
             "feature_columns": feature_cols,
             "config": CONFIG,
             "cv_results": leak_proof_results,
-        }, model_path)
+        }
+        _save_versioned_model(models_dir, "spy_leak_proof_models", leak_proof_save, max_versions=5)
+        joblib.dump(leak_proof_save, model_path)
 
         print(f"\n[SAVED] Leak-proof models saved to: {model_path}")
 

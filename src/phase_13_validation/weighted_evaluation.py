@@ -91,7 +91,7 @@ class WeightedModelEvaluator:
         cv_mean = np.mean(cv_scores)
         cv_std = np.std(cv_scores)
         # Penalize high variance in CV scores
-        scores["robustness"] = cv_mean * (1 - min(cv_std / cv_mean, 0.5))
+        scores["robustness"] = cv_mean * (1 - min(cv_std / (cv_mean + 1e-6), 0.5))
 
         # 3. Profit Potential (risk-adjusted)
         if buy_mask.sum() > 0:
@@ -99,16 +99,16 @@ class WeightedModelEvaluator:
             avg_win = buy_returns[buy_returns > 0].mean() if (buy_returns > 0).any() else 0
             avg_loss = abs(buy_returns[buy_returns < 0].mean()) if (buy_returns < 0).any() else 0.001
             profit_factor = avg_win / avg_loss if avg_loss > 0 else 1
-            # Sharpe-like ratio
-            sharpe = buy_returns.mean() / (buy_returns.std() + 1e-6)
-            scores["profit_potential"] = min((profit_factor * 0.3 + sharpe * 0.7), 1.0)
+            # Sharpe-like ratio (clipped to prevent unbounded negative values)
+            sharpe = np.clip(buy_returns.mean() / (buy_returns.std() + 1e-6), -3.0, 3.0)
+            scores["profit_potential"] = np.clip(profit_factor * 0.3 + sharpe * 0.7, 0.0, 1.0)
         else:
             scores["profit_potential"] = 0
 
         # 4. Noise Tolerance
         if noise_scores is not None and len(noise_scores) > 0:
             # How well does the model perform on noisy data?
-            noise_degradation = (cv_mean - np.mean(noise_scores)) / cv_mean
+            noise_degradation = (cv_mean - np.mean(noise_scores)) / (cv_mean + 1e-6)
             scores["noise_tolerance"] = max(1 - noise_degradation, 0)
         else:
             scores["noise_tolerance"] = 0.5  # Neutral if not tested
@@ -128,6 +128,8 @@ class WeightedModelEvaluator:
 
         # Compute weighted final score
         wmes = sum(scores[k] * self.weights[k] for k in self.weights)
+        # Wave 31: Guard against unbounded negative WMES (was -1399 for zero-trade models)
+        wmes = float(max(0.0, min(1.0, wmes)))
         scores["wmes"] = wmes
 
         return scores

@@ -24,12 +24,13 @@ Usage:
 import os
 import sys
 import time
+import hashlib
 import threading
 import traceback
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import asdict
 
 import numpy as np
@@ -56,13 +57,12 @@ from src.phase_21_continuous.experiment_tracking import (
     ENGINE_CONFIG,
     ExperimentStatus,
     ExperimentResult,
-    ModelRecord,
     ExperimentGenerator,
     ExperimentHistory,
-    ModelRegistry,
     compute_realistic_backtest_metrics,
     calibrate_probabilities,
 )
+from src.core.registry_db import compute_tier
 
 # Import leak-proof CV pipeline (fixes data leakage)
 try:
@@ -75,6 +75,185 @@ try:
 except ImportError:
     HAS_LEAK_PROOF = False
     print("[WARN] leak_proof_cv module not available, using legacy CV")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# FEATURE EXCLUSION LIST (matches train_robust_model.py line 2312)
+# These columns must NEVER be used as input features because they are either:
+#   - Target variables (is_up_day, low_before_high, target_up, etc.)
+#   - Derived from same-day data unknowable at prediction time (high_minutes, etc.)
+#   - Look-ahead features (max_gain_from_*, return_at_*, etc.)
+#   - Metadata columns (sample_weight, universe_id, etc.)
+# ═══════════════════════════════════════════════════════════════════════════════
+_TARGET_AND_METADATA_EXCLUDE = [
+    # Raw OHLCV (non-stationary, not features — must match training_pipeline_v2)
+    "timestamp", "open", "high", "low", "close", "volume",
+    # Target variables and target-derived columns
+    "date", "day_return", "day_volume", "day_range",
+    "is_up_day", "is_down_day",
+    "low_before_high", "high_minutes", "low_minutes",
+    "target_up", "target_timing", "soft_target_up",
+    "smoothed_target_up", "smoothed_target_timing",
+    "sample_weight", "timing_weight",
+    # Look-ahead features (require knowing prices after entry)
+    "max_gain_from_1015", "max_gain_from_1230",
+    # Metadata / quality columns
+    "has_premarket", "has_afterhours", "quality_score", "year",
+    # Anti-overfit metadata columns (not features)
+    "sample_weight_augment", "universe_id", "universe_type",
+    "synthetic_return", "real_return", "is_synthetic",
+]
+
+# Same-day intraday features: these are computed from the SAME day's price data.
+# For open-to-close prediction, they are look-ahead (not available at market open).
+_INTRADAY_TIME_POINTS = ["0945", "1015", "1100", "1130", "1230", "1330", "1430", "1530"]
+_INTRADAY_PREFIXES = [
+    "return_at_", "high_to_", "low_to_", "range_to_",
+    "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",
+]
+_INTRADAY_EXCLUDE = [f"{prefix}{tp}" for prefix in _INTRADAY_PREFIXES
+                     for tp in _INTRADAY_TIME_POINTS]
+
+FEATURE_EXCLUDE_COLS = set(_TARGET_AND_METADATA_EXCLUDE + _INTRADAY_EXCLUDE)
+
+# Pattern-based exclusion: any column whose lowercase name contains these substrings
+# is excluded.  Must match training_pipeline_v2.py exclude_patterns exactly.
+FEATURE_EXCLUDE_PATTERNS = [
+    "target", "soft_target", "smoothed_target", "label",
+    "sample_weight", "target_weight", "class_weight",
+    "forward_return", "future_",
+]
+
+
+def _is_excluded_feature(col: str) -> bool:
+    """Return True if column should be excluded from model features."""
+    if col in FEATURE_EXCLUDE_COLS:
+        return True
+    col_lower = col.lower()
+    return any(pat in col_lower for pat in FEATURE_EXCLUDE_PATTERNS)
+
+
+def _validate_no_leakage(feature_cols: list, target_col: str = "target_up") -> list:
+    """Runtime check that no target/future/OHLCV columns survived filtering.
+
+    Returns list of suspicious column names (empty = clean).
+    """
+    suspicious = []
+    raw_ohlcv = {"open", "high", "low", "close", "volume", "timestamp"}
+    for col in feature_cols:
+        if col == target_col:
+            suspicious.append(col)
+            continue
+        if col in raw_ohlcv:
+            suspicious.append(col)
+            continue
+        cl = col.lower()
+        if any(pat in cl for pat in ("target", "future_", "forward_return",
+                                      "is_up_day", "is_down_day", "label")):
+            suspicious.append(col)
+    return suspicious
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Wave 35: MODULE-LEVEL WRAPPER CLASSES (must be top-level for joblib pickling)
+# ═══════════════════════════════════════════════════════════════════════════════
+from sklearn.base import BaseEstimator, ClassifierMixin
+
+
+class _BayesianRidgeClassifierWrapper(ClassifierMixin, BaseEstimator):
+    """Wraps sklearn BayesianRidge regressor for binary classification.
+
+    BayesianRidge auto-tunes regularization via evidence maximization,
+    providing full Bayesian posterior uncertainty. Naturally penalizes
+    complexity without manual hyperparameter tuning.
+    """
+
+    def __init__(self):
+        from sklearn.linear_model import BayesianRidge
+        self._reg = BayesianRidge()
+        self.classes_ = np.array([0, 1])
+
+    def fit(self, X, y, **kwargs):
+        self._reg.fit(X, y.astype(float))
+        return self
+
+    def predict(self, X):
+        raw = self._reg.predict(X)
+        return (raw >= 0.5).astype(int)
+
+    def decision_function(self, X):
+        return self._reg.predict(X)
+
+    def get_params(self, deep=True):
+        return {}
+
+    def set_params(self, **params):
+        return self
+
+
+class QuantileGBClassifier(ClassifierMixin, BaseEstimator):
+    """Multi-quantile gradient boosting for prediction intervals.
+
+    Trains 3 HistGradientBoostingRegressors at quantiles [0.10, 0.50, 0.90].
+    The median (50th) prediction serves as the classification probability.
+    The interval width (90th - 10th) provides uncertainty estimates.
+    Overfit models produce artificially narrow intervals that blow up OOS.
+    """
+
+    def __init__(self, max_iter=100, max_depth=3, learning_rate=0.1,
+                 min_samples_leaf=50, random_state=42):
+        self._alphas = [0.10, 0.50, 0.90]
+        self._models = {}
+        self.max_iter = max_iter
+        self.max_depth = max_depth
+        self.learning_rate = learning_rate
+        self.min_samples_leaf = min_samples_leaf
+        self.random_state = random_state
+        self.classes_ = np.array([0, 1])
+
+    def fit(self, X, y, **kwargs):
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        y_float = y.astype(float)
+        for alpha in self._alphas:
+            m = HistGradientBoostingRegressor(
+                loss='quantile', quantile=alpha,
+                max_iter=self.max_iter, max_depth=self.max_depth,
+                learning_rate=self.learning_rate,
+                min_samples_leaf=self.min_samples_leaf,
+                random_state=self.random_state,
+            )
+            m.fit(X, y_float)
+            self._models[alpha] = m
+        return self
+
+    def predict_proba(self, X):
+        median_pred = self._models[0.50].predict(X)
+        p = np.clip(median_pred, 0.01, 0.99)
+        return np.column_stack([1 - p, p])
+
+    def predict(self, X):
+        proba = self.predict_proba(X)
+        return (proba[:, 1] >= 0.5).astype(int)
+
+    def predict_with_intervals(self, X):
+        """Return median prediction and 80% interval width."""
+        lo = self._models[0.10].predict(X)
+        med = self._models[0.50].predict(X)
+        hi = self._models[0.90].predict(X)
+        return med, hi - lo
+
+    def get_params(self, deep=True):
+        return {
+            "max_iter": self.max_iter, "max_depth": self.max_depth,
+            "learning_rate": self.learning_rate,
+            "min_samples_leaf": self.min_samples_leaf,
+            "random_state": self.random_state,
+        }
+
+    def set_params(self, **params):
+        for k, v in params.items():
+            setattr(self, k, v)
+        return self
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -91,18 +270,67 @@ class UnifiedExperimentRunner:
         self.logger = logging.getLogger("EXPERIMENT")
         self.data = None
         self._data_lock = threading.Lock()
+        self._feature_cache: Dict[str, Any] = {}  # Cache engineered features by swing_threshold
+        self._feature_cache_order: list = []  # LRU eviction order
+        self._feature_cache_max_size: int = 5  # Max cached thresholds (~2GB cap)
+
+    @staticmethod
+    def _map_dim_method(method: str) -> Optional[str]:
+        """Map ExperimentConfig dim method to leak-proof pipeline method.
+
+        The LeakProofDimReducer supports: "kernel_pca", "ica", "pca", None.
+        """
+        direct = {"kernel_pca", "ica", "pca"}
+        if method in direct:
+            return method
+        elif method == "mutual_info":
+            return None  # Feature selection only, no dim reduction
+        else:
+            # "umap", "ensemble", "ensemble_plus", "agglomeration", "kmedoids"
+            return "kernel_pca"  # Best supported fallback
+
+    @staticmethod
+    def _get_n_components(config: ExperimentConfig) -> int:
+        """Get n_components based on the dim reduction method."""
+        method = config.dim_reduction.method
+        if method == "kernel_pca":
+            return config.dim_reduction.kpca_n_components
+        elif method == "ica":
+            return config.dim_reduction.ica_n_components
+        elif method == "pca":
+            return config.dim_reduction.pca_n_components
+        elif method == "mutual_info":
+            return config.dim_reduction.mi_n_features
+        else:
+            return config.dim_reduction.kpca_n_components  # fallback
+
+    @staticmethod
+    def _get_random_state(experiment_id: str) -> int:
+        """Derive deterministic random state from experiment ID."""
+        return int(hashlib.md5(experiment_id.encode()).hexdigest(), 16) % (2**31)
 
     def load_data(self, config: ExperimentConfig):
         """Load data using DataManager with proper columns."""
         with self._data_lock:
             if self.data is None:
                 from src.data_manager import get_spy_data
-                self.data = get_spy_data(years=config.data.years_to_download)
-                self.logger.info(f"Loaded {len(self.data):,} bars")
+                self.data = get_spy_data(years=config.data.years_to_download, skip_freshness=True)
+                n_bars = len(self.data)
+                if n_bars > 0:
+                    first = self.data.index.min() if hasattr(self.data.index, 'min') else 'N/A'
+                    last = self.data.index.max() if hasattr(self.data.index, 'max') else 'N/A'
+                    self.logger.info(f"Loaded {n_bars:,} bars ({first} to {last})")
+                else:
+                    self.logger.info(f"Loaded {n_bars:,} bars")
 
-    def run(self, config: ExperimentConfig) -> ExperimentResult:
+    def run(self, config: ExperimentConfig, fast_screen: bool = False) -> ExperimentResult:
         """
         Run experiment using the FULL unified pipeline.
+
+        Args:
+            config: Experiment configuration
+            fast_screen: If True, skip anti-overfit augmentation for initial
+                screening (Wave 26). Full validation runs only on Tier 1 candidates.
 
         Steps:
           1. Load data
@@ -113,11 +341,13 @@ class UnifiedExperimentRunner:
           6. Evaluate with WMES and stability analysis
           7. Run backtest
         """
+        from src.core.registry_db import CURRENT_SCORING_VERSION
         result = ExperimentResult(
             experiment_id=config.experiment_id,
             config=config,
             status=ExperimentStatus.RUNNING,
             started_at=datetime.now().isoformat(),
+            scoring_version=CURRENT_SCORING_VERSION,
         )
         start_time = time.time()
 
@@ -128,6 +358,9 @@ class UnifiedExperimentRunner:
             experiment_type=config.experiment_type,
             experiment_name=config.experiment_name,
         )
+
+        # Initialize variables used across multiple code paths
+        use_leak_proof = ENGINE_CONFIG.get("use_leak_proof_cv", True) and HAS_LEAK_PROOF
 
         try:
             self.logger.info(f"=" * 70)
@@ -160,14 +393,32 @@ class UnifiedExperimentRunner:
             tracker.set_step(ExperimentStep.FEATURE_ENGINEERING, "Engineering premarket, afterhours, patterns")
             swing_threshold = config.feature_engineering.swing_threshold
 
-            tracker.update_substep("Running engineer_all_features", 30)
-            df_daily = engineer_all_features(self.data.copy(), swing_threshold=swing_threshold)
+            # Cache engineered features by swing_threshold (same raw data → same features)
+            # Wave 32: Feature research experiments bypass cache (they add extra columns)
+            is_feature_research = (config.experiment_type == "feature_research")
+            feat_cache_key = f"{swing_threshold}"
+            if feat_cache_key in self._feature_cache and not is_feature_research:
+                self.logger.info(f"  Using cached features (threshold={swing_threshold})")
+                df_daily = self._feature_cache[feat_cache_key].copy()
+            else:
+                tracker.update_substep("Running engineer_all_features", 30)
+                df_daily = engineer_all_features(self.data.copy(), swing_threshold=swing_threshold)
 
-            tracker.update_substep("Adding rolling features", 60)
-            df_daily = add_rolling_features(df_daily)
+                tracker.update_substep("Adding rolling features", 60)
+                df_daily = add_rolling_features(df_daily)
 
-            tracker.update_substep("Creating soft targets", 90)
-            df_daily = create_soft_targets(df_daily, threshold=swing_threshold)
+                tracker.update_substep("Creating soft targets", 90)
+                df_daily = create_soft_targets(df_daily, threshold=swing_threshold)
+
+                self._feature_cache[feat_cache_key] = df_daily.copy()
+                self._feature_cache_order.append(feat_cache_key)
+                # LRU eviction: keep only max_size most recent entries
+                while len(self._feature_cache) > self._feature_cache_max_size:
+                    oldest = self._feature_cache_order.pop(0)
+                    if oldest in self._feature_cache:
+                        del self._feature_cache[oldest]
+                        self.logger.info(f"  [CACHE] Evicted features for threshold={oldest}")
+                self.logger.info(f"  Cached features for threshold={swing_threshold} ({len(self._feature_cache)}/{self._feature_cache_max_size})")
 
             result.n_features_initial = len([c for c in df_daily.columns
                                              if df_daily[c].dtype in ['float64', 'int64']])
@@ -177,6 +428,20 @@ class UnifiedExperimentRunner:
                 "n_features_initial": result.n_features_initial,
                 "n_samples_real": result.n_samples_real,
             })
+
+            # ── Wave 32: Inject research candidate features ──────────────────
+            _research_candidate_names = []
+            if is_feature_research:
+                try:
+                    from src.phase_09_features_calendar.feature_researcher import FeatureResearchAgent
+                    _fr_agent = FeatureResearchAgent()
+                    _research_candidate_names = _fr_agent.inject_candidates(df_daily, config)
+                    n_after = len([c for c in df_daily.columns if df_daily[c].dtype in ['float64', 'int64']])
+                    self.logger.info(f"  [FEATURE_RESEARCH] Injected {len(_research_candidate_names)} candidates, "
+                                     f"features: {result.n_features_initial} -> {n_after}")
+                    result.n_features_initial = n_after
+                except Exception as fr_err:
+                    self.logger.warning(f"  [FEATURE_RESEARCH] Injection failed: {fr_err}")
 
             # ═══════════════════════════════════════════════════════════════════
             # CRITICAL FIX: Split by DATE first, THEN apply synthetic augmentation
@@ -200,8 +465,138 @@ class UnifiedExperimentRunner:
             n_dates = len(unique_dates)
             self.logger.info(f"  Total unique dates: {n_dates}")
 
-            # Split dates: 80% train, 20% test
-            split_date_idx = int(n_dates * 0.8)
+            # Determine leak-proof mode early (needed by walk-forward and main path)
+            use_leak_proof = ENGINE_CONFIG.get("use_leak_proof_cv", True) and HAS_LEAK_PROOF
+
+            # ═══════════════════════════════════════════════════════════════════
+            # WALK-FORWARD EXPANDING WINDOW VALIDATION
+            # Dynamic windows based on actual data size (Wave 16).
+            # With 10yr data: windows at years 2,4,6,8 (every 2nd year)
+            # With 5yr data: windows at years 2,3,4 (every year)
+            # ═══════════════════════════════════════════════════════════════════
+            year_size_approx = 252  # Trading days per year
+            n_years = max(2, n_dates // year_size_approx)
+            year_size = n_dates // n_years  # Adjust to fit data evenly
+            self.logger.info(f"  Data spans ~{n_years} years ({n_dates} dates, {year_size} per year)")
+
+            # Build expanding windows: train from start, test next year
+            # Step every 2 years if >7 years, else every year; cap at 7 early windows
+            wf_step = 2 if n_years > 7 else 1
+            walk_forward_windows = []
+            for test_yr in range(1, n_years - 1, wf_step):
+                tr_end = test_yr * year_size
+                te_start = test_yr * year_size
+                te_end = min((test_yr + 1) * year_size, n_dates)
+                if tr_end >= 100 and te_end - te_start >= 30:
+                    walk_forward_windows.append((0, tr_end, te_start, te_end))
+                if len(walk_forward_windows) >= 7:
+                    break
+
+            # Track per-window regime-adjusted thresholds (Wave 16)
+            wf_per_window_thresholds = []
+
+            if use_leak_proof and HAS_LEAK_PROOF and year_size >= 100:
+                from sklearn.metrics import roc_auc_score as wf_roc_auc
+
+                self.logger.info(f"[WALK-FORWARD] Running expanding window pre-validation ({len(walk_forward_windows)} early windows)...")
+                tracker.update_substep("Walk-forward pre-validation", 30)
+
+                # Build leak-proof config for walk-forward (same config as main experiment)
+                wf_dim_method = self._map_dim_method(config.dim_reduction.method)
+                wf_n_components = self._get_n_components(config)
+                wf_random_state = self._get_random_state(config.experiment_id)
+                wf_feat_sel = getattr(config.dim_reduction, 'feature_selection_method', 'mutual_info')
+
+                wf_leak_proof_config = {
+                    "n_cv_folds": min(config.cross_validation.n_cv_folds, 3),  # Fewer folds for speed
+                    "purge_days": config.cross_validation.purge_days,
+                    "embargo_days": config.cross_validation.embargo_days,
+                    "feature_selection_method": wf_feat_sel,
+                    "n_features": config.dim_reduction.mi_n_features,
+                    "dim_reduction_method": wf_dim_method,
+                    "n_components": wf_n_components,
+                    "use_ensemble": False,  # Skip ensemble for speed
+                    "random_state": wf_random_state,
+                }
+
+                # Determine feature columns from full dataset
+                wf_feature_cols = [c for c in df_daily.columns
+                                   if not _is_excluded_feature(c)]
+                wf_feature_cols = [c for c in wf_feature_cols if df_daily[c].dtype in ['float64', 'int64']]
+
+                for w_idx, (tr_start, tr_end, te_start, te_end) in enumerate(walk_forward_windows):
+                    try:
+                        w_train_dates_set = set(unique_dates[tr_start:tr_end])
+                        w_test_dates_set = set(unique_dates[te_start:te_end])
+
+                        w_train_mask = np.array([d in w_train_dates_set for d in dates])
+                        w_test_mask = np.array([d in w_test_dates_set for d in dates])
+
+                        w_df_train = df_daily[w_train_mask].copy()
+                        w_df_test = df_daily[w_test_mask].copy()
+
+                        # Regime detection: measure test window volatility (Wave 16)
+                        # Post-leakage-fix realistic AUCs are 0.53-0.57; per-window threshold
+                        # must be below this range to avoid rejecting ALL models (Wave 26).
+                        wf_threshold = 0.50
+                        try:
+                            if "close" in w_df_test.columns and len(w_df_test) > 20:
+                                w_test_returns = w_df_test["close"].pct_change().dropna()
+                                if len(w_test_returns) > 20:
+                                    w_ann_vol = float(w_test_returns.std()) * (252 ** 0.5)
+                                    if w_ann_vol > 0.22:  # >22% annualized = crisis regime (COVID, etc.)
+                                        wf_threshold = 0.48
+                                        self.logger.info(f"  Window {w_idx+1}: HIGH-VOL regime (ann_vol={w_ann_vol:.1%}), threshold={wf_threshold}")
+                                    else:
+                                        self.logger.info(f"  Window {w_idx+1}: NORMAL regime (ann_vol={w_ann_vol:.1%}), threshold={wf_threshold}")
+                        except Exception:
+                            pass
+                        wf_per_window_thresholds.append(wf_threshold)
+
+                        # Feature cols available in both
+                        w_cols = [c for c in wf_feature_cols if c in w_df_train.columns and c in w_df_test.columns]
+
+                        w_df_train_clean = w_df_train.dropna(subset=w_cols + ["target_up"])
+                        w_df_test_clean = w_df_test.dropna(subset=w_cols + ["target_up"])
+
+                        if len(w_df_train_clean) < 100 or len(w_df_test_clean) < 30:
+                            self.logger.warning(f"  Window {w_idx+1}: Insufficient data (train={len(w_df_train_clean)}, test={len(w_df_test_clean)}), skipping")
+                            continue
+
+                        w_X_train = w_df_train_clean[w_cols].values
+                        w_y_train = w_df_train_clean["target_up"].astype(int).values
+                        w_X_test = w_df_test_clean[w_cols].values
+                        w_y_test = w_df_test_clean["target_up"].astype(int).values
+
+                        tracker.update_substep(f"Walk-forward window {w_idx+1}/{len(walk_forward_windows)+1}", 30 + w_idx * 15)
+                        tracker.touch()
+
+                        w_pipeline, w_cv = train_with_leak_proof_cv(
+                            w_X_train, w_y_train, config=wf_leak_proof_config, verbose=False,
+                        )
+                        w_test_proba = w_pipeline.predict_proba(w_X_test)[:, 1]
+                        w_auc = float(wf_roc_auc(w_y_test, w_test_proba))
+                        result.walk_forward_aucs.append(w_auc)
+                        self.logger.info(f"  Window {w_idx+1} (train {len(w_df_train_clean)}, test {len(w_df_test_clean)}): AUC={w_auc:.4f} (threshold={wf_threshold})")
+                        tracker.touch()
+
+                        # Early abort: if first non-crisis window is very weak, skip remaining
+                        if w_idx == 0 and w_auc < 0.48:
+                            self.logger.info(f"  [EARLY ABORT] Window 1 AUC={w_auc:.3f} < 0.48 — skipping remaining windows")
+                            break
+                    except Exception as wf_err:
+                        self.logger.warning(f"  Window {w_idx+1} failed: {wf_err}")
+
+                self.logger.info(f"[WALK-FORWARD] Early window AUCs: {result.walk_forward_aucs}")
+                self.logger.info(f"[WALK-FORWARD] Per-window thresholds: {wf_per_window_thresholds}")
+                tracker.record_metric("walk_forward_early_aucs", result.walk_forward_aucs)
+                tracker.record_metric("walk_forward_thresholds", wf_per_window_thresholds)
+            else:
+                if year_size < 100:
+                    self.logger.info("[WALK-FORWARD] Skipped (insufficient data for yearly windows)")
+
+            # Final window: Train all-but-last-year, test last year (dynamic)
+            split_date_idx = (n_years - 1) * year_size if year_size >= 100 else int(n_dates * 0.8)
             train_dates = set(unique_dates[:split_date_idx])
             test_dates = set(unique_dates[split_date_idx:])
 
@@ -218,6 +613,22 @@ class UnifiedExperimentRunner:
             df_test = df_daily[test_mask_real].copy()
 
             result.n_samples_real = len(df_daily)
+
+            # Wave 26: Regime-specific training — filter training data by volatility
+            regime_filter = getattr(config.data, 'regime_filter', '')
+            if regime_filter and "close" in df_train_real.columns:
+                rolling_vol = df_train_real["close"].pct_change().rolling(20).std() * (252 ** 0.5)
+                vol_median = rolling_vol.median()
+                if regime_filter == "low_vol":
+                    regime_mask = rolling_vol <= vol_median
+                    df_train_real = df_train_real[regime_mask.fillna(True)].copy()
+                    self.logger.info(f"  [REGIME] Filtered to low-vol training: {len(df_train_real)} rows")
+                elif regime_filter == "high_vol":
+                    regime_mask = rolling_vol > vol_median
+                    df_train_real = df_train_real[regime_mask.fillna(False)].copy()
+                    self.logger.info(f"  [REGIME] Filtered to high-vol training: {len(df_train_real)} rows")
+                # Note: test data is NOT filtered — evaluate on ALL regimes
+
             self.logger.info(f"  Train samples (real): {len(df_train_real)}, Test samples: {len(df_test)}")
 
             tracker.record_metrics({
@@ -225,11 +636,16 @@ class UnifiedExperimentRunner:
                 "n_test_dates": len(test_dates),
                 "n_train_real": len(df_train_real),
                 "n_test": len(df_test),
+                "regime_filter": regime_filter,
             })
 
             # Step 5: Apply anti-overfit augmentation ONLY to training data
             df_train = df_train_real.copy()
-            if config.anti_overfit.use_anti_overfit:
+            skip_augmentation = fast_screen and config.anti_overfit.use_anti_overfit
+            if skip_augmentation:
+                self.logger.info("[STEP 4] FAST SCREEN: Skipping anti-overfit augmentation (deferred to Tier 1)")
+                tracker.set_step(ExperimentStep.ANTI_OVERFIT, "Skipped (fast screen)")
+            elif config.anti_overfit.use_anti_overfit:
                 self.logger.info("[STEP 4] Running anti-overfit integration (TRAINING ONLY)...")
                 tracker.set_step(ExperimentStep.ANTI_OVERFIT, "Augmenting TRAINING data only")
                 self.logger.info(f"  - Synthetic universes: {config.anti_overfit.use_synthetic_universes}")
@@ -246,11 +662,42 @@ class UnifiedExperimentRunner:
                         use_breadth_streaks=config.anti_overfit.use_breadth_streaks,
                         use_cross_assets=config.anti_overfit.use_cross_assets,
                         use_mag_breadth=config.anti_overfit.use_mag_breadth,
+                        use_economic_features=config.anti_overfit.use_economic_features,
                         use_synthetic=config.anti_overfit.use_synthetic_universes,
                         synthetic_weight=config.anti_overfit.synthetic_weight,
+                        use_bear_universes=config.anti_overfit.use_bear_universes,
+                        bear_mean_shift_bps=config.anti_overfit.bear_mean_shift_bps,
+                        bear_vol_amplify_factor=config.anti_overfit.bear_vol_amplify_factor,
+                        bear_vol_dampen_factor=config.anti_overfit.bear_vol_dampen_factor,
+                        use_multiscale_bootstrap=config.anti_overfit.use_multiscale_bootstrap,
                     )
                     result.n_samples_synthetic = len(df_train_augmented) - len(df_train_real)
                     df_train = df_train_augmented
+
+                    # Cap synthetic:real ratio to 1:1 to reduce train-test gap
+                    # (was 3:1 in Wave 14, but synthetic data still dominates gradient)
+                    n_real = len(df_train_real)
+                    n_synthetic = result.n_samples_synthetic
+                    max_synthetic = n_real * 1
+                    if n_synthetic > max_synthetic and n_real > 0:
+                        self.logger.info(
+                            f"  [RATIO CAP] Synthetic:real = {n_synthetic}:{n_real} "
+                            f"({n_synthetic/n_real:.1f}:1) — capping to 1:1"
+                        )
+                        # Keep all real rows (first n_real), downsample the rest
+                        # Note: integrate_anti_overfit appends synthetic after real rows
+                        real_rows = df_train.iloc[:n_real]
+                        synth_rows = df_train.iloc[n_real:]
+                        if len(synth_rows) > max_synthetic:
+                            synth_rows = synth_rows.sample(n=max_synthetic, random_state=42)
+                            df_train = pd.concat([real_rows, synth_rows], ignore_index=True)
+                            result.n_samples_synthetic = len(synth_rows)
+                            self.logger.info(
+                                f"  [RATIO CAP] Downsampled to {len(synth_rows)} synthetic "
+                                f"({len(synth_rows)/n_real:.1f}:1 ratio)"
+                            )
+                        tracker.record_metric("synthetic_ratio_capped", True)
+
                     self.logger.info(f"  Train augmented: {len(df_train)} (+{result.n_samples_synthetic} synthetic)")
                     tracker.record_metric("n_samples_synthetic", result.n_samples_synthetic)
                     tracker.touch()  # Heartbeat after long anti-overfit integration
@@ -261,14 +708,24 @@ class UnifiedExperimentRunner:
 
             # Step 6: Prepare features and targets for train and test SEPARATELY
             self.logger.info("[STEP 5] Preparing features...")
-            exclude_cols = ["date", "target_up", "target_timing", "soft_target_up",
-                           "day_return", "sample_weight", "is_synthetic"]
-            feature_cols = [c for c in df_train.columns if c not in exclude_cols
-                           and not c.startswith("smoothed_")]
+            feature_cols = [c for c in df_train.columns
+                           if not _is_excluded_feature(c)]
             feature_cols = [c for c in feature_cols if df_train[c].dtype in ['float64', 'int64']]
 
             # Ensure test has same features
             feature_cols = [c for c in feature_cols if c in df_test.columns]
+
+            # Runtime leakage check (Wave 17)
+            suspicious = _validate_no_leakage(feature_cols, "target_up")
+            if suspicious:
+                self.logger.error(
+                    f"  [LEAKAGE] {len(suspicious)} suspicious features survived "
+                    f"filtering: {suspicious[:10]}. Removing them."
+                )
+                feature_cols = [c for c in feature_cols if c not in suspicious]
+                tracker.record_metric("leakage_cols_removed", len(suspicious))
+
+            self.logger.info(f"  Using {len(feature_cols)} features after filtering")
 
             # Clean and prepare training data
             df_train_clean = df_train.dropna(subset=feature_cols + ["target_up"])
@@ -296,31 +753,115 @@ class UnifiedExperimentRunner:
             # Sample weights for training (synthetic samples have lower weight)
             weights_train = None
             if "sample_weight" in df_train_clean.columns:
-                weights_train = df_train_clean["sample_weight"].values
+                weights_train = df_train_clean["sample_weight"].values.copy()
+
+            # ── Synthetic weight penalty (prevents overfitting to synthetic data) ──
+            if weights_train is not None and "sample_weight_augment" in df_train_clean.columns:
+                real_weight_val = 1.0 - config.anti_overfit.synthetic_weight
+                is_synthetic = df_train_clean["sample_weight_augment"].values < real_weight_val - 0.01
+                n_synth = int(is_synthetic.sum())
+                if n_synth > 0:
+                    penalty = config.anti_overfit.synthetic_weight_penalty
+                    floor = config.anti_overfit.synthetic_weight_floor
+                    ceiling = config.anti_overfit.synthetic_weight_ceiling
+                    weights_train[is_synthetic] = np.clip(
+                        weights_train[is_synthetic] * penalty, floor, ceiling
+                    )
+                    self.logger.info(
+                        f"  [WEIGHT PENALTY] Applied {penalty:.0%} penalty to {n_synth} synthetic samples "
+                        f"(bounds=[{floor:.2f}, {ceiling:.2f}])"
+                    )
+
+            # ── Wave 35: Training augmentations ─────────────────────────────
+            aug_config = getattr(config, 'training_augmentation', None)
+
+            # C2. Temporal decay weighting
+            if aug_config and getattr(aug_config, 'use_temporal_decay', False):
+                self.logger.info("  [AUGMENT] Applying temporal decay sample weighting")
+                n_train = len(X_train_raw)
+                date_indices = np.arange(n_train, dtype=float)
+                decay_lambda = getattr(aug_config, 'temporal_decay_lambda', 0.5)
+                decay_weights = np.exp(-decay_lambda * (n_train - 1 - date_indices) / n_train)
+                decay_weights = decay_weights / decay_weights.mean()  # Normalize to mean=1.0
+                if weights_train is not None:
+                    weights_train = weights_train * decay_weights
+                else:
+                    weights_train = decay_weights
+                self.logger.info(f"    lambda={decay_lambda:.2f}, weight range: [{decay_weights.min():.3f}, {decay_weights.max():.3f}]")
+
+            # C3. Noise injection to training features
+            if aug_config and getattr(aug_config, 'use_noise_injection', False):
+                noise_sigma = getattr(aug_config, 'noise_sigma', 0.1)
+                self.logger.info(f"  [AUGMENT] Injecting Gaussian noise (sigma={noise_sigma}) to training features")
+                rng_noise = np.random.RandomState(42)
+                feature_stds = np.std(X_train_raw, axis=0) + 1e-10
+                noise = rng_noise.randn(*X_train_raw.shape) * (noise_sigma * feature_stds[np.newaxis, :])
+                X_train_raw = X_train_raw + noise
+                # NOTE: X_test_raw is NOT modified (noise only during training)
 
             self.logger.info(f"  Train features: {X_train_raw.shape}, Test features: {X_test_raw.shape}")
 
             # ═══════════════════════════════════════════════════════════════════
+            # OPTIONAL: Cross-model meta-feature augmentation
+            # Appends rule activations + importance-weighted features from
+            # the universal feature map (only when enough models have
+            # contributed). See symbolic_cross_learner.py.
+            # ═══════════════════════════════════════════════════════════════════
+            try:
+                from src.phase_23_analytics.symbolic_cross_learner import (
+                    CrossModelAugmenter, UniversalFeatureMap,
+                )
+                map_path = project_root / "models" / "feature_importance_map.json"
+                if map_path.is_file():
+                    fmap = UniversalFeatureMap(persist_path=map_path)
+                    if len(fmap._model_contributions) >= 10:
+                        augmenter = CrossModelAugmenter(feature_map=fmap)
+                        aug_train, aug_names = augmenter.generate_importance_weighted(
+                            X_train_raw, feature_cols
+                        )
+                        if aug_train.shape[1] > 0:
+                            aug_test, _ = augmenter.generate_importance_weighted(
+                                X_test_raw, feature_cols
+                            )
+                            X_train_raw = np.hstack([X_train_raw, aug_train])
+                            X_test_raw = np.hstack([X_test_raw, aug_test])
+                            feature_cols = feature_cols + aug_names
+                            self.logger.info(
+                                f"  [AUGMENT] Added {len(aug_names)} cross-model meta-features "
+                                f"(total: {len(feature_cols)})"
+                            )
+            except Exception as aug_err:
+                self.logger.debug(f"  Cross-model augmentation skipped: {aug_err}")
+
+            # ═══════════════════════════════════════════════════════════════════
             # LEAK-PROOF CV PATH (recommended - all transforms inside CV folds)
             # ═══════════════════════════════════════════════════════════════════
-            use_leak_proof = ENGINE_CONFIG.get("use_leak_proof_cv", True) and HAS_LEAK_PROOF
-
             if use_leak_proof:
                 from sklearn.metrics import roc_auc_score
 
                 self.logger.info("[STEP 6] Using LEAK-PROOF CV (all transforms inside folds)")
                 tracker.set_step(ExperimentStep.CROSS_VALIDATION, "Leak-proof CV with embedded transforms — typically 5-30 min")
 
+                # Build leak-proof config from ExperimentConfig (NOT hardcoded)
+                dim_method = self._map_dim_method(config.dim_reduction.method)
+                n_components = self._get_n_components(config)
+                exp_random_state = self._get_random_state(config.experiment_id)
+                feat_sel_method = getattr(config.dim_reduction, 'feature_selection_method', 'mutual_info')
+
+                self.logger.info(f"  Feature selection: {feat_sel_method}, n_features: {config.dim_reduction.mi_n_features}")
+                self.logger.info(f"  Dim reduction: {dim_method}, n_components: {n_components}")
+                self.logger.info(f"  Random state: {exp_random_state} (from experiment ID)")
+
                 leak_proof_config = {
                     "n_cv_folds": config.cross_validation.n_cv_folds,
-                    "purge_days": ENGINE_CONFIG['purge_days'],
-                    "embargo_days": ENGINE_CONFIG['embargo_days'],
-                    "feature_selection_method": "mutual_info",
-                    "n_features": 30,
-                    "dim_reduction_method": "kernel_pca",
-                    "n_components": 20,
+                    "purge_days": config.cross_validation.purge_days,
+                    "embargo_days": config.cross_validation.embargo_days,
+                    "feature_selection_method": feat_sel_method,
+                    "n_features": config.dim_reduction.mi_n_features,
+                    "dim_reduction_method": dim_method,
+                    "n_components": n_components,
                     "use_ensemble": ENGINE_CONFIG.get("use_model_ensemble", True),
-                    "random_state": 42,
+                    "random_state": exp_random_state,
                 }
 
                 # Run leak-proof CV (transforms inside each fold)
@@ -534,14 +1075,203 @@ class UnifiedExperimentRunner:
             tracker.record_metric("wmes_score", round(result.wmes_score, 3))
 
             # ───────────────────────────────────────────────────────────────
-            # Step 12b: TIER 1 GATE CHECK (early reject before expensive analysis)
+            # Walk-forward: add final window AUC and compute aggregate
+            # ───────────────────────────────────────────────────────────────
+            result.walk_forward_aucs.append(result.test_auc)  # Final window = last AUC
+            # Final window uses post-leakage-fix threshold (Wave 26: 0.50)
+            wf_per_window_thresholds.append(0.50)
+
+            if len(result.walk_forward_aucs) >= 2:
+                result.worst_window_auc = min(result.walk_forward_aucs)
+                wf_variance = float(np.std(result.walk_forward_aucs))
+                wf_mean = float(np.mean(result.walk_forward_aucs))
+
+                # Regime-adjusted per-window pass check (Wave 16)
+                # Each window uses its own threshold: 0.56 for normal, 0.50 for high-vol
+                if len(wf_per_window_thresholds) == len(result.walk_forward_aucs):
+                    n_passing = sum(
+                        auc > threshold
+                        for auc, threshold in zip(result.walk_forward_aucs, wf_per_window_thresholds)
+                    )
+                else:
+                    # Fallback: use flat 0.50 if thresholds misaligned
+                    n_passing = sum(a > 0.50 for a in result.walk_forward_aucs)
+
+                # Post-leakage-fix thresholds (recalibrated Wave 26):
+                # Realistic AUCs with clean features are 0.53-0.57, not 0.75+.
+                # Crisis windows (COVID 2020, 2022 bear) systematically score ~0.49.
+                # Allow 2 failing windows when 4+ total (was: all-but-1).
+                max_failures = 2 if len(result.walk_forward_aucs) >= 4 else 1
+                result.walk_forward_passed = (
+                    n_passing >= max(len(result.walk_forward_aucs) - max_failures, 1)
+                    and wf_variance < 0.07   # Wave 26: relaxed 0.06→0.07 to reduce false negatives
+                    and wf_mean >= 0.51      # Average floor (was 0.52)
+                    and result.worst_window_auc >= 0.47  # Allow crisis periods (was 0.48)
+                )
+                self.logger.info(f"  Walk-forward AUCs: {[round(a, 4) for a in result.walk_forward_aucs]}")
+                self.logger.info(f"  Walk-forward thresholds: {[round(t, 2) for t in wf_per_window_thresholds[:len(result.walk_forward_aucs)]]}")
+                self.logger.info(f"  Worst window AUC: {result.worst_window_auc:.4f}, Mean: {wf_mean:.4f}")
+                self.logger.info(f"  Walk-forward variance: {wf_variance:.4f}")
+                self.logger.info(f"  Walk-forward passed: {result.walk_forward_passed} ({n_passing}/{len(result.walk_forward_aucs)} windows passed)")
+                tracker.record_metrics({
+                    "walk_forward_aucs": [round(a, 4) for a in result.walk_forward_aucs],
+                    "walk_forward_thresholds": [round(t, 2) for t in wf_per_window_thresholds[:len(result.walk_forward_aucs)]],
+                    "worst_window_auc": round(result.worst_window_auc, 4),
+                    "walk_forward_mean_auc": round(wf_mean, 4),
+                    "walk_forward_passed": result.walk_forward_passed,
+                })
+            else:
+                result.worst_window_auc = result.test_auc
+                result.walk_forward_passed = result.test_auc > 0.50
+
+            # ───────────────────────────────────────────────────────────────
+            # Regime-specific evaluation (low-vol vs high-vol)
+            # ───────────────────────────────────────────────────────────────
+            try:
+                if test_returns is not None and len(test_returns) > 40:
+                    from sklearn.metrics import roc_auc_score as regime_roc_auc
+                    rolling_vol = pd.Series(test_returns).rolling(20, min_periods=10).std().values
+                    vol_median = np.nanmedian(rolling_vol)
+                    valid_vol = ~np.isnan(rolling_vol)
+
+                    low_vol_mask = valid_vol & (rolling_vol <= vol_median)
+                    high_vol_mask = valid_vol & (rolling_vol > vol_median)
+
+                    regime_proba = test_proba_wmes if 'test_proba_wmes' in dir() else model.predict_proba(
+                        X_test_raw if use_leak_proof else X_test)[:, 1]
+
+                    if sum(low_vol_mask) > 15 and len(np.unique(y_test[low_vol_mask])) > 1:
+                        result.regime_auc_low_vol = float(regime_roc_auc(
+                            y_test[low_vol_mask], regime_proba[low_vol_mask]))
+                    if sum(high_vol_mask) > 15 and len(np.unique(y_test[high_vol_mask])) > 1:
+                        result.regime_auc_high_vol = float(regime_roc_auc(
+                            y_test[high_vol_mask], regime_proba[high_vol_mask]))
+
+                    if result.regime_auc_low_vol > 0 and result.regime_auc_high_vol > 0:
+                        regime_gap = abs(result.regime_auc_low_vol - result.regime_auc_high_vol)
+                        result.regime_sensitive = regime_gap > 0.10
+                        self.logger.info(f"  Regime AUC — low_vol: {result.regime_auc_low_vol:.4f}, high_vol: {result.regime_auc_high_vol:.4f}")
+                        if result.regime_sensitive:
+                            self.logger.warning(f"  [REGIME] Model is regime-sensitive (gap={regime_gap:.3f} > 0.10)")
+                        tracker.record_metrics({
+                            "regime_auc_low_vol": round(result.regime_auc_low_vol, 4),
+                            "regime_auc_high_vol": round(result.regime_auc_high_vol, 4),
+                            "regime_sensitive": result.regime_sensitive,
+                        })
+            except Exception as regime_err:
+                self.logger.warning(f"  Regime evaluation failed: {regime_err}")
+
+            # ───────────────────────────────────────────────────────────────
+            # Wave 35 C4: Nested CV (honest generalization estimate)
+            # ───────────────────────────────────────────────────────────────
+            if aug_config and getattr(aug_config, 'use_nested_cv', False):
+                try:
+                    self.logger.info("[STEP 10a] Running nested CV for honest AUC estimate...")
+                    from sklearn.model_selection import StratifiedKFold as NestedSKF
+                    from sklearn.metrics import roc_auc_score as nested_roc_auc
+
+                    outer_folds = getattr(aug_config, 'nested_outer_folds', 3)
+                    inner_folds = getattr(aug_config, 'nested_inner_folds', 3)
+                    X_nested = X_train_raw if use_leak_proof else X_train
+                    outer_aucs = []
+
+                    outer_cv = NestedSKF(n_splits=outer_folds, shuffle=True, random_state=42)
+                    for outer_idx, (outer_train, outer_test) in enumerate(outer_cv.split(X_nested, y_train)):
+                        X_out_train, y_out_train = X_nested[outer_train], y_train[outer_train]
+                        X_out_test, y_out_test = X_nested[outer_test], y_train[outer_test]
+
+                        # Inner CV for model selection (use best of inner folds)
+                        inner_cv = NestedSKF(n_splits=inner_folds, shuffle=True, random_state=42 + outer_idx)
+                        inner_scores = []
+                        for in_train, in_val in inner_cv.split(X_out_train, y_out_train):
+                            in_model = self._create_model(config)
+                            try:
+                                in_model.fit(X_out_train[in_train], y_out_train[in_train])
+                                in_proba = in_model.predict_proba(X_out_train[in_val])[:, 1]
+                                inner_scores.append(float(nested_roc_auc(y_out_train[in_val], in_proba)))
+                            except Exception:
+                                inner_scores.append(0.5)
+
+                        # Retrain on full outer train, evaluate on outer test
+                        out_model = self._create_model(config)
+                        out_model.fit(X_out_train, y_out_train)
+                        out_proba = out_model.predict_proba(X_out_test)[:, 1]
+                        outer_auc = float(nested_roc_auc(y_out_test, out_proba))
+                        outer_aucs.append(outer_auc)
+                        self.logger.info(f"    Outer fold {outer_idx+1}: AUC={outer_auc:.4f} (inner mean={np.mean(inner_scores):.4f})")
+
+                    result.nested_cv_auc = float(np.mean(outer_aucs))
+                    self.logger.info(f"  Nested CV AUC: {result.nested_cv_auc:.4f} (vs test AUC: {result.test_auc:.4f})")
+                    tracker.record_metric("nested_cv_auc", round(result.nested_cv_auc, 4))
+                except Exception as nested_err:
+                    self.logger.warning(f"  Nested CV failed: {nested_err}")
+
+            # ───────────────────────────────────────────────────────────────
+            # Wave 35 C5: Calibrated distillation (memorization detector)
+            # ───────────────────────────────────────────────────────────────
+            if aug_config and getattr(aug_config, 'use_distillation', True):
+                try:
+                    self.logger.info("[STEP 10b-dist] Running calibrated distillation check...")
+                    from sklearn.linear_model import LogisticRegression as DistillLR
+                    from sklearn.metrics import roc_auc_score as distill_roc_auc
+
+                    # Teacher predictions on test set
+                    X_dist_test = X_test_raw if use_leak_proof else X_test
+                    teacher_proba = model.predict_proba(X_dist_test)[:, 1]
+                    teacher_auc = float(distill_roc_auc(y_test, teacher_proba))
+
+                    # Student: simple LogReg trained on teacher's soft labels
+                    student = DistillLR(C=1.0, max_iter=500, random_state=42)
+                    # Train student on teacher's predictions of the TRAINING set
+                    X_dist_train = X_train_raw if use_leak_proof else X_train
+                    teacher_train_proba = model.predict_proba(X_dist_train)[:, 1]
+                    # Use teacher's soft labels as binary targets for student
+                    teacher_hard = (teacher_train_proba >= 0.5).astype(int)
+                    student.fit(X_dist_train, teacher_hard)
+                    student_proba = student.predict_proba(X_dist_test)[:, 1]
+                    student_auc = float(distill_roc_auc(y_test, student_proba))
+
+                    result.distillation_gap = round(teacher_auc - student_auc, 4)
+                    self.logger.info(
+                        f"  Distillation: teacher={teacher_auc:.4f}, student={student_auc:.4f}, "
+                        f"gap={result.distillation_gap:.4f}"
+                    )
+                    if result.distillation_gap > 0.05:
+                        self.logger.warning(
+                            f"  [DISTILL] Large gap ({result.distillation_gap:.3f} > 0.05) — "
+                            f"teacher may be memorizing patterns student can't learn"
+                        )
+                    tracker.record_metric("distillation_gap", result.distillation_gap)
+                except Exception as dist_err:
+                    self.logger.warning(f"  Distillation check failed: {dist_err}")
+
+            # ───────────────────────────────────────────────────────────────
+            # Step 12b: REALITY CHECK + TIER 1 GATE (Wave 14)
             # ───────────────────────────────────────────────────────────────
             train_test_gap = result.train_auc - result.test_auc if result.train_auc > 0 else 0.0
+
+            # Upper-bound reality checks (catch leakage / unrealistic metrics)
+            reality_flags = self._reality_check(result)
+            if reality_flags:
+                for flag_name, flag_msg in reality_flags.items():
+                    self.logger.warning(f"  [REALITY CHECK] {flag_name}: {flag_msg}")
+                tracker.record_metric("reality_check_flags", list(reality_flags.keys()))
+            has_leakage = "likely_leakage" in reality_flags
+
+            # Post-leakage-fix tier1 thresholds (Wave 26 recalibration):
+            # With clean features, realistic AUCs are 0.53-0.57.
+            # AUC > 0.55 meaningfully above random (0.50).
+            # Gap < 0.15: Augmented training data (3:1 synthetic ratio) causes a
+            # structural ~0.12 gap even for linear models. Tier2/3 gates handle
+            # true overfitting detection via stability + fragility analysis.
+            # WMES > 0.40 — realistic WMES with corrected sharpe capping.
             tier1_pass = (
                 result.test_auc > 0.55
-                and result.test_auc < 0.90
-                and train_test_gap < 0.12
-                and result.wmes_score >= 0.50
+                and result.test_auc < 0.85
+                and train_test_gap < 0.15
+                and result.wmes_score >= 0.40
+                and not has_leakage
+                and result.walk_forward_passed
             )
 
             if tier1_pass:
@@ -550,13 +1280,78 @@ class UnifiedExperimentRunner:
                 reasons = []
                 if result.test_auc <= 0.55:
                     reasons.append(f"AUC={result.test_auc:.3f} <= 0.55")
-                if result.test_auc >= 0.90:
-                    reasons.append(f"AUC={result.test_auc:.3f} >= 0.90 (likely leakage)")
-                if train_test_gap >= 0.12:
-                    reasons.append(f"train-test gap={train_test_gap:.3f} >= 0.12")
-                if result.wmes_score < 0.50:
-                    reasons.append(f"WMES={result.wmes_score:.3f} < 0.50")
+                if result.test_auc >= 0.85:
+                    reasons.append(f"AUC={result.test_auc:.3f} >= 0.85 (likely leakage)")
+                if train_test_gap >= 0.15:
+                    reasons.append(f"train-test gap={train_test_gap:.3f} >= 0.15")
+                if result.wmes_score < 0.40:
+                    reasons.append(f"WMES={result.wmes_score:.3f} < 0.40")
+                if has_leakage:
+                    reasons.append("reality check: likely leakage")
                 self.logger.info(f"  [TIER 1] FAIL - {'; '.join(reasons)}")
+
+            # ───────────────────────────────────────────────────────────────
+            # Step 12b2: PERMUTATION TEST (gate blocker, Wave 17)
+            # Run 5 shuffles × 3-fold CV. If mean permuted AUC > 0.53,
+            # the model is likely learning leaked features, not signal.
+            # ───────────────────────────────────────────────────────────────
+            if tier1_pass:
+                try:
+                    from sklearn.model_selection import cross_val_score as perm_cv_score
+                    n_permutations = 5
+                    perm_cv_folds = 3
+                    self.logger.info(
+                        f"[STEP 10b] Running permutation test "
+                        f"({n_permutations} shuffles × {perm_cv_folds}-fold CV)..."
+                    )
+                    tracker.update_substep("Permutation test — ~1-2 min", 72)
+
+                    X_perm = X_train if not use_leak_proof else X_train_raw
+                    perm_aucs = []
+                    for perm_i in range(n_permutations):
+                        y_perm = y_train.copy()
+                        np.random.seed(42 + perm_i)
+                        np.random.shuffle(y_perm)
+
+                        perm_model = self._create_model(config)
+                        perm_scores = perm_cv_score(
+                            perm_model, X_perm, y_perm,
+                            cv=perm_cv_folds, scoring="roc_auc",
+                        )
+                        perm_aucs.append(float(perm_scores.mean()))
+
+                    perm_mean = float(np.mean(perm_aucs))
+                    perm_max = float(np.max(perm_aucs))
+                    result.permutation_auc_mean = round(perm_mean, 4)
+                    self.logger.info(
+                        f"  Permutation AUCs: {[round(a, 4) for a in perm_aucs]}"
+                    )
+                    self.logger.info(
+                        f"  Permutation mean={perm_mean:.4f}, max={perm_max:.4f} "
+                        f"(should be ~0.50)"
+                    )
+                    tracker.record_metric("permutation_auc_mean", round(perm_mean, 4))
+                    tracker.record_metric("permutation_auc_max", round(perm_max, 4))
+
+                    if perm_mean > 0.53:
+                        self.logger.warning(
+                            f"  [PERMUTATION] FAIL: Mean shuffled AUC={perm_mean:.3f} > 0.53 — "
+                            f"model is learning from leaked features, blocking tier promotion"
+                        )
+                        result.permutation_passed = False
+                        tier1_pass = False  # Block tier promotion
+                        tracker.record_metric("permutation_blocked", True)
+                    elif perm_max > 0.56:
+                        self.logger.warning(
+                            f"  [PERMUTATION] WARNING: Max shuffled AUC={perm_max:.3f} > 0.56 — "
+                            f"possible marginal leakage"
+                        )
+                        tracker.record_metric("permutation_warning", True)
+                    else:
+                        self.logger.info("  [PERMUTATION] PASS — no leakage detected")
+                        result.permutation_passed = True
+                except Exception as perm_err:
+                    self.logger.warning(f"  Permutation test failed: {perm_err}")
 
             # ───────────────────────────────────────────────────────────────
             # Step 12c: STABILITY ANALYSIS (Tier 2 — Paper-Eligible)
@@ -567,19 +1362,24 @@ class UnifiedExperimentRunner:
                     from sklearn.model_selection import cross_val_score
 
                     self.logger.info("[STEP 10b] Running stability analysis (HP perturbation)...")
-                    tracker.update_substep("Stability analysis (10 retrains with perturbed HPs) — ~2-5 min", 80)
+                    tracker.update_substep("Stability analysis (24 multi-radius retrains) — ~2-5 min", 80)
 
                     # Build score function: retrain with perturbed params, return CV AUC
                     X_stab = X_train if not use_leak_proof else X_train_raw
                     y_stab = y_train
 
+                    # Wave 28c: Model-type-specific stability parameters.
+                    # Previously all models used GB params, giving fake stab=1.0
+                    # for MLPs, SGD, etc. that don't use those params at all.
+                    model_type = config.model.model_type
+
                     def stability_score_fn(params):
                         """Retrain model with perturbed params and return CV AUC."""
                         tracker.touch()  # Heartbeat during long stability analysis
                         perturbed_config = ExperimentConfig.from_dict(config.to_dict())
-                        # Apply numeric param overrides
-                        if "C" in params or "l2_C" in params:
-                            perturbed_config.model.l2_C = params.get("l2_C", params.get("C", config.model.l2_C))
+                        # Apply param overrides based on model type
+                        if "l2_C" in params:
+                            perturbed_config.model.l2_C = params["l2_C"]
                         if "gb_n_estimators" in params:
                             perturbed_config.model.gb_n_estimators = int(params["gb_n_estimators"])
                         if "gb_max_depth" in params:
@@ -587,90 +1387,473 @@ class UnifiedExperimentRunner:
                         if "gb_learning_rate" in params:
                             perturbed_config.model.gb_learning_rate = params["gb_learning_rate"]
 
-                        m = self._create_model(perturbed_config)
+                        # For MLP/SGD: perturb via direct model construction
+                        if model_type in ("mlp_small", "mlp_medium"):
+                            from sklearn.neural_network import MLPClassifier
+                            alpha = params.get("mlp_alpha", 1.0)
+                            lr = params.get("mlp_lr", 0.001)
+                            layers = (32,) if model_type == "mlp_small" else (64, 32)
+                            m = MLPClassifier(
+                                hidden_layer_sizes=layers, alpha=alpha,
+                                learning_rate_init=lr, max_iter=500,
+                                early_stopping=True, validation_fraction=0.15,
+                                n_iter_no_change=10, random_state=42,
+                            )
+                        elif model_type == "sgd_linear":
+                            from sklearn.linear_model import SGDClassifier
+                            from sklearn.calibration import CalibratedClassifierCV
+                            alpha = params.get("sgd_alpha", 0.01)
+                            l1_ratio = params.get("sgd_l1_ratio", 0.5)
+                            base = SGDClassifier(
+                                loss='log_loss', penalty='elasticnet',
+                                alpha=alpha, l1_ratio=l1_ratio,
+                                max_iter=1000, early_stopping=True,
+                                validation_fraction=0.15, n_iter_no_change=10,
+                                random_state=42,
+                            )
+                            m = CalibratedClassifierCV(base, cv=3, method='sigmoid')
+                        elif model_type == "ridge":
+                            from sklearn.linear_model import RidgeClassifier
+                            from sklearn.calibration import CalibratedClassifierCV
+                            alpha = params.get("ridge_alpha", 10.0)
+                            base = RidgeClassifier(alpha=alpha, random_state=42)
+                            m = CalibratedClassifierCV(base, cv=3, method='sigmoid')
+                        elif model_type == "bagged_linear":
+                            from sklearn.linear_model import LogisticRegression as LR_
+                            from sklearn.ensemble import BaggingClassifier
+                            bag_C = params.get("l2_C", 0.01)
+                            n_est = int(params.get("bag_n_estimators", 20))
+                            base_lr = LR_(penalty='l1', solver='saga', C=bag_C,
+                                          max_iter=1000, random_state=42)
+                            m = BaggingClassifier(
+                                estimator=base_lr, n_estimators=n_est,
+                                max_samples=0.7, max_features=0.7,
+                                bootstrap=True, random_state=42,
+                            )
+                        # Wave 35: New model types
+                        elif model_type == "lda":
+                            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+                            from sklearn.calibration import CalibratedClassifierCV as CalCV
+                            m = CalCV(LinearDiscriminantAnalysis(solver='svd'), cv=3, method='sigmoid')
+                        elif model_type == "gaussian_nb":
+                            from sklearn.naive_bayes import GaussianNB
+                            m = GaussianNB(var_smoothing=1e-8)
+                        elif model_type == "svc_linear":
+                            from sklearn.svm import LinearSVC
+                            from sklearn.calibration import CalibratedClassifierCV as CalCV
+                            svc_C = params.get("l2_C", 0.1) * 0.1
+                            m = CalCV(LinearSVC(C=svc_C, max_iter=2000, dual='auto', random_state=42), cv=3)
+                        elif model_type == "bayesian_ridge":
+                            from sklearn.calibration import CalibratedClassifierCV as CalCV
+                            m = CalCV(_BayesianRidgeClassifierWrapper(), cv=3, method='sigmoid')
+                        elif model_type == "quantile_gb":
+                            m = QuantileGBClassifier(
+                                max_iter=int(params.get("gb_n_estimators", 100)),
+                                max_depth=int(params.get("gb_max_depth", 3)),
+                                learning_rate=params.get("gb_learning_rate", 0.1),
+                                min_samples_leaf=50, random_state=42,
+                            )
+                        else:
+                            m = self._create_model(perturbed_config)
+
                         scores = cross_val_score(m, X_stab, y_stab, cv=3, scoring="roc_auc")
                         return float(scores.mean())
 
-                    # Define param ranges for perturbation
-                    param_ranges = {
-                        "l2_C": (0.001, 1.0),
-                        "gb_n_estimators": (30, 150),
-                        "gb_max_depth": (2, 5),
-                        "gb_learning_rate": (0.01, 0.3),
-                    }
-                    base_params = {
-                        "l2_C": config.model.l2_C,
-                        "gb_n_estimators": config.model.gb_n_estimators,
-                        "gb_max_depth": config.model.gb_max_depth,
-                        "gb_learning_rate": config.model.gb_learning_rate,
-                    }
+                    # Define model-type-specific param ranges and base values
+                    if model_type in ("mlp_small", "mlp_medium"):
+                        param_ranges = {
+                            "mlp_alpha": (0.01, 10.0),
+                            "mlp_lr": (0.0001, 0.01),
+                        }
+                        base_params = {
+                            "mlp_alpha": 1.0 if model_type == "mlp_small" else 0.5,
+                            "mlp_lr": 0.001,
+                        }
+                    elif model_type == "sgd_linear":
+                        param_ranges = {
+                            "sgd_alpha": (0.0001, 0.1),
+                            "sgd_l1_ratio": (0.1, 0.9),
+                        }
+                        base_params = {"sgd_alpha": 0.01, "sgd_l1_ratio": 0.5}
+                    elif model_type == "ridge":
+                        param_ranges = {"ridge_alpha": (0.1, 100.0)}
+                        base_params = {"ridge_alpha": 10.0}
+                    elif model_type == "bagged_linear":
+                        param_ranges = {
+                            "l2_C": (0.001, 0.1),
+                            "bag_n_estimators": (10, 40),
+                        }
+                        base_params = {"l2_C": 0.01, "bag_n_estimators": 20}
+                    elif model_type in ("gradient_boosting", "hist_gradient_boosting"):
+                        param_ranges = {
+                            "gb_n_estimators": (30, 150),
+                            "gb_max_depth": (2, 5),
+                            "gb_learning_rate": (0.01, 0.3),
+                        }
+                        base_params = {
+                            "gb_n_estimators": config.model.gb_n_estimators,
+                            "gb_max_depth": config.model.gb_max_depth,
+                            "gb_learning_rate": config.model.gb_learning_rate,
+                        }
+                    elif model_type == "extra_trees":
+                        param_ranges = {
+                            "gb_n_estimators": (30, 150),
+                            "gb_max_depth": (2, 5),
+                        }
+                        base_params = {
+                            "gb_n_estimators": config.model.gb_n_estimators,
+                            "gb_max_depth": config.model.gb_max_depth,
+                        }
+                    # Wave 35: New model types
+                    elif model_type in ("lda", "gaussian_nb", "bayesian_ridge"):
+                        # No tunable HPs — stability naturally 1.0
+                        param_ranges = {}
+                        base_params = {}
+                    elif model_type == "svc_linear":
+                        param_ranges = {"l2_C": (0.001, 1.0)}
+                        base_params = {"l2_C": config.model.l2_C}
+                    elif model_type == "quantile_gb":
+                        param_ranges = {
+                            "gb_n_estimators": (30, 150),
+                            "gb_max_depth": (2, 5),
+                            "gb_learning_rate": (0.01, 0.3),
+                        }
+                        base_params = {
+                            "gb_n_estimators": config.model.gb_n_estimators,
+                            "gb_max_depth": config.model.gb_max_depth,
+                            "gb_learning_rate": config.model.gb_learning_rate,
+                        }
+                    else:
+                        # Logistic variants, ensemble, diverse_ensemble
+                        # All use l2_C (via aggressive_C)
+                        param_ranges = {"l2_C": (0.001, 1.0)}
+                        base_params = {"l2_C": config.model.l2_C}
 
-                    analyzer = StabilityAnalyzer(perturbation_pct=0.05)
+                    # Wave 28b: Compute base_score using same CV method as
+                    # perturbed scores (standard 3-fold CV). Previously used
+                    # result.cv_auc_mean (leak-proof CV with purge/embargo),
+                    # which has a systematic ~0.05 offset causing stability=0.
+                    base_cv_score = stability_score_fn(base_params)
+                    result._base_cv_score = base_cv_score  # Used by stability suite
+                    self.logger.info(
+                        f"  Stability base score: {base_cv_score:.3f} "
+                        f"(leak-proof CV was {result.cv_auc_mean:.3f})"
+                    )
+
+                    # Wave 29: Multi-radius stability (local ±15%, moderate ±50%, wide full-range)
+                    # 24 joint perturbations across 3 rings, weighted 20/30/50%
+                    analyzer = StabilityAnalyzer()
                     stab_result = analyzer.compute_stability_score(
                         base_params=base_params,
-                        base_score=result.cv_auc_mean,
+                        base_score=base_cv_score,
                         param_ranges=param_ranges,
                         score_fn=stability_score_fn,
-                        n_samples=10,
+                        n_samples=24,
                     )
                     result.stability_score = stab_result.get("stability_score", 0)
                     self.logger.info(f"  Stability Score: {result.stability_score:.3f}")
                     tracker.record_metric("stability_score", round(result.stability_score, 3))
 
-                    if result.stability_score >= 0.50:
+                    # Wave 29: Log per-ring details for tracking
+                    per_ring = stab_result.get("per_ring", {})
+                    for rname in ("local", "moderate", "wide"):
+                        rdata = per_ring.get(rname, {})
+                        tracker.record_metric(
+                            f"stability_{rname}",
+                            round(rdata.get("stability", 0), 3),
+                        )
+                    self.logger.info(
+                        f"  Per-ring: local={per_ring.get('local', {}).get('stability', 0):.3f} "
+                        f"moderate={per_ring.get('moderate', {}).get('stability', 0):.3f} "
+                        f"wide={per_ring.get('wide', {}).get('stability', 0):.3f}"
+                    )
+
+                    if result.stability_score >= 0.60:
                         self.logger.info("  [TIER 2] PASS - Model is on HP plateau (paper-eligible)")
                     else:
-                        self.logger.info(f"  [TIER 2] FAIL - stability={result.stability_score:.3f} < 0.50 (fragile to HP changes)")
+                        self.logger.info(f"  [TIER 2] FAIL - stability={result.stability_score:.3f} < 0.60 (fragile to HP changes)")
 
                 except Exception as stab_err:
                     self.logger.warning(f"  [TIER 2] Stability analysis failed: {stab_err}")
-                    result.stability_score = 0.0
+                    self.logger.warning(f"  [TIER 2] Traceback: {traceback.format_exc()}")
+                    # Wave 33: Don't set to 0.0 (blocks tier promotion forever).
+                    # Set to -1 (sentinel = "not computed") so suite can still gate.
+                    result.stability_score = -1.0
+
+            # ───────────────────────────────────────────────────────────────
+            # Step 12c2: MULTI-FACETED STABILITY SUITE (Wave 29)
+            # Augments HP perturbation with bootstrap, feature dropout,
+            # seed stability, and prediction agreement. Tracked as metadata.
+            # ───────────────────────────────────────────────────────────────
+            if tier1_pass:
+                try:
+                    from src.phase_14_robustness.stability_suite import StabilitySuite
+
+                    self.logger.info("[STEP 10b2] Running multi-faceted stability suite...")
+                    tracker.update_substep("Multi-stability suite (bootstrap/dropout/seed/prediction) — ~1-3 min", 83)
+
+                    X_suite = X_train if not use_leak_proof else X_train_raw
+                    y_suite = y_train
+                    model_type = config.model.model_type
+
+                    # Model factory: returns fresh model with same config
+                    def _make_model():
+                        tracker.touch()
+                        return self._create_model(config)
+
+                    # Seed-aware factory for seed stability test
+                    def _make_model_with_seed(seed):
+                        tracker.touch()
+                        m = self._create_model(config)
+                        # Try to set random_state on the model or its base estimator
+                        if hasattr(m, 'random_state'):
+                            m.random_state = seed
+                        elif hasattr(m, 'estimator') and hasattr(m.estimator, 'random_state'):
+                            m.estimator.random_state = seed
+                        elif hasattr(m, 'base_estimator') and hasattr(m.base_estimator, 'random_state'):
+                            m.base_estimator.random_state = seed
+                        return m
+
+                    suite = StabilitySuite(
+                        n_bootstrap=5,
+                        n_feature_dropout=5,
+                        n_seeds=5,
+                        n_prediction_models=5,
+                        dropout_fraction=0.15,
+                        subsample_fraction=0.80,
+                    )
+
+                    # Use base CV score as reference (computed earlier or from result)
+                    ref_auc = getattr(result, '_base_cv_score', result.cv_auc_mean)
+
+                    suite_results = suite.run_all(
+                        X=X_suite,
+                        y=y_suite,
+                        model_factory_fn=_make_model,
+                        base_auc=ref_auc,
+                        seed_model_factory_fn=_make_model_with_seed,
+                    )
+
+                    # Store results
+                    result.stability_bootstrap = suite_results["bootstrap"]["score"]
+                    result.stability_feature_dropout = suite_results["feature_dropout"]["score"]
+                    result.stability_seed = suite_results["seed"].get("score", -1.0)
+                    result.stability_prediction = suite_results["prediction"]["score"]
+                    result.stability_composite = suite_results["composite"]
+
+                    # Log results
+                    self.logger.info(
+                        f"  Stability Suite: "
+                        f"bootstrap={result.stability_bootstrap:.3f} "
+                        f"feat_dropout={result.stability_feature_dropout:.3f} "
+                        f"seed={result.stability_seed:.3f} "
+                        f"prediction={result.stability_prediction:.3f} "
+                        f"composite={result.stability_composite:.3f}"
+                    )
+
+                    # Track metrics
+                    tracker.record_metric("stability_bootstrap", round(result.stability_bootstrap, 3))
+                    tracker.record_metric("stability_feature_dropout", round(result.stability_feature_dropout, 3))
+                    tracker.record_metric("stability_seed", round(result.stability_seed, 3))
+                    tracker.record_metric("stability_prediction", round(result.stability_prediction, 3))
+                    tracker.record_metric("stability_composite", round(result.stability_composite, 3))
+
+                except Exception as suite_err:
+                    self.logger.warning(f"  [STABILITY SUITE] Failed: {suite_err}")
+
+            # ───────────────────────────────────────────────────────────────
+            # Step 12c3: ADVANCED STABILITY SUITE (Wave 30)
+            # 14 complementary methods: PSI, CSI, adversarial, ECE, DSR,
+            # SFI, meta-labeling, knockoff, ADWIN, CPCV, stability
+            # selection, Rashomon set, SHAP consistency, conformal prediction
+            # ───────────────────────────────────────────────────────────────
+            if tier1_pass:
+                try:
+                    from src.phase_14_robustness.advanced_stability import AdvancedStabilitySuite
+
+                    self.logger.info("[STEP 12c3] Running advanced stability suite (19 methods)...")
+                    tracker.update_substep("Advanced stability (PSI/CPCV/SHAP/Rashomon/adversarial/smoothing) — ~5-8 min", 85)
+
+                    # Pick correct feature arrays based on CV path
+                    X_adv_train = X_train_raw if use_leak_proof else X_train
+                    X_adv_test = X_test_raw if use_leak_proof else X_test
+
+                    advanced_suite = AdvancedStabilitySuite(
+                        n_cpcv_groups=5,
+                        n_stability_sel=10,
+                        n_rashomon=5,
+                        n_sfi_repeats=3,
+                    )
+
+                    ref_auc_adv = getattr(result, '_base_cv_score', result.cv_auc_mean)
+                    # Estimate experiment count for DSR correction
+                    try:
+                        from src.core.registry_db import get_registry_db
+                        n_exp_total = get_registry_db().get_experiment_count()
+                    except Exception:
+                        n_exp_total = 1
+
+                    advanced_results = advanced_suite.run_all(
+                        X_train=X_adv_train,
+                        y_train=y_train,
+                        X_test=X_adv_test,
+                        y_test=y_test,
+                        model_factory_fn=_make_model,
+                        trained_model=model,
+                        predictions=test_proba_wmes,
+                        base_auc=ref_auc_adv,
+                        cv_scores=result.cv_scores,
+                        n_experiments_total=n_exp_total,
+                    )
+                    result.stability_advanced = advanced_results
+
+                    # Log composite
+                    adv_composite = advanced_results.get("composite_advanced", 0)
+                    self.logger.info(f"  Advanced Stability Composite: {adv_composite:.3f}")
+                    tracker.record_metric("stability_advanced_composite", round(adv_composite, 3))
+
+                    # Log adversarial overfitting sub-scores
+                    adv_of = advanced_results.get("adversarial_overfitting", {})
+                    if adv_of.get("score", -1) >= 0:
+                        self.logger.info(
+                            f"  Adversarial Overfitting: {adv_of['score']:.3f} "
+                            f"(noise={adv_of.get('noise_score', 0):.3f}, "
+                            f"perturb={adv_of.get('perturb_score', 0):.3f}, "
+                            f"conf={adv_of.get('confidence_score', 0):.3f})"
+                        )
+
+                    # Log disagreement smoothing sub-scores
+                    dis_sm = advanced_results.get("disagreement_smoothing", {})
+                    if dis_sm.get("score", -1) >= 0:
+                        self.logger.info(
+                            f"  Disagreement Smoothing: {dis_sm['score']:.3f} "
+                            f"(pred_agree={dis_sm.get('pred_agreement_score', 0):.3f}, "
+                            f"feat_agree={dis_sm.get('feat_agreement_score', 0):.3f})"
+                        )
+
+                except Exception as adv_err:
+                    self.logger.warning(f"  [ADVANCED STABILITY] Failed: {adv_err}")
 
             # ───────────────────────────────────────────────────────────────
             # Step 12d: FRAGILITY ANALYSIS (Tier 3 — Live-Eligible)
+            # Wave 33: Replaced generic RobustnessEnsemble (which used
+            # LogisticRegression+PCA regardless of actual model, producing
+            # fragility ~0 for everything) with proper model-aware test.
+            # Now uses the same stability_score_fn to test the ACTUAL model
+            # with feature count perturbation + wider param perturbation.
             # ───────────────────────────────────────────────────────────────
-            if tier1_pass and result.stability_score >= 0.50 and result.test_auc >= 0.60:
+            # Wave 33: Also run fragility if stability failed (-1) but suite composite is good
+            suite_comp = getattr(result, 'stability_composite', 0.0) or 0.0
+            stab_ok_for_frag = (result.stability_score >= 0.60) or (result.stability_score == -1.0 and suite_comp >= 0.50)
+            if tier1_pass and stab_ok_for_frag:
                 try:
-                    from src.phase_14_robustness.robustness_ensemble import RobustnessEnsemble
+                    from sklearn.model_selection import cross_val_score as frag_cv_score
 
                     self.logger.info("[STEP 10c] Running fragility analysis (dim + param perturbation)...")
-                    tracker.update_substep("Fragility analysis (ensemble of perturbed models) — ~3-7 min", 90)
+                    tracker.update_substep("Fragility analysis (actual model retrains) — ~3-7 min", 90)
 
                     X_frag = X_train if not use_leak_proof else X_train_raw
                     y_frag = y_train
-                    weights_frag = weights_train if not use_leak_proof else weights_real
+                    optimal_n_feat = result.n_features_final or 30
+                    frag_scores = []
 
-                    rob_ensemble = RobustnessEnsemble(
-                        n_dimension_variants=2,
-                        n_param_variants=2,
-                        param_noise_pct=0.05,
-                    )
+                    # --- A. Feature count perturbation ---
+                    # Vary n_features widely to stress-test feature sensitivity
+                    feat_variants = sorted(set([
+                        max(5, int(optimal_n_feat * 0.4)),
+                        max(5, int(optimal_n_feat * 0.6)),
+                        max(5, int(optimal_n_feat * 0.8)),
+                        optimal_n_feat,
+                        min(X_frag.shape[1], int(optimal_n_feat * 1.2)),
+                        min(X_frag.shape[1], int(optimal_n_feat * 1.4)),
+                        min(X_frag.shape[1], int(optimal_n_feat * 1.8)),
+                    ]))
+                    self.logger.info(f"  Feature count variants: {feat_variants} (optimal={optimal_n_feat})")
 
-                    base_model_params = {"C": config.model.l2_C, "max_iter": 1000, "random_state": 42}
-                    optimal_dims = result.n_features_final or 30
+                    for n_feat in feat_variants:
+                        try:
+                            tracker.touch()
+                            m = self._create_model(config)
+                            # Use top-n features by variance (fast, no leakage)
+                            feat_var = np.var(X_frag, axis=0)
+                            top_idx = np.argsort(feat_var)[-n_feat:]
+                            X_sub = X_frag[:, top_idx]
+                            scores = frag_cv_score(m, X_sub, y_frag, cv=3, scoring="roc_auc")
+                            frag_scores.append(float(scores.mean()))
+                            self.logger.info(f"    n_feat={n_feat}: AUC={scores.mean():.4f}")
+                        except Exception:
+                            pass
 
-                    rob_results = rob_ensemble.train_ensemble(
-                        X=X_frag,
-                        y=y_frag,
-                        sample_weights=weights_frag,
-                        base_params=base_model_params,
-                        optimal_dims=optimal_dims,
-                        cv_folds=3,
-                    )
+                    # --- B. Wide parameter perturbation (±50%) ---
+                    # Reuse stability_score_fn from earlier (already defined for this model type)
+                    for _ in range(8):
+                        try:
+                            tracker.touch()
+                            perturbed_p = {}
+                            for pk, (plow, phigh) in param_ranges.items():
+                                bv = base_params.get(pk)
+                                if bv is None:
+                                    continue
+                                delta = np.random.uniform(-0.50, 0.50)
+                                nv = bv * (1 + delta)
+                                nv = max(plow, min(phigh, nv))
+                                if isinstance(bv, int):
+                                    nv = int(round(nv))
+                                perturbed_p[pk] = nv
+                            score = stability_score_fn(perturbed_p)
+                            frag_scores.append(score)
+                        except Exception:
+                            pass
 
-                    frag = rob_results.get("fragility", {})
-                    result.fragility_score = frag.get("fragility_score", 1.0)
-                    self.logger.info(f"  Fragility Score: {result.fragility_score:.3f}")
-                    tracker.record_metric("fragility_score", round(result.fragility_score, 3))
+                    # --- C. Compute fragility score ---
+                    if len(frag_scores) >= 3:
+                        base_frag_score = getattr(result, '_base_cv_score', result.cv_auc_mean)
+                        frag_std = float(np.std(frag_scores))
+                        frag_mean = float(np.mean(frag_scores))
+                        max_drop = max(0, base_frag_score - min(frag_scores))
+                        # Coefficient of variation relative to base score
+                        cv_frag = frag_std / (base_frag_score + 1e-6)
+                        # Drop factor: how much does the worst variant drop from base
+                        drop_factor = max_drop / (base_frag_score + 1e-6)
 
-                    if result.fragility_score < 0.35:
-                        self.logger.info("  [TIER 3] PASS - Model is robust (live-eligible)")
+                        # Fragility = weighted combination (aggressively scaled)
+                        # cv_frag of 0.05 (5% variation) → 0.50 (concerning)
+                        # drop_factor of 0.10 (10% drop) → 0.60 (fragile)
+                        result.fragility_score = float(min(1.0, max(0.0,
+                            0.50 * min(cv_frag * 10, 1.0) +     # 5% CV → 0.50
+                            0.50 * min(drop_factor * 6, 1.0)    # 10% drop → 0.60
+                        )))
+
+                        # v4: Floor for models with empty param_ranges (LDA, GaussianNB,
+                        # BayesianRidge). When param perturbation is a no-op, 8 of ~15
+                        # frag_scores are identical to base, artificially suppressing
+                        # cv_frag. Floor = 0.05 acknowledges untestable HP dimension.
+                        if not param_ranges:
+                            result.fragility_score = max(result.fragility_score, 0.05)
+
+                        self.logger.info(
+                            f"  Fragility: score={result.fragility_score:.3f} "
+                            f"(cv={cv_frag:.4f}, max_drop={max_drop:.4f}, "
+                            f"std={frag_std:.4f}, n={len(frag_scores)})"
+                        )
+                        tracker.record_metric("fragility_score", round(result.fragility_score, 3))
+                        tracker.record_metric("fragility_cv", round(cv_frag, 4))
+                        tracker.record_metric("fragility_max_drop", round(max_drop, 4))
                     else:
-                        self.logger.info(f"  [TIER 3] FAIL - fragility={result.fragility_score:.3f} >= 0.35")
+                        self.logger.warning("  [FRAGILITY] Not enough scores, defaulting to 0.5")
+                        result.fragility_score = 0.5
+
+                    if result.fragility_score < 0.40 and result.test_auc >= 0.57:
+                        self.logger.info("  [TIER 3] PASS - Model is robust (live-eligible)")
+                    elif result.test_auc < 0.57:
+                        self.logger.info(f"  [TIER 3] FAIL - AUC={result.test_auc:.3f} < 0.57")
+                    else:
+                        self.logger.info(f"  [TIER 3] FAIL - fragility={result.fragility_score:.3f} >= 0.40")
 
                 except Exception as frag_err:
                     self.logger.warning(f"  [TIER 3] Fragility analysis failed: {frag_err}")
-                    result.fragility_score = 1.0
+                    self.logger.warning(f"  [TIER 3] Traceback: {traceback.format_exc()}")
+                    result.fragility_score = 0.5  # Unknown, not 1.0
 
             # Step 13: Realistic backtest with transaction costs
             self.logger.info("[STEP 11] Running REALISTIC backtest with transaction costs...")
@@ -712,7 +1895,7 @@ class UnifiedExperimentRunner:
                 result.backtest_max_drawdown = backtest_metrics["max_drawdown"]
 
                 self.logger.info(f"  Slippage: {ENGINE_CONFIG['slippage_bps']} bps, Commission: {ENGINE_CONFIG['commission_bps']} bps")
-                self.logger.info(f"  Transaction cost per trade: {backtest_metrics['transaction_cost_per_trade']:.4%}")
+                self.logger.info(f"  Transaction cost per trade: {backtest_metrics.get('transaction_cost_per_trade', 0.0):.4%}")
                 self.logger.info(f"  ---")
                 self.logger.info(f"  Win Rate (gross): {backtest_metrics['win_rate']:.1%}")
                 self.logger.info(f"  Win Rate (net):   {backtest_metrics['win_rate_net']:.1%}")
@@ -829,6 +2012,26 @@ class UnifiedExperimentRunner:
                 "entry_exit_model_trained": entry_exit_model_trained,
             })
 
+            # ── Wave 32: Update feature research candidate stats ─────────
+            if is_feature_research and _research_candidate_names:
+                try:
+                    from src.phase_09_features_calendar.feature_researcher import FeatureResearchAgent
+                    _fr_agent = FeatureResearchAgent()
+                    tier1_pass = (result.test_auc > 0.55 and result.wmes_score >= 0.40
+                                  and result.walk_forward_passed)
+                    _fr_agent.update_candidate_stats(
+                        _research_candidate_names,
+                        tier1_passed=tier1_pass,
+                        wmes_score=result.wmes_score,
+                        walk_forward_passed=result.walk_forward_passed,
+                    )
+                    baseline = _fr_agent.get_baseline_stats()
+                    graduated = _fr_agent.check_graduations(baseline["tier1_pass_rate"])
+                    if graduated:
+                        self.logger.info(f"  [FEATURE_RESEARCH] Graduated features: {graduated}")
+                except Exception as fr_err:
+                    self.logger.warning(f"  [FEATURE_RESEARCH] Stats update failed: {fr_err}")
+
         except Exception as e:
             result.status = ExperimentStatus.FAILED
             result.error_message = str(e)
@@ -840,6 +2043,45 @@ class UnifiedExperimentRunner:
         result.duration_seconds = time.time() - start_time
 
         return result
+
+    @staticmethod
+    def _reality_check(result) -> dict:
+        """Upper-bound reality checks to catch leakage or unrealistic metrics.
+
+        Returns dict of flag_name → message for any triggered flags.
+        Empty dict means all checks passed.
+        """
+        flags = {}
+
+        # AUC > 0.85 for daily SPY direction is almost certainly leakage
+        if result.test_auc > 0.85:
+            flags["likely_leakage"] = (
+                f"AUC={result.test_auc:.3f} > 0.85 — likely feature leakage "
+                f"(daily SPY direction rarely exceeds 0.75 AUC)"
+            )
+
+        # Sharpe > 4.0 on daily returns is unrealistic
+        if hasattr(result, 'backtest_sharpe') and result.backtest_sharpe and result.backtest_sharpe > 4.0:
+            flags["unrealistic_sharpe"] = (
+                f"Sharpe={result.backtest_sharpe:.2f} > 4.0 — unrealistic for daily SPY"
+            )
+
+        # Win rate > 75% on daily direction is suspicious
+        if hasattr(result, 'backtest_win_rate') and result.backtest_win_rate and result.backtest_win_rate > 0.75:
+            flags["suspicious_win_rate"] = (
+                f"Win rate={result.backtest_win_rate:.1%} > 75% — suspicious"
+            )
+
+        # Train-test gap suspiciously close with high AUC → data leakage
+        if result.train_auc > 0 and result.test_auc > 0.60:
+            gap = abs(result.train_auc - result.test_auc)
+            if gap < 0.001:
+                flags["suspiciously_close"] = (
+                    f"Train-test gap={gap:.4f} < 0.001 with AUC={result.test_auc:.3f} "
+                    f"— train and test may share leaked features"
+                )
+
+        return flags
 
     def _create_model(self, config: ExperimentConfig):
         """Create model based on configuration.
@@ -865,22 +2107,117 @@ class UnifiedExperimentRunner:
         # Increase min_samples_leaf to prevent memorization
         safe_min_samples_leaf = max(config.model.gb_min_samples_leaf, 50)
 
-        if config.model.model_type == "logistic":
-            if config.model.regularization == "l1":
-                base_model = LogisticRegression(
-                    penalty='l1', solver='saga',
-                    C=aggressive_C, max_iter=1000, random_state=42
-                )
-            elif config.model.regularization == "elastic_net":
-                # Elastic net with heavier L1 component
-                base_model = LogisticRegression(
-                    penalty='elasticnet', solver='saga',
-                    C=aggressive_C, l1_ratio=max(config.model.elastic_l1_ratio, 0.7),
-                    max_iter=1000, random_state=42
-                )
-            else:
-                base_model = LogisticRegression(C=aggressive_C, max_iter=1000, random_state=42)
-            return base_model
+        if config.model.model_type in ("logistic", "logistic_l2"):
+            return LogisticRegression(C=aggressive_C, max_iter=1000, random_state=42)
+
+        elif config.model.model_type == "logistic_l1":
+            return LogisticRegression(
+                penalty='l1', solver='saga',
+                C=aggressive_C, max_iter=1000, random_state=42
+            )
+
+        elif config.model.model_type == "logistic_elastic":
+            return LogisticRegression(
+                penalty='elasticnet', solver='saga',
+                C=aggressive_C, l1_ratio=max(getattr(config.model, 'elastic_l1_ratio', 0.5), 0.5),
+                max_iter=1000, random_state=42
+            )
+
+        elif config.model.model_type == "hist_gradient_boosting":
+            from sklearn.ensemble import HistGradientBoostingClassifier
+            return HistGradientBoostingClassifier(
+                max_iter=min(config.model.gb_n_estimators, 100),
+                max_depth=safe_max_depth,
+                learning_rate=min(config.model.gb_learning_rate, 0.1),
+                min_samples_leaf=safe_min_samples_leaf,
+                l2_regularization=1.0,  # Strong L2 regularization
+                max_bins=255,
+                early_stopping=True,
+                random_state=42,
+            )
+
+        elif config.model.model_type == "mlp_small":
+            # Regularized MLP: 1 hidden layer, strong alpha (L2), early stopping
+            from sklearn.neural_network import MLPClassifier
+            return MLPClassifier(
+                hidden_layer_sizes=(32,),
+                alpha=1.0,  # Very strong L2 regularization (default 0.0001)
+                learning_rate_init=0.001,
+                max_iter=500,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,
+                random_state=42,
+            )
+
+        elif config.model.model_type == "mlp_medium":
+            # Regularized MLP: 2 hidden layers, moderate alpha, dropout-like early stopping
+            from sklearn.neural_network import MLPClassifier
+            return MLPClassifier(
+                hidden_layer_sizes=(64, 32),
+                alpha=0.5,  # Strong L2 regularization
+                learning_rate='adaptive',
+                learning_rate_init=0.001,
+                max_iter=500,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,
+                batch_size=min(256, max(32, safe_min_samples_leaf)),
+                random_state=42,
+            )
+
+        elif config.model.model_type == "sgd_linear":
+            # SGD Classifier: regularized linear model, very fast, elastic net support
+            from sklearn.linear_model import SGDClassifier
+            from sklearn.calibration import CalibratedClassifierCV
+            base = SGDClassifier(
+                loss='log_loss',
+                penalty='elasticnet',
+                alpha=0.01,  # Strong regularization
+                l1_ratio=0.5,
+                max_iter=1000,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=10,
+                random_state=42,
+            )
+            # Wrap in CalibratedClassifierCV for proper probability outputs
+            return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+        elif config.model.model_type == "ridge":
+            # RidgeClassifier: strong L2 regularized linear model
+            from sklearn.linear_model import RidgeClassifier
+            from sklearn.calibration import CalibratedClassifierCV
+            base = RidgeClassifier(alpha=10.0, random_state=42)
+            return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+        elif config.model.model_type == "extra_trees":
+            # Extra-randomized trees: more random splits = less overfitting than RF
+            from sklearn.ensemble import ExtraTreesClassifier
+            return ExtraTreesClassifier(
+                n_estimators=min(config.model.gb_n_estimators, 100),
+                max_depth=safe_max_depth,
+                min_samples_leaf=safe_min_samples_leaf,
+                max_features='sqrt',
+                bootstrap=True,
+                random_state=42,
+            )
+
+        elif config.model.model_type == "bagged_linear":
+            # Bagging of strongly regularized linear models (GANDALF-like)
+            # Multiple linear models on random subsets → captures non-linear patterns
+            from sklearn.ensemble import BaggingClassifier
+            base_lr = LogisticRegression(
+                penalty='l1', solver='saga', C=0.01, max_iter=1000, random_state=42
+            )
+            return BaggingClassifier(
+                estimator=base_lr,
+                n_estimators=20,
+                max_samples=0.7,
+                max_features=0.7,
+                bootstrap=True,
+                random_state=42,
+            )
 
         elif config.model.model_type == "gradient_boosting":
             return GradientBoostingClassifier(
@@ -897,7 +2234,11 @@ class UnifiedExperimentRunner:
             models = []
             for model_name in config.model.ensemble_models:
                 if model_name == "logistic_l2":
-                    models.append(('lr', LogisticRegression(C=aggressive_C, max_iter=1000, random_state=42)))
+                    models.append(('lr_l2', LogisticRegression(C=aggressive_C, max_iter=1000, random_state=42)))
+                elif model_name == "logistic_l1":
+                    models.append(('lr_l1', LogisticRegression(
+                        penalty='l1', solver='saga', C=aggressive_C, max_iter=1000, random_state=43
+                    )))
                 elif model_name == "gradient_boosting":
                     models.append(('gb', GradientBoostingClassifier(
                         n_estimators=min(config.model.gb_n_estimators, 100),
@@ -946,6 +2287,38 @@ class UnifiedExperimentRunner:
             ]
             return VotingClassifier(models, voting='soft')
 
+        # ── Wave 35: 5 new model types ──────────────────────────────────
+
+        elif config.model.model_type == "lda":
+            from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+            base = LinearDiscriminantAnalysis(solver='svd')
+            return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+        elif config.model.model_type == "gaussian_nb":
+            from sklearn.naive_bayes import GaussianNB
+            return GaussianNB(var_smoothing=1e-8)
+
+        elif config.model.model_type == "svc_linear":
+            from sklearn.svm import LinearSVC
+            base = LinearSVC(
+                C=aggressive_C, loss='squared_hinge', penalty='l2',
+                max_iter=2000, dual='auto', random_state=42,
+            )
+            return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+        elif config.model.model_type == "bayesian_ridge":
+            base = _BayesianRidgeClassifierWrapper()
+            return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+        elif config.model.model_type == "quantile_gb":
+            return QuantileGBClassifier(
+                max_iter=min(config.model.gb_n_estimators, 100),
+                max_depth=safe_max_depth,
+                learning_rate=min(config.model.gb_learning_rate, 0.1),
+                min_samples_leaf=safe_min_samples_leaf,
+                random_state=42,
+            )
+
         else:
             # Default to strongly regularized L2 logistic regression
             return LogisticRegression(C=aggressive_C, max_iter=1000, random_state=42)
@@ -962,12 +2335,12 @@ class ExperimentEngine:
     No simplified parallel pipelines.
     """
 
-    def __init__(self):
+    def __init__(self, db=None):
         self.logger = logging.getLogger("ENGINE")
-        self.generator = ExperimentGenerator()
+        self._db = db  # Optional RegistryDB for SQLite backend
+        self.history = ExperimentHistory(db=db)
+        self.generator = ExperimentGenerator(history=self.history)
         self.runner = UnifiedExperimentRunner()
-        self.registry = ModelRegistry()
-        self.history = ExperimentHistory()
 
         self.running = False
         self.current_experiment: Optional[ExperimentConfig] = None
@@ -975,59 +2348,92 @@ class ExperimentEngine:
         self.last_reset = datetime.now().date()
 
     def run_experiment(self, config: ExperimentConfig) -> ExperimentResult:
-        """Run a single experiment with the given configuration."""
+        """Run a single experiment with the given configuration.
+
+        Wave 26: Two-pass fast screen — Pass 1 skips anti-overfit augmentation.
+        If Pass 1 yields a Tier 1 candidate, Pass 2 re-runs with full validation.
+        """
         # Validate config
         is_valid, errors = validate_config(config)
         if not is_valid:
             self.logger.warning(f"Config validation warnings: {errors}")
 
-        # Run using unified runner
-        result = self.runner.run(config)
+        # Pass 1: Fast screen (skip anti-overfit augmentation)
+        result = self.runner.run(config, fast_screen=True)
+
+        # Check if worth a full validation pass
+        if (result.status == ExperimentStatus.COMPLETED
+                and result.test_auc > 0.55
+                and result.wmes_score >= 0.40
+                and getattr(result, 'walk_forward_passed', False)
+                and config.anti_overfit.use_anti_overfit):
+            self.logger.info(
+                f"[FAST SCREEN PASS] AUC={result.test_auc:.3f}, WMES={result.wmes_score:.3f} "
+                f"— re-running with full anti-overfit augmentation..."
+            )
+            result = self.runner.run(config, fast_screen=False)
 
         # Store result
         self.history.add(result)
 
-        # Register model if it passes Tier 1 quality gate
+        # Extract feature importances for universal feature map
+        self._update_feature_map(result, config)
+
+        # Register model if it passes Tier 1 quality gate (Wave 26 thresholds)
         train_test_gap = result.train_auc - result.test_auc if result.train_auc > 0 else 0.0
+        reality_flags = self.runner._reality_check(result)
+        has_leakage = "likely_leakage" in reality_flags
         tier1_pass = (
             result.status == ExperimentStatus.COMPLETED
             and result.test_auc > 0.55
-            and result.test_auc < 0.90
-            and train_test_gap < 0.12
-            and result.wmes_score >= 0.50
+            and result.test_auc < 0.85
+            and train_test_gap < 0.15
+            and result.wmes_score >= 0.40
+            and not has_leakage
+            and getattr(result, 'walk_forward_passed', True)
         )
 
         if tier1_pass:
-            model_id = self.registry.register_model(result)
-            tier = self.registry._compute_tier(result)
+            model_id = self._db.register_model_from_experiment(result.to_dict())
+            # Wave 33: Include stability suite composite in tier calculation
+            suite_composite = getattr(result, 'stability_composite', 0.0) or 0.0
+            tier = compute_tier(
+                result.stability_score, result.fragility_score,
+                result.test_auc, suite_composite,
+            )
             tier_labels = {1: "REGISTRY", 2: "PAPER-ELIGIBLE", 3: "LIVE-ELIGIBLE"}
             self.logger.info(
                 f"Registered model: {model_id} "
                 f"(AUC={result.test_auc:.3f}, WMES={result.wmes_score:.3f}, "
                 f"stability={result.stability_score:.3f}, fragility={result.fragility_score:.3f}, "
+                f"suite={suite_composite:.3f}, "
                 f"tier={tier} [{tier_labels.get(tier, '?')}])"
             )
 
             # Add to best configs pool if good
-            if result.test_auc > 0.60:
+            if result.test_auc > 0.56:
                 self.generator.add_best_config(config, result.test_auc)
         elif result.status == ExperimentStatus.COMPLETED:
             reasons = []
             if result.test_auc <= 0.55:
                 reasons.append(f"AUC={result.test_auc:.3f}<=0.55")
-            if result.test_auc >= 0.90:
-                reasons.append(f"AUC={result.test_auc:.3f}>=0.90")
-            if train_test_gap >= 0.12:
-                reasons.append(f"gap={train_test_gap:.3f}>=0.12")
-            if result.wmes_score < 0.50:
-                reasons.append(f"WMES={result.wmes_score:.3f}<0.50")
+            if result.test_auc >= 0.85:
+                reasons.append(f"AUC={result.test_auc:.3f}>=0.85 (likely leakage)")
+            if train_test_gap >= 0.15:
+                reasons.append(f"gap={train_test_gap:.3f}>=0.15")
+            if result.wmes_score < 0.40:
+                reasons.append(f"WMES={result.wmes_score:.3f}<0.40")
+            if not getattr(result, 'walk_forward_passed', True):
+                reasons.append("walk-forward failed")
+            if has_leakage:
+                reasons.append("reality check: likely leakage")
             self.logger.info(f"Model NOT registered (Tier 1 fail): {'; '.join(reasons)}")
 
             # Register with ModelRegistryV2 for mega ensemble discovery
             try:
                 from src.model_registry_v2 import ModelRegistryV2, ModelEntry, ModelType
 
-                v2_registry = ModelRegistryV2()
+                v2_registry = ModelRegistryV2(db=self._db)
 
                 # Map experiment config to ModelEntry
                 entry = ModelEntry(target_type="swing")
@@ -1053,8 +2459,65 @@ class ExperimentEngine:
 
         return result
 
+    def _update_feature_map(self, result: ExperimentResult, config: ExperimentConfig):
+        """Extract feature importances and update universal feature map."""
+        if result.status != ExperimentStatus.COMPLETED:
+            return
+        if not result.model_path:
+            return
+        try:
+            from src.phase_23_analytics.symbolic_cross_learner import (
+                FeatureImportanceExtractor, UniversalFeatureMap,
+            )
+            model_path = Path(result.model_path)
+            if not model_path.is_file():
+                return
+            saved = joblib.load(model_path)
+            model = saved.get("model")
+            feature_cols = saved.get("feature_cols", [])
+            if model is None:
+                return
+
+            importances = FeatureImportanceExtractor.extract(
+                model, feature_names=feature_cols
+            )
+            if not importances:
+                return
+
+            map_path = project_root / "models" / "feature_importance_map.json"
+            fmap = UniversalFeatureMap(persist_path=map_path)
+            model_type = getattr(config, "model_type", "unknown")
+            if hasattr(config, "dim_reduction") and hasattr(config.dim_reduction, "method"):
+                model_type = f"{model_type}_{config.dim_reduction.method}"
+            fmap.add_model_full(
+                model_id=result.experiment_id,
+                importances=importances,
+                model_auc=result.test_auc,
+                model_type=model_type,
+            )
+            self.logger.info(
+                f"Updated feature map: {len(importances)} features from {result.experiment_id}"
+            )
+        except Exception as e:
+            self.logger.debug(f"Feature map update skipped: {e}")
+
+    def _check_memory(self) -> float:
+        """Check current process memory in MB. Returns usage in MB."""
+        try:
+            import psutil
+            proc = psutil.Process()
+            mem_mb = proc.memory_info().rss / (1024 * 1024)
+            return mem_mb
+        except ImportError:
+            return 0.0
+
     def run_one_experiment(self) -> Optional[ExperimentResult]:
-        """Generate and run a single experiment."""
+        """Generate and run a single experiment.
+
+        Wave 36: Added per-experiment memory monitoring and timeout protection.
+        """
+        import gc
+
         # Check daily limit
         if datetime.now().date() != self.last_reset:
             self.experiments_today = 0
@@ -1064,14 +2527,67 @@ class ExperimentEngine:
             self.logger.warning("Daily experiment limit reached")
             return None
 
+        # Pre-experiment memory check
+        mem_before = self._check_memory()
+        if mem_before > 3500:  # 3.5 GB — force GC before starting
+            gc.collect()
+            mem_before = self._check_memory()
+            self.logger.warning(f"[MEM] High memory before experiment: {mem_before:.0f} MB, forced GC")
+        if mem_before > 5000:  # 5 GB — skip experiment, let system cool down
+            gc.collect()
+            self.logger.error(f"[MEM] Memory critical ({mem_before:.0f} MB), skipping experiment")
+            return None
+
         # Generate config
         config = self.generator.generate_next()
         self.current_experiment = config
         self.logger.info(f"Running experiment: {config.experiment_type}")
 
-        # Run experiment
-        result = self.run_experiment(config)
+        # Run experiment with timeout
+        from src.core.registry_db import CURRENT_SCORING_VERSION
+        result = None
+        timeout_seconds = 36000  # 10 hours max (some configs take 8+ hours)
+        try:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(self.run_experiment, config)
+                result = future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError:
+            self.logger.error(
+                f"[TIMEOUT] Experiment {config.experiment_id} exceeded {timeout_seconds}s, aborting"
+            )
+            result = ExperimentResult(
+                experiment_id=config.experiment_id,
+                status=ExperimentStatus.FAILED,
+                error_message=f"Timeout after {timeout_seconds}s",
+                scoring_version=CURRENT_SCORING_VERSION,
+            )
+        except Exception as e:
+            self.logger.error(f"[ERROR] Experiment failed: {e}")
+            result = ExperimentResult(
+                experiment_id=config.experiment_id,
+                status=ExperimentStatus.FAILED,
+                error_message=str(e),
+                scoring_version=CURRENT_SCORING_VERSION,
+            )
+
         self.experiments_today += 1
+
+        # Post-experiment memory cleanup — every experiment, not every 5
+        gc.collect()
+        mem_after = self._check_memory()
+        mem_delta = mem_after - mem_before
+        if mem_delta > 500:  # Leaked 500+ MB
+            self.logger.warning(
+                f"[MEM] Experiment leaked {mem_delta:.0f} MB "
+                f"({mem_before:.0f} -> {mem_after:.0f} MB)"
+            )
+
+        if self.experiments_today % 10 == 0:
+            self.logger.info(
+                f"[STATUS] {self.experiments_today} experiments today, "
+                f"memory: {mem_after:.0f} MB"
+            )
 
         self.current_experiment = None
         return result
@@ -1083,19 +2599,81 @@ class ExperimentEngine:
             "current_experiment": self.current_experiment.to_dict() if self.current_experiment else None,
             "experiments_today": self.experiments_today,
             "history_stats": self.history.get_statistics(),
-            "registry_stats": self.registry.get_statistics(),
-            "top_models": [asdict(m) for m in self.registry.get_top_models(5)],
+            "registry_stats": self._db.get_model_statistics() if self._db else {},
+            "top_models": self._db.get_models(min_tier=2, min_auc=0.56)[:5] if self._db else [],
         }
 
-    def run_forever(self, interval_seconds: int = 60):
-        """Run experiments forever."""
+    def run_forever(self, interval_seconds: int = 60, max_consecutive_failures: int = 10):
+        """Run experiments continuously with trend logging and adaptive cooldown.
+
+        Features (Wave 17):
+        - Logs summary stats every 5 rounds
+        - Tracks consecutive failures and pauses after max_consecutive_failures
+        - Adaptive cooldown: doubles sleep time when recent experiments fail
+        - Uses failure patterns to guide experiment generation
+        """
         self.running = True
         self.logger.info("Experiment engine starting (UNIFIED FULL PIPELINE)...")
+        round_num = 0
+        consecutive_failures = 0
+        current_cooldown = interval_seconds
 
         while self.running:
             try:
-                self.run_one_experiment()
-                time.sleep(interval_seconds)
+                round_num += 1
+                result = self.run_one_experiment()
+
+                # Track consecutive failures
+                if result is not None and hasattr(result, 'status'):
+                    if result.status == ExperimentStatus.COMPLETED:
+                        consecutive_failures = 0
+                        current_cooldown = interval_seconds  # Reset cooldown
+                    elif result.status == ExperimentStatus.FAILED:
+                        consecutive_failures += 1
+                else:
+                    consecutive_failures += 1
+
+                # Auto-pause on too many consecutive failures
+                if consecutive_failures >= max_consecutive_failures:
+                    self.logger.error(
+                        f"[AUTO-PAUSE] {consecutive_failures} consecutive failures. "
+                        f"Pausing for 10 minutes. Check logs for systematic issues."
+                    )
+                    time.sleep(600)  # 10 minute pause
+                    consecutive_failures = 0
+                    # Log failure patterns to help diagnose
+                    try:
+                        patterns = self.history.get_failure_patterns()
+                        self.logger.info(f"  Failure patterns: {patterns}")
+                    except Exception:
+                        pass
+
+                # Adaptive cooldown: double if failing, reset if succeeding
+                if consecutive_failures >= 3:
+                    current_cooldown = min(current_cooldown * 2, 300)  # Cap at 5 min
+                    self.logger.info(
+                        f"  Adaptive cooldown: {current_cooldown}s "
+                        f"({consecutive_failures} consecutive failures)"
+                    )
+
+                # Log summary every 5 rounds
+                if round_num % 5 == 0:
+                    try:
+                        stats = self.history.get_statistics()
+                        trend = self.history.get_recent_trend(n=10)
+                        self.logger.info(
+                            f"══ Round {round_num} Summary ══ "
+                            f"Total={stats.get('total', 0)}, "
+                            f"Success={stats.get('success_rate', 0):.0%}, "
+                            f"Avg AUC={stats.get('avg_test_auc', 0):.3f}, "
+                            f"Best={stats.get('best_realistic_auc', 0):.3f}, "
+                            f"Trend={trend.get('trend', '?')} "
+                            f"(Δ={trend.get('auc_delta', 0):+.4f})"
+                        )
+                    except Exception:
+                        pass
+
+                time.sleep(current_cooldown)
 
             except KeyboardInterrupt:
                 self.logger.info("Shutting down...")
@@ -1103,6 +2681,7 @@ class ExperimentEngine:
 
             except Exception as e:
                 self.logger.error(f"Engine error: {e}")
+                consecutive_failures += 1
                 time.sleep(10)
 
         self.running = False

@@ -84,6 +84,7 @@ from src.model_registry_v2 import (
     MarketHours,
     GridSearchConfigGenerator,
 )
+from src.core.registry_db import get_registry_db
 
 logger = logging.getLogger("PIPELINE_V2")
 logging.basicConfig(
@@ -137,27 +138,22 @@ class DataLoader:
 
     @classmethod
     def _download_data(cls, dc) -> pd.DataFrame:
-        """Download data from API source."""
-        # Reuse existing download logic from train_robust_model
+        """Download data from API source, using DataManager's parquet cache."""
         try:
-            from src.train_robust_model import download_data as _download_legacy
+            # Use DataManager's persistent parquet cache (skip_freshness=True for experiments)
+            from src.phase_01_data_acquisition.data_manager import get_data_manager
 
-            # Map period to years
             period_map = {
                 "6M": 0.5, "1Y": 1, "2Y": 2, "3Y": 3,
                 "5Y": 5, "7Y": 7, "10Y": 10, "max": 10
             }
-            years = period_map.get(dc.period, 3.0)
+            years = getattr(dc, 'years', 0.0) or period_map.get(dc.period, 10.0)
 
-            # Temporarily override CONFIG for legacy function
-            import src.train_robust_model as trm
-            original_config = trm.CONFIG.copy()
-            trm.CONFIG["years_to_download"] = years
+            dm = get_data_manager()
+            df = dm.get_data(dc.symbol, years=int(years), skip_freshness=True)
 
-            df = _download_legacy()
-
-            # Restore original config
-            trm.CONFIG.update(original_config)
+            if df is None or len(df) == 0:
+                raise ValueError(f"DataManager returned no data for {dc.symbol}")
 
             # Filter by market hours
             if dc.market_hours == "regular_only" and "session" in df.columns:
@@ -170,8 +166,19 @@ class DataLoader:
             return df
 
         except Exception as e:
-            logger.error(f"[DATA] Download failed: {e}")
-            raise
+            logger.error(f"[DATA] DataManager load failed: {e}, falling back to legacy download")
+            # Fallback to legacy download
+            try:
+                from src.train_robust_model import download_data as _download_legacy
+                import src.train_robust_model as trm
+                original_config = trm.CONFIG.copy()
+                trm.CONFIG["years_to_download"] = years
+                df = _download_legacy()
+                trm.CONFIG.update(original_config)
+                return df
+            except Exception as e2:
+                logger.error(f"[DATA] Legacy download also failed: {e2}")
+                raise
 
     @classmethod
     def _load_csv(cls, dc) -> pd.DataFrame:
@@ -528,6 +535,14 @@ class ModelFactory:
             return ModelFactory._create_adaboost(mc)
         elif mc.model_type == "decision_tree":
             return ModelFactory._create_decision_tree(mc)
+        elif mc.model_type == "lda":
+            return ModelFactory._create_lda(mc)
+        elif mc.model_type == "bayesian_ridge":
+            return ModelFactory._create_bayesian_ridge(mc)
+        elif mc.model_type == "quantile_gb":
+            return ModelFactory._create_quantile_gb(mc)
+        elif mc.model_type == "svc_linear":
+            return ModelFactory._create_svc_linear(mc)
         else:
             # Default to logistic regression
             logger.warning(f"Unknown model type '{mc.model_type}', defaulting to logistic_l2")
@@ -785,6 +800,92 @@ class ModelFactory:
         )
 
 
+    @staticmethod
+    def _create_lda(mc):
+        from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+        from sklearn.calibration import CalibratedClassifierCV
+        base = LinearDiscriminantAnalysis(solver='svd')
+        return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+    @staticmethod
+    def _create_bayesian_ridge(mc):
+        from sklearn.linear_model import BayesianRidge
+        from sklearn.calibration import CalibratedClassifierCV
+        from sklearn.base import ClassifierMixin, BaseEstimator
+
+        class _BayesianRidgeClassifier(ClassifierMixin, BaseEstimator):
+            def __init__(self):
+                self._reg = BayesianRidge()
+                self.classes_ = np.array([0, 1])
+            def fit(self, X, y, **kw):
+                self._reg.fit(X, y.astype(float))
+                return self
+            def predict(self, X):
+                return (self._reg.predict(X) >= 0.5).astype(int)
+            def decision_function(self, X):
+                return self._reg.predict(X)
+            def get_params(self, deep=True):
+                return {}
+            def set_params(self, **params):
+                return self
+
+        return CalibratedClassifierCV(_BayesianRidgeClassifier(), cv=3, method='sigmoid')
+
+    @staticmethod
+    def _create_quantile_gb(mc):
+        from sklearn.ensemble import HistGradientBoostingRegressor
+        from sklearn.base import ClassifierMixin, BaseEstimator
+
+        class _QuantileGBClassifier(ClassifierMixin, BaseEstimator):
+            def __init__(self, max_iter=100, max_depth=3, learning_rate=0.1,
+                         min_samples_leaf=50, random_state=42):
+                self._alphas = [0.10, 0.50, 0.90]
+                self._models = {}
+                self.max_iter = max_iter
+                self.max_depth = max_depth
+                self.learning_rate = learning_rate
+                self.min_samples_leaf = min_samples_leaf
+                self.random_state = random_state
+                self.classes_ = np.array([0, 1])
+            def fit(self, X, y, **kw):
+                y_f = y.astype(float)
+                for alpha in self._alphas:
+                    m = HistGradientBoostingRegressor(
+                        loss='quantile', quantile=alpha,
+                        max_iter=self.max_iter, max_depth=self.max_depth,
+                        learning_rate=self.learning_rate,
+                        min_samples_leaf=self.min_samples_leaf,
+                        random_state=self.random_state,
+                    )
+                    m.fit(X, y_f)
+                    self._models[alpha] = m
+                return self
+            def predict_proba(self, X):
+                p = np.clip(self._models[0.50].predict(X), 0.01, 0.99)
+                return np.column_stack([1 - p, p])
+            def predict(self, X):
+                return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+        return _QuantileGBClassifier(
+            max_iter=min(getattr(mc, 'gb_n_estimators', 100), 100),
+            max_depth=min(getattr(mc, 'gb_max_depth', 3), 5),
+            learning_rate=min(getattr(mc, 'gb_learning_rate', 0.1), 0.1),
+            min_samples_leaf=50, random_state=mc.random_state,
+        )
+
+    @staticmethod
+    def _create_svc_linear(mc):
+        from sklearn.svm import LinearSVC
+        from sklearn.calibration import CalibratedClassifierCV
+        base = LinearSVC(
+            C=getattr(mc, 'svm_C', 0.1) * 0.1,
+            loss='squared_hinge', penalty='l2',
+            max_iter=2000, dual='auto',
+            random_state=mc.random_state,
+        )
+        return CalibratedClassifierCV(base, cv=3, method='sigmoid')
+
+
 class SampleWeighter:
     """Step 11: Create sample weights based on SampleWeightConfig."""
 
@@ -909,7 +1010,7 @@ class TrainingPipelineV2:
         max_retries: int = 1,
         verbose: bool = True,
     ):
-        self.registry = registry or ModelRegistryV2()
+        self.registry = registry or ModelRegistryV2(db=get_registry_db())
         self.models_dir = models_dir or (project_root / "models" / "pipeline_v2")
         self.models_dir.mkdir(parents=True, exist_ok=True)
         self.max_retries = max_retries
@@ -1048,7 +1149,10 @@ class TrainingPipelineV2:
                 pass
 
             if self.verbose:
-                traceback.print_exc()
+                try:
+                    traceback.print_exc()
+                except OSError:
+                    pass  # stdout invalid (Windows daemon/detached console)
 
             return entry
 
@@ -1221,13 +1325,37 @@ class TrainingPipelineV2:
         """Prepare feature matrix X, target y, and sample weights."""
         # Determine feature columns (exclude targets, metadata, leaky columns)
         # Use both exact matches AND pattern-based exclusion to prevent target leakage
+        # This list MUST stay in sync with FEATURE_EXCLUDE_COLS in experiment_runner.py
         exclude_exact = {
+            # OHLCV and basic price data
             "date", "timestamp",
+            "open", "high", "low", "close", "volume",
+            # Target variables and target-derived columns
             "is_up_day", "is_down_day",
             "low_before_high", "high_minutes", "low_minutes",
-            "day_return", "day_range",
-            "open", "high", "low", "close", "volume",
+            "day_return", "day_volume", "day_range",
+            "target_up", "target_timing", "soft_target_up",
+            "smoothed_target_up", "smoothed_target_timing",
+            "sample_weight", "timing_weight",
+            # Look-ahead features (require knowing prices after entry)
+            "max_gain_from_1015", "max_gain_from_1230",
+            # Metadata / quality columns
+            "has_premarket", "has_afterhours", "quality_score", "year",
+            # Anti-overfit metadata columns (not features)
+            "sample_weight_augment", "universe_id", "universe_type",
+            "synthetic_return", "real_return", "is_synthetic",
         }
+
+        # Same-day intraday features: computed from the SAME day's price data.
+        # For open-to-close prediction, they are look-ahead (not available at market open).
+        _intraday_times = ["0945", "1015", "1100", "1130", "1230", "1330", "1430", "1530"]
+        _intraday_prefixes = [
+            "return_at_", "high_to_", "low_to_", "range_to_",
+            "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",
+        ]
+        for _pfx in _intraday_prefixes:
+            for _tp in _intraday_times:
+                exclude_exact.add(f"{_pfx}{_tp}")
 
         # Patterns that indicate target/label columns (CRITICAL for leak prevention)
         exclude_patterns = [
@@ -1407,28 +1535,51 @@ class TrainingPipelineV2:
         )
 
         # Compute test metrics on held-out portion
+        # IMPORTANT: Re-fit transformers on train-only data to avoid test leakage
         test_size = int(len(y) * entry.data_config.test_ratio)
         if test_size > 0:
+            X_train_raw = X[:-test_size]
+            y_train_raw = y[:-test_size]
             X_test_raw = X[-test_size:]
             y_test = y[-test_size:]
 
-            # Apply same transformations
             try:
-                X_t = X_test_raw.copy()
-                if selector is not None:
-                    X_t = selector.transform(X_t)
-                if reducer is not None:
-                    X_t = reducer.transform(X_t)
-                if scaler is not None:
-                    X_t = scaler.transform(X_t)
-
-                probas = model.predict_proba(X_t)[:, 1]
-                preds = (probas > 0.5).astype(int)
-
+                from copy import deepcopy
                 from sklearn.metrics import (
                     roc_auc_score, accuracy_score, precision_score,
                     recall_score, f1_score, log_loss, brier_score_loss
                 )
+
+                # Re-fit pipeline on train-only data for unbiased test eval
+                X_tr = X_train_raw.copy()
+                X_te = X_test_raw.copy()
+
+                if selector is not None:
+                    eval_selector = deepcopy(selector)
+                    eval_selector.fit(X_tr, y_train_raw) if hasattr(eval_selector, 'fit') else None
+                    X_tr = eval_selector.transform(X_tr)
+                    X_te = eval_selector.transform(X_te)
+
+                if reducer is not None:
+                    eval_reducer = deepcopy(reducer)
+                    eval_reducer.fit(X_tr, y_train_raw) if hasattr(eval_reducer, 'fit') else None
+                    X_tr = eval_reducer.transform(X_tr)
+                    X_te = eval_reducer.transform(X_te)
+
+                if scaler is not None:
+                    eval_scaler = deepcopy(scaler)
+                    eval_scaler.fit(X_tr) if hasattr(eval_scaler, 'fit') else None
+                    X_te = eval_scaler.transform(X_te)
+
+                # Train a fresh evaluation model on properly transformed train data
+                eval_model = deepcopy(model)
+                try:
+                    eval_model.fit(X_tr, y_train_raw)
+                except Exception:
+                    pass  # Use the original model as fallback
+
+                probas = eval_model.predict_proba(X_te)[:, 1]
+                preds = (probas > 0.5).astype(int)
 
                 metrics.test_auc = roc_auc_score(y_test, probas) if len(np.unique(y_test)) > 1 else 0.5
                 metrics.accuracy = accuracy_score(y_test, preds)
@@ -1595,7 +1746,7 @@ def train_from_registry(
     Returns:
         List of trained ModelEntry objects
     """
-    registry = ModelRegistryV2()
+    registry = ModelRegistryV2(db=get_registry_db())
     pipeline = TrainingPipelineV2(registry=registry, verbose=verbose)
 
     if model_ids:
@@ -1689,5 +1840,5 @@ if __name__ == "__main__":
         print(f"  Train-Test Gap: {best.metrics.train_test_gap:.4f}")
 
     # Show registry summary
-    registry = ModelRegistryV2()
+    registry = ModelRegistryV2(db=get_registry_db())
     print(f"\n{registry.summary()}")

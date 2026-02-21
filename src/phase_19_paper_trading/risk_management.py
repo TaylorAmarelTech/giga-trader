@@ -8,8 +8,11 @@ Components:
   - OrderManager class
 """
 
+import json
 import logging
-from datetime import datetime
+import time
+from datetime import datetime, date
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 # Local imports
@@ -55,7 +58,7 @@ class RiskManager:
       - Time-based restrictions
     """
 
-    def __init__(self, config: Dict = None):
+    def __init__(self, config: Dict = None, state_path: Optional[Path] = None):
         self.config = config or TRADING_CONFIG
         self.daily_pnl = 0.0
         self.peak_equity = 0.0
@@ -63,13 +66,72 @@ class RiskManager:
         self.is_halted = False
         self.halt_reason = ""
         self.trade_log: List[TradeRecord] = []
+        # Consecutive loss tracking (CLAUDE.md: limit 5)
+        self.consecutive_losses = 0
+        self.max_consecutive_losses = 5
+        # State persistence path (optional)
+        self._state_path = state_path
+        self._restore_state()
+
+    def _restore_state(self):
+        """Restore daily risk state from disk if saved today."""
+        if not self._state_path:
+            return
+        try:
+            p = Path(self._state_path)
+            if not p.is_file():
+                return
+            with open(p, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            # Only restore if saved on the same trading day
+            saved_date = data.get("date", "")
+            if saved_date != date.today().isoformat():
+                logger.info("Risk state file is from a previous day, starting fresh")
+                return
+            self.daily_pnl = float(data.get("daily_pnl", 0.0))
+            self.peak_equity = float(data.get("peak_equity", 0.0))
+            self.daily_trades = int(data.get("daily_trades", 0))
+            self.consecutive_losses = int(data.get("consecutive_losses", 0))
+            self.is_halted = bool(data.get("is_halted", False))
+            self.halt_reason = str(data.get("halt_reason", ""))
+            logger.info(
+                f"Risk state restored: pnl={self.daily_pnl:.2f}, "
+                f"trades={self.daily_trades}, "
+                f"consec_losses={self.consecutive_losses}"
+            )
+        except (json.JSONDecodeError, ValueError, TypeError) as e:
+            logger.warning(f"Invalid risk state format: {e}")
+        except IOError as e:
+            logger.warning(f"Could not read risk state file: {e}")
+
+    def _persist_state(self):
+        """Persist current daily risk state to disk."""
+        if not self._state_path:
+            return
+        try:
+            from src.core.state_manager import atomic_write_json
+            data = {
+                "date": date.today().isoformat(),
+                "daily_pnl": self.daily_pnl,
+                "peak_equity": self.peak_equity,
+                "daily_trades": self.daily_trades,
+                "consecutive_losses": self.consecutive_losses,
+                "is_halted": self.is_halted,
+                "halt_reason": self.halt_reason,
+                "updated_at": datetime.now().isoformat(),
+            }
+            atomic_write_json(Path(self._state_path), data)
+        except Exception as e:
+            logger.debug(f"Could not persist risk state: {e}")
 
     def reset_daily(self):
         """Reset daily counters."""
         self.daily_pnl = 0.0
         self.daily_trades = 0
+        self.consecutive_losses = 0
         self.is_halted = False
         self.halt_reason = ""
+        self._persist_state()
         logger.info("Daily risk counters reset")
 
     def update_pnl(self, pnl: float, equity: float):
@@ -93,6 +155,22 @@ class RiskManager:
             self.halt_reason = f"Max drawdown reached: {drawdown:.2%}"
             logger.warning(self.halt_reason)
 
+        self._persist_state()
+
+    def record_trade_result(self, pnl: float):
+        """Record trade P&L for consecutive loss tracking."""
+        if pnl < 0:
+            self.consecutive_losses += 1
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                self.is_halted = True
+                self.halt_reason = (
+                    f"Consecutive loss limit reached: {self.consecutive_losses} losses"
+                )
+                logger.warning(self.halt_reason)
+        else:
+            self.consecutive_losses = 0
+        self._persist_state()
+
     def can_trade(self) -> Tuple[bool, str]:
         """Check if trading is allowed."""
         if self.is_halted:
@@ -101,6 +179,10 @@ class RiskManager:
         # Check trade count
         if self.daily_trades >= self.config["max_daily_trades"]:
             return False, f"Daily trade limit reached: {self.daily_trades}"
+
+        # Check consecutive losses
+        if self.consecutive_losses >= self.max_consecutive_losses:
+            return False, f"Consecutive loss limit reached: {self.consecutive_losses}"
 
         # Check time
         now = datetime.now().time()
@@ -159,6 +241,7 @@ class RiskManager:
                 return False, "Already have short position", 0
 
         self.daily_trades += 1
+        self._persist_state()
         return True, "OK", quantity
 
     def update_trailing_stop(
@@ -227,21 +310,52 @@ class OrderManager:
       - Order cancellation
     """
 
+    MAX_RETRIES = 3
+    RETRY_BASE_DELAY = 2.0  # seconds, doubles each retry
+
     def __init__(self, client: AlpacaPaperClient):
         self.client = client
         self.pending_orders: Dict[str, Dict] = {}
         self.filled_orders: List[Dict] = []
+
+    def _submit_with_retry(self, submit_fn, description: str) -> Optional[str]:
+        """Submit an order with exponential backoff retry on transient failures."""
+        last_error = None
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                order_id = submit_fn()
+                if order_id:
+                    return order_id
+                # None return means client-side rejection (no retry)
+                logger.warning(f"Order rejected by client: {description}")
+                return None
+            except Exception as e:
+                last_error = e
+                if attempt < self.MAX_RETRIES - 1:
+                    delay = self.RETRY_BASE_DELAY * (2 ** attempt)
+                    logger.warning(
+                        f"Order submission failed (attempt {attempt + 1}/{self.MAX_RETRIES}): "
+                        f"{description} — {e}. Retrying in {delay:.1f}s..."
+                    )
+                    time.sleep(delay)
+                else:
+                    logger.error(
+                        f"Order submission failed after {self.MAX_RETRIES} attempts: "
+                        f"{description} — {e}"
+                    )
+        return None
 
     def execute_signal(
         self,
         signal: TradingSignal,
         quantity: int,
     ) -> Optional[str]:
-        """Execute trading signal."""
+        """Execute trading signal with retry on transient failures."""
         if signal.signal_type == SignalType.HOLD:
             return None
 
         side = OrderSide.BUY if signal.signal_type == SignalType.BUY else OrderSide.SELL
+        description = f"{side.value} {quantity} {signal.symbol}"
 
         if TRADING_CONFIG["use_limit_orders"] and signal.entry_price:
             # Use limit order
@@ -250,18 +364,20 @@ class OrderManager:
             else:
                 limit_price = signal.entry_price * (1 - TRADING_CONFIG["limit_offset_pct"])
 
-            order_id = self.client.submit_limit_order(
-                symbol=signal.symbol,
-                qty=quantity,
-                side=side,
-                limit_price=limit_price,
+            order_id = self._submit_with_retry(
+                lambda: self.client.submit_limit_order(
+                    symbol=signal.symbol, qty=quantity,
+                    side=side, limit_price=limit_price,
+                ),
+                description=f"LIMIT {description} @ {limit_price:.2f}",
             )
         else:
             # Use market order
-            order_id = self.client.submit_market_order(
-                symbol=signal.symbol,
-                qty=quantity,
-                side=side,
+            order_id = self._submit_with_retry(
+                lambda: self.client.submit_market_order(
+                    symbol=signal.symbol, qty=quantity, side=side,
+                ),
+                description=f"MARKET {description}",
             )
 
         if order_id:
@@ -274,7 +390,7 @@ class OrderManager:
 
         return order_id
 
-    def close_position(self, position: Position, reason: str = "", tracker=None) -> Optional[str]:
+    def close_position(self, position: Position, reason: str = "", tracker=None, risk_manager: "RiskManager" = None) -> Optional[str]:
         """Close an existing position."""
         side = OrderSide.SELL if position.side == "long" else OrderSide.BUY
 
@@ -293,10 +409,15 @@ class OrderManager:
             dynamic_thresholds.update_trade_history(profit_pct)
             logger.info(f"Trade P&L: {profit_pct:.2%}")
 
-        order_id = self.client.submit_market_order(
-            symbol=position.symbol,
-            qty=position.quantity,
-            side=side,
+            # Track consecutive wins/losses
+            if risk_manager is not None:
+                risk_manager.record_trade_result(pnl)
+
+        order_id = self._submit_with_retry(
+            lambda: self.client.submit_market_order(
+                symbol=position.symbol, qty=position.quantity, side=side,
+            ),
+            description=f"CLOSE {position.symbol} ({reason})",
         )
 
         if order_id:
@@ -319,10 +440,27 @@ class OrderManager:
     def check_pending_orders(self) -> List[str]:
         """Check status of pending orders and handle timeouts."""
         filled = []
-        cancelled = []
 
         for order_id, order_info in list(self.pending_orders.items()):
-            status = self.client.get_order_status(order_id)
+            try:
+                status = self.client.get_order_status(order_id)
+            except Exception as e:
+                # Network error checking status — don't remove, will retry next cycle
+                age = (datetime.now() - order_info["submitted_at"]).total_seconds()
+                if age > TRADING_CONFIG["order_timeout_seconds"] * 3:
+                    # Orphan detection: pending 3x longer than timeout, likely stuck
+                    logger.warning(f"Orphan order detected (age={age:.0f}s): {order_id} — {e}")
+                    try:
+                        self.client.cancel_order(order_id)
+                        del self.pending_orders[order_id]
+                    except Exception as cancel_err:
+                        logger.error(
+                            f"Failed to cancel orphan order {order_id}: {cancel_err} "
+                            f"— keeping in pending for next cycle"
+                        )
+                else:
+                    logger.debug(f"Could not check order status: {order_id} — {e}")
+                continue
 
             if status == "filled":
                 filled.append(order_id)
@@ -331,7 +469,6 @@ class OrderManager:
                 logger.info(f"Order filled: {order_id}")
 
             elif status in ["cancelled", "expired", "rejected"]:
-                cancelled.append(order_id)
                 del self.pending_orders[order_id]
                 logger.info(f"Order {status}: {order_id}")
 
@@ -339,7 +476,10 @@ class OrderManager:
                 # Check timeout
                 age = (datetime.now() - order_info["submitted_at"]).total_seconds()
                 if age > TRADING_CONFIG["order_timeout_seconds"]:
-                    self.client.cancel_order(order_id)
+                    try:
+                        self.client.cancel_order(order_id)
+                    except Exception as e:
+                        logger.warning(f"Could not cancel timed-out order {order_id}: {e}")
                     del self.pending_orders[order_id]
                     logger.info(f"Order cancelled (timeout): {order_id}")
 

@@ -39,8 +39,8 @@ load_dotenv(project_root / ".env")
 # ═══════════════════════════════════════════════════════════════════════════════
 DATA_CONFIG = {
     "cache_dir": project_root / "data" / "cache",
-    "min_years": 5,
-    "max_years": 10,
+    "min_years": 10,
+    "max_years": 15,
     "default_symbol": "SPY",
     "chunk_days": 30,  # Download in 30-day chunks
     "metadata_file": "data_metadata.json",
@@ -232,6 +232,8 @@ class DataManager:
                 if end_str.isdigit() or not end_str or end_str == "0":
                     return True, "Invalid end_date in cache metadata"
                 end = pd.to_datetime(end_str)
+                if pd.isna(end):
+                    return True, "End date is invalid (NaT)"
                 hours_old = (datetime.now() - end.to_pydatetime().replace(tzinfo=None)).total_seconds() / 3600
 
                 # During trading hours, update more frequently
@@ -251,7 +253,7 @@ class DataManager:
     def download_data(
         self,
         symbol: str = "SPY",
-        years: int = 5,
+        years: int = 10,
         include_extended: bool = True,
         progress_callback=None,
     ) -> pd.DataFrame:
@@ -366,7 +368,7 @@ class DataManager:
     def update_cache(
         self,
         symbol: str = "SPY",
-        years: int = 5,
+        years: int = 10,
     ) -> pd.DataFrame:
         """
         Update cache with new data (incremental if possible).
@@ -437,14 +439,27 @@ class DataManager:
     def get_data(
         self,
         symbol: str = "SPY",
-        years: int = 5,
+        years: int = 10,
         force_refresh: bool = False,
+        skip_freshness: bool = False,
     ) -> pd.DataFrame:
         """
         Get data - from cache if available, otherwise download.
 
         This is the main entry point for getting data.
+
+        Args:
+            symbol: Stock symbol
+            years: Years of history needed
+            force_refresh: Force re-download regardless of cache
+            skip_freshness: If True, use cache if it exists with enough data
+                           (skip market-hours staleness check). Use for experiments.
         """
+        if skip_freshness and not force_refresh:
+            cached = self.get_cached_data(symbol)
+            if cached is not None and len(cached) > 100_000:
+                return cached
+
         needs_update, reason = self.needs_update(symbol)
 
         if force_refresh or needs_update:
@@ -517,10 +532,10 @@ def get_data_manager() -> DataManager:
     return _data_manager
 
 
-def get_spy_data(years: int = 5, force_refresh: bool = False) -> pd.DataFrame:
+def get_spy_data(years: int = 10, force_refresh: bool = False, skip_freshness: bool = False) -> pd.DataFrame:
     """Convenience function to get SPY data."""
     dm = get_data_manager()
-    return dm.get_data("SPY", years=years, force_refresh=force_refresh)
+    return dm.get_data("SPY", years=years, force_refresh=force_refresh, skip_freshness=skip_freshness)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -544,7 +559,7 @@ if __name__ == "__main__":
     print(f"\n[Update Needed] {needs_update} - {reason}")
 
     # Get data (cached or download)
-    df = dm.get_data("SPY", years=5)
+    df = dm.get_data("SPY", years=10)
 
     if df is not None and len(df) > 0:
         # Validate

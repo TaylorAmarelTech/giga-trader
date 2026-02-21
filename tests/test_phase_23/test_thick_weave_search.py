@@ -442,8 +442,8 @@ class TestThickWeaveSearch:
         config = ThickWeaveConfig()
         assert config.n_initial_threads == 6
         assert config.max_total_evaluations == 200
-        assert config.tier1_wmes_threshold == 0.35
-        assert config.thick_path_threshold == 0.5
+        assert config.tier1_wmes_threshold == 0.45  # Wave 14: tightened from 0.35
+        assert config.thick_path_threshold == 0.60  # Wave 14: tightened from 0.5
 
 
 # =============================================================================

@@ -50,15 +50,41 @@ class LeakProofDimReducer(BaseEstimator, TransformerMixin):
         n_components = min(self.n_components, X_scaled.shape[1] - 1, X_scaled.shape[0] - 1)
 
         if self.method == "kernel_pca":
-            from sklearn.decomposition import KernelPCA
-            self.reducer_ = KernelPCA(
-                n_components=n_components,
-                kernel="rbf",
-                gamma=0.01,
-                random_state=self.random_state,
-                n_jobs=-1
-            )
-            self.reducer_.fit(X_scaled)
+            n_samples = X_scaled.shape[0]
+            MAX_SAMPLES_FOR_EXACT = 5000
+
+            if n_samples > MAX_SAMPLES_FOR_EXACT:
+                # Use Nystroem approximation to avoid O(n^2) memory
+                from sklearn.kernel_approximation import Nystroem
+                from sklearn.decomposition import PCA
+                from sklearn.pipeline import Pipeline
+
+                n_nystroem = min(200, n_samples // 10, max(X_scaled.shape[1], 50))
+                self.reducer_ = Pipeline([
+                    ("nystroem", Nystroem(
+                        kernel="rbf", gamma=0.01,
+                        n_components=n_nystroem,
+                        random_state=self.random_state, n_jobs=-1
+                    )),
+                    ("pca", PCA(n_components=n_components, random_state=self.random_state)),
+                ])
+                self.reducer_.fit(X_scaled)
+            else:
+                from sklearn.decomposition import KernelPCA
+                try:
+                    self.reducer_ = KernelPCA(
+                        n_components=n_components,
+                        kernel="rbf",
+                        gamma=0.01,
+                        random_state=self.random_state,
+                        n_jobs=-1
+                    )
+                    self.reducer_.fit(X_scaled)
+                except MemoryError:
+                    # Fallback to PCA on OOM
+                    from sklearn.decomposition import PCA
+                    self.reducer_ = PCA(n_components=n_components, random_state=self.random_state)
+                    self.reducer_.fit(X_scaled)
 
         elif self.method == "ica":
             from sklearn.decomposition import FastICA

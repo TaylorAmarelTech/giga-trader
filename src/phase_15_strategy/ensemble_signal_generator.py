@@ -66,7 +66,7 @@ class RobustEnsembleSignalGenerator:
     5. Confidence calibration for realistic probabilities
     """
 
-    def __init__(self):
+    def __init__(self, cascade_blend_weight: float = 0.15):
         # Initialize strategies
         self.strategies: Dict[str, BaseStrategy] = {
             "momentum": MomentumStrategy(),
@@ -80,13 +80,17 @@ class RobustEnsembleSignalGenerator:
         n_strategies = len(self.strategies)
         self.strategy_weights = {name: 1.0 / n_strategies for name in self.strategies}
 
+        # Temporal cascade blend weight (consistent with SignalGenerator)
+        self.cascade_blend_weight = max(0.0, min(1.0, cascade_blend_weight))
+
         # Anti-overfitting components
         self.drift_detector = ADWINDriftDetector()
         self.calibrator = ConfidenceCalibrator()
 
-        # Performance tracking
+        # Performance tracking (capped to prevent unbounded memory growth)
         self.signal_history: List[EnsembleSignal] = []
         self.outcome_history: List[Tuple[datetime, bool]] = []
+        self._max_history = 500
 
         # Dynamic thresholds (scale with volatility)
         self.base_buy_threshold = 0.3
@@ -153,10 +157,11 @@ class RobustEnsembleSignalGenerator:
             signal = strategy.generate_signal(sentiment_data, market_data, self.current_regime)
             strategy_signals[name] = signal
 
-        # Weighted combination
+        # Weighted combination (renormalize so contributing weights sum to 1.0)
         weighted_score = 0.0
         weighted_confidence = 0.0
         contributing = []
+        contributing_weight_sum = 0.0
 
         for name, signal in strategy_signals.items():
             weight = self.strategy_weights[name]
@@ -166,6 +171,12 @@ class RobustEnsembleSignalGenerator:
                 weighted_score += weight * signal.raw_score
                 weighted_confidence += weight * signal.confidence
                 contributing.append(name)
+                contributing_weight_sum += weight
+
+        # Renormalize so that contributing strategies fill the full weight range
+        if contributing_weight_sum > 0 and contributing_weight_sum < 1.0:
+            weighted_score /= contributing_weight_sum
+            weighted_confidence /= contributing_weight_sum
 
         # Incorporate temporal cascade if available
         if self.temporal_cascade is not None:
@@ -181,8 +192,8 @@ class RobustEnsembleSignalGenerator:
                     )
                     if cascade_result is not None:
                         cascade_score = (cascade_result.swing_direction - 0.5) * 2  # Scale to [-1, 1]
-                        cascade_weight = 0.15  # 15% weight for temporal cascade
-                        weighted_score = weighted_score * (1 - cascade_weight) + cascade_score * cascade_weight
+                        cw = self.cascade_blend_weight
+                        weighted_score = weighted_score * (1 - cw) + cascade_score * cw
                         contributing.append("temporal_cascade")
             except Exception as e:
                 logger.debug(f"Temporal cascade unavailable: {e}")
@@ -241,6 +252,8 @@ class RobustEnsembleSignalGenerator:
         )
 
         self.signal_history.append(signal)
+        if len(self.signal_history) > self._max_history:
+            self.signal_history = self.signal_history[-self._max_history:]
 
         return signal
 
@@ -252,6 +265,8 @@ class RobustEnsembleSignalGenerator:
         Weights are updated only via periodic cross-validation.
         """
         self.outcome_history.append((datetime.now(), was_correct))
+        if len(self.outcome_history) > self._max_history:
+            self.outcome_history = self.outcome_history[-self._max_history:]
 
         # Update calibrator
         if self.signal_history:

@@ -27,10 +27,11 @@ from src.phase_18_persistence.registry_enums import (
 
 @pytest.fixture
 def tmp_registry(tmp_path):
-    """Create a ModelRegistryV2 with a temporary directory."""
-    registry_dir = tmp_path / "registry"
+    """Create a ModelRegistryV2 with a temporary SQLite database."""
+    from src.core.registry_db import RegistryDB
+    db = RegistryDB(db_path=tmp_path / "test.db")
     models_dir = tmp_path / "artifacts"
-    return ModelRegistryV2(registry_dir=registry_dir, models_dir=models_dir)
+    return ModelRegistryV2(db=db, models_dir=models_dir)
 
 
 @pytest.fixture
@@ -54,7 +55,6 @@ def test_registry_creation(tmp_registry):
     """ModelRegistryV2 should initialize with empty models dict."""
     assert isinstance(tmp_registry, ModelRegistryV2)
     assert len(tmp_registry.models) == 0
-    assert tmp_registry.registry_dir.exists()
     assert tmp_registry.models_dir.exists()
 
 
@@ -155,17 +155,18 @@ def test_query_by_target_type(tmp_registry):
 
 def test_persistence_across_instances(tmp_path):
     """Registry should persist to disk and reload."""
-    registry_dir = tmp_path / "registry"
+    from src.core.registry_db import RegistryDB
+    db = RegistryDB(db_path=tmp_path / "persist_test.db")
     models_dir = tmp_path / "artifacts"
 
     # Create and populate
-    reg1 = ModelRegistryV2(registry_dir=registry_dir, models_dir=models_dir)
+    reg1 = ModelRegistryV2(db=db, models_dir=models_dir)
     entry = ModelEntry(target_type=TargetType.SWING.value)
     entry.metrics.cv_auc = 0.80
     reg1.register(entry)
     saved_id = entry.model_id
 
-    # Reload from same directory
-    reg2 = ModelRegistryV2(registry_dir=registry_dir, models_dir=models_dir)
+    # Reload from same DB
+    reg2 = ModelRegistryV2(db=db, models_dir=models_dir)
     assert len(reg2.models) == 1
     assert saved_id in reg2.models

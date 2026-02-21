@@ -7,7 +7,8 @@ Main integration function that combines all anti-overfitting measures:
   3. MAG Market Breadth Features (MAG3/5/6/7/10/15)
   4. Sector Breadth Features (S&P 500 Sectors)
   5. Volatility Regime Features (VXX-based)
-  6. Synthetic SPY Universes
+  6. Economic Indicator Features (yields, VIX, credit spreads)
+  7. Synthetic SPY Universes
 """
 
 import os
@@ -28,6 +29,7 @@ from src.phase_08_features_breadth.mag7_breadth import Mag7BreadthFeatures
 from src.phase_08_features_breadth.sector_breadth import SectorBreadthFeatures
 from src.phase_08_features_breadth.volatility_regime import VolatilityRegimeFeatures
 from src.phase_03_synthetic_data.synthetic_universe import SyntheticSPYGenerator
+from src.phase_08_features_breadth.economic_features import EconomicFeatures
 
 
 def integrate_anti_overfit(
@@ -39,7 +41,13 @@ def integrate_anti_overfit(
     use_mag_breadth: bool = True,  # MAG3/5/6/7/10/15 features
     use_sector_breadth: bool = True,  # Sector rotation features
     use_vol_regime: bool = True,  # Volatility regime features
+    use_economic_features: bool = True,  # Economic indicators (yields, VIX, credit)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
+    use_bear_universes: bool = True,  # Bear market synthetic series
+    bear_mean_shift_bps: Optional[List[int]] = None,
+    bear_vol_amplify_factor: float = 1.5,
+    bear_vol_dampen_factor: float = 0.7,
+    use_multiscale_bootstrap: bool = True,  # Multi-timescale regime bootstrap
 ) -> Tuple[pd.DataFrame, Dict]:
     """
     Integrate all anti-overfitting measures.
@@ -171,10 +179,40 @@ def integrate_anti_overfit(
                 print(f"    Market Condition: {vol_signal.get('market_condition', 'N/A')}")
                 print(f"    VXX Percentile: {vol_signal.get('vxx_percentile', 0):.1%}")
 
-    # 6. Synthetic SPY Universes (do last since it multiplies data)
+    # 6. Economic Indicator Features (yields, VIX, credit spreads)
+    if use_economic_features:
+        econ_features = EconomicFeatures()
+        econ_data = econ_features.download_economic_data(start_date, end_date)
+
+        if not econ_data.empty:
+            df_daily = econ_features.create_economic_features(df_daily)
+            metadata["economic_features"] = True
+            metadata["economic_sources"] = list(econ_data.columns)
+
+            # Analyze current conditions
+            econ_signal = econ_features.analyze_current_conditions(df_daily)
+            if econ_signal:
+                if "vix_regime" in econ_signal:
+                    print(f"  VIX Regime: {econ_signal['vix_regime']} "
+                          f"(level={econ_signal.get('vix_level', 0):.1f})")
+                if "yield_curve_signal" in econ_signal:
+                    print(f"  Yield Curve: {econ_signal['yield_curve_signal']} "
+                          f"(10Y-5Y={econ_signal.get('yield_curve_10_5', 0):.2f})")
+                if "credit_signal" in econ_signal:
+                    print(f"  Credit: {econ_signal['credit_signal']}")
+
+    # 7. Synthetic SPY Universes (do last since it multiplies data)
     if use_synthetic:
         real_weight = 1 - synthetic_weight
-        synth_gen = SyntheticSPYGenerator(n_universes=10, real_weight=real_weight)
+        synth_gen = SyntheticSPYGenerator(
+            n_universes=20,
+            real_weight=real_weight,
+            use_bear_universes=use_bear_universes,
+            bear_mean_shift_bps=bear_mean_shift_bps,
+            bear_vol_amplify_factor=bear_vol_amplify_factor,
+            bear_vol_dampen_factor=bear_vol_dampen_factor,
+            use_multiscale_bootstrap=use_multiscale_bootstrap,
+        )
 
         # Reuse component prices if available, otherwise download
         if "component_prices" not in dir() or component_prices.empty:
@@ -191,7 +229,13 @@ def integrate_anti_overfit(
             universes.extend(component_universes)
 
             df_daily = synth_gen.create_augmented_dataset(df_daily, universes)
+            n_bear = sum(
+                1 for u in universes
+                if len(u) > 0 and "universe_type" in u.columns
+                and str(u["universe_type"].iloc[0]).startswith("bear_")
+            )
             metadata["n_universes"] = len(universes)
+            metadata["n_bear_universes"] = n_bear
             metadata["real_weight"] = real_weight
             metadata["synthetic_weight"] = synthetic_weight
             metadata["component_modified_universes"] = len(component_universes)

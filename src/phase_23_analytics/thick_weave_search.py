@@ -71,7 +71,7 @@ class ThickWeaveConfig:
     # Thread management
     n_initial_threads: int = 6
     max_active_threads: int = 12
-    min_thread_thickness: float = 0.3
+    min_thread_thickness: float = 0.45
     thread_merge_distance: float = 0.15
 
     # Exploration budget
@@ -84,13 +84,21 @@ class ThickWeaveConfig:
     detours_per_thread: int = 2
 
     # Multi-fidelity thresholds
-    tier1_wmes_threshold: float = 0.35
-    tier2_wmes_threshold: float = 0.45
+    tier1_wmes_threshold: float = 0.45
+    tier2_wmes_threshold: float = 0.55
     tier3_wmes_threshold: float = 0.55
 
     # Path thickness
     thickness_sample_size: int = 10
-    thick_path_threshold: float = 0.5
+    thick_path_threshold: float = 0.60
+
+    # Plateau-aware exploration
+    plateau_expand_factor: float = 1.15
+    plateau_shrink_factor: float = 0.85
+    plateau_threshold: float = 0.5
+    allocation_weight_pts: float = 0.6
+    allocation_weight_wmes: float = 0.4
+    min_allocation_floor: float = 0.1
 
     # Reproducibility
     random_seed: int = 42
@@ -282,10 +290,24 @@ class SearchThread:
             self.center_config = _clone_entry(config)
             logger.info(f"  Thread {self.thread_id}: new center (WMES={wmes:.4f})")
 
+    def plateau_score(self, threshold: float = 0.45) -> float:
+        """Fraction of evaluated configs above threshold. High = plateau, low = isolated peak."""
+        if len(self.evaluated_configs) < 3:
+            return 0.0
+        above = sum(1 for _, w in self.evaluated_configs if w >= threshold)
+        return above / len(self.evaluated_configs)
+
     def shrink_radius(self, factor: float = 0.8):
         """Narrow exploration radius (transition to exploit phase)."""
         for dim in self.neighborhood_radius:
             self.neighborhood_radius[dim] *= factor
+
+    def expand_radius(self, factor: float = 1.2, max_radius: float = 0.5):
+        """Widen exploration radius to explore plateau extent."""
+        for dim in self.neighborhood_radius:
+            self.neighborhood_radius[dim] = min(
+                self.neighborhood_radius[dim] * factor, max_radius
+            )
 
     def record_evaluation(self, config: ModelEntry, wmes: float, tier: int):
         """Record an evaluation result."""
@@ -307,6 +329,7 @@ class SearchThread:
             "n_evaluated": self.n_evaluated,
             "best_wmes": self.best_wmes,
             "current_thickness": self.current_thickness,
+            "plateau_score": self.plateau_score(),
             "thickness_history": self.thickness_history,
             "neighborhood_radius": self.neighborhood_radius,
             "varied_dims": list(self._varied_dims),
@@ -616,6 +639,12 @@ class MultiFidelityEvaluator:
                 n_features = getattr(result, 'n_features_final', 30) or 30
                 wmes = self.evaluator.evaluate_quick(cv_scores, n_features)
                 logger.info(f"    Tier 1: AUC={auc:.4f}, n_feat={n_features}, WMES={wmes:.4f}")
+                # Wave 14: Reality check — AUC > 0.85 likely leakage
+                if auc > 0.85:
+                    logger.warning(f"    Tier 1 REJECTED: AUC={auc:.4f} > 0.85 (likely leakage)")
+                    result.model = None
+                    del result
+                    return None
                 # Free trained model object to reclaim memory
                 result.model = None
                 del result
@@ -651,8 +680,15 @@ class MultiFidelityEvaluator:
                     cv_scores = [0.5]
                 n_features = getattr(result, 'n_features_final', 30) or 30
                 wmes = self.evaluator.evaluate_quick(cv_scores, n_features)
-                logger.info(f"    Tier 2: CV={np.mean(cv_scores):.4f}±{np.std(cv_scores):.4f}, "
+                mean_auc = float(np.mean(cv_scores))
+                logger.info(f"    Tier 2: CV={mean_auc:.4f}±{np.std(cv_scores):.4f}, "
                             f"n_feat={n_features}, WMES={wmes:.4f}")
+                # Wave 14: Reality check — AUC > 0.85 likely leakage
+                if mean_auc > 0.85:
+                    logger.warning(f"    Tier 2 REJECTED: mean AUC={mean_auc:.4f} > 0.85 (likely leakage)")
+                    result.model = None
+                    del result
+                    return None
                 # Free trained model object to reclaim memory
                 result.model = None
                 del result
@@ -917,11 +953,19 @@ class ThreadWeaver:
         return child
 
     def check_all_merges(self) -> List[Tuple[str, str]]:
-        """Find thread pairs close enough to merge."""
+        """Find thread pairs close enough to merge.
+
+        Both threads must have at least 3 evaluations before being
+        eligible for merge — prevents premature consolidation of
+        threads that haven't had a chance to explore.
+        """
         active = self.get_active_threads()
         merge_candidates = []
 
         for a, b in combinations(active, 2):
+            # Skip merge if either thread hasn't been explored enough
+            if a.n_evaluated < 3 or b.n_evaluated < 3:
+                continue
             overlap = self.scorer.compute_thread_overlap(a, b)
             if overlap > (1 - self.config.thread_merge_distance):
                 merge_candidates.append((a.thread_id, b.thread_id))
@@ -1208,11 +1252,24 @@ class ThickWeaveSearch:
         if configs_this_round <= 0:
             return
 
-        # Distribute configs across active threads (round-robin)
-        per_thread = max(1, configs_this_round // len(active))
-
+        # Weighted allocation: threads with higher PTS+WMES get more evals
+        weights = []
         for thread in active:
-            for _ in range(per_thread):
+            pts = thread.current_thickness
+            wmes = thread.best_wmes
+            score = (self.config.allocation_weight_pts * pts +
+                     self.config.allocation_weight_wmes * wmes)
+            weights.append(max(score, self.config.min_allocation_floor))
+
+        total_weight = sum(weights)
+        allocations = []
+        for w in weights:
+            frac = w / total_weight
+            alloc = max(1, int(round(frac * configs_this_round)))
+            allocations.append(alloc)
+
+        for thread, n_samples in zip(active, allocations):
+            for _ in range(n_samples):
                 if self.tracker.n_evaluated >= self.config.max_total_evaluations:
                     break
 
@@ -1334,12 +1391,31 @@ class ThickWeaveSearch:
                     if max(recent) - min(recent) < 0.05:
                         self.weaver.transition_to_exploit(thread)
 
-        # 5. Spawn new threads via crossover if we have capacity
+        # 5. Adaptive radius: expand plateaus, shrink isolated peaks
+        for thread in self.weaver.get_active_threads():
+            ps = thread.plateau_score(self.config.tier1_wmes_threshold)
+            if ps >= self.config.plateau_threshold and thread.n_evaluated >= 5:
+                thread.expand_radius(factor=self.config.plateau_expand_factor)
+                logger.info(f"  Thread {thread.thread_id}: EXPAND radius "
+                            f"(plateau_score={ps:.2f})")
+            elif ps < 0.25 and thread.n_evaluated >= 5:
+                thread.shrink_radius(factor=self.config.plateau_shrink_factor)
+                logger.info(f"  Thread {thread.thread_id}: SHRINK radius "
+                            f"(plateau_score={ps:.2f})")
+
+        # 6. Spawn new threads via crossover if we have capacity
         active = self.weaver.get_active_threads()
         if len(active) < self.config.max_active_threads and len(active) >= 2:
-            # Crossover the two best threads
-            sorted_threads = sorted(active, key=lambda t: t.best_wmes, reverse=True)
-            if len(sorted_threads) >= 2:
+            # Crossover preferring thick plateau threads
+            sorted_threads = sorted(
+                active,
+                key=lambda t: (0.5 * t.current_thickness + 0.5 * t.best_wmes),
+                reverse=True,
+            )
+            # Only crossover if at least one parent has decent plateau score
+            if (len(sorted_threads) >= 2 and
+                    max(t.plateau_score(self.config.tier1_wmes_threshold)
+                        for t in sorted_threads[:2]) >= 0.3):
                 child = self.weaver.crossover(sorted_threads[0], sorted_threads[1], self.rng)
                 if not self.tracker.is_explored(child):
                     new_thread = self.weaver.spawn_thread(child, "crossover")
@@ -1392,6 +1468,7 @@ class ThickWeaveSearch:
         for thread in all_threads:
             pts = self.scorer.compute_pts(thread)
             classification = self.scorer.classify_thickness(pts)
+            ps = thread.plateau_score(self.config.tier1_wmes_threshold)
             thread_reports.append({
                 "thread_id": thread.thread_id,
                 "model_family": thread.model_family,
@@ -1400,6 +1477,7 @@ class ThickWeaveSearch:
                 "best_wmes": thread.best_wmes,
                 "path_thickness_score": pts,
                 "thickness_class": classification,
+                "plateau_score": ps,
                 "thickness_history": thread.thickness_history,
                 "dim_coverage": thread.get_dimension_coverage(),
             })
@@ -1409,21 +1487,29 @@ class ThickWeaveSearch:
         # Extract thick paths
         thick_paths = [t for t in thread_reports if t["path_thickness_score"] >= self.config.thick_path_threshold]
 
-        # Production candidates: best config from each thick path
+        # Production candidates: best config from each thick path, with plateau bonus
         production_candidates = []
         for path_report in thick_paths:
             thread = self.weaver.threads[path_report["thread_id"]]
             if thread.evaluated_configs:
                 best_config, best_wmes = max(thread.evaluated_configs, key=lambda x: x[1])
+                ps = path_report.get("plateau_score", 0.0)
+                plateau_bonus = 1.0 + 0.15 * ps  # Up to 15% bonus for perfect plateau
+                adjusted_wmes = best_wmes * plateau_bonus
                 production_candidates.append({
                     "thread_id": path_report["thread_id"],
                     "model_family": path_report["model_family"],
                     "wmes": best_wmes,
+                    "adjusted_wmes": adjusted_wmes,
+                    "plateau_score": ps,
                     "pts": path_report["path_thickness_score"],
                     "config_hash": best_config.get_config_hash(),
                     "model_type": _get_nested_attr(best_config, "model_config.model_type"),
                     "dim_reduction": _get_nested_attr(best_config, "dim_reduction_config.method"),
                 })
+
+        # Sort by adjusted_wmes (plateau-favoring) instead of raw wmes
+        production_candidates.sort(key=lambda c: c["adjusted_wmes"], reverse=True)
 
         report = {
             "search_stats": {
@@ -1452,10 +1538,12 @@ class ThickWeaveSearch:
         logger.info(f"  Best overall WMES: {report['best_overall_wmes']:.4f}")
 
         if production_candidates:
-            logger.info("\n  Production Candidates:")
+            logger.info("\n  Production Candidates (ranked by adjusted WMES):")
             for cand in production_candidates:
                 logger.info(f"    {cand['thread_id']}: WMES={cand['wmes']:.4f}, "
-                            f"PTS={cand['pts']:.3f}, model={cand['model_type']}")
+                            f"adj_WMES={cand['adjusted_wmes']:.4f}, "
+                            f"PTS={cand['pts']:.3f}, plateau={cand['plateau_score']:.2f}, "
+                            f"model={cand['model_type']}")
 
         return report
 

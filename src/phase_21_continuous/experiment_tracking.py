@@ -6,17 +6,16 @@ Data structures and utilities for tracking experiments, models, and their perfor
 Includes:
   - ExperimentStatus enum
   - ExperimentResult dataclass
-  - ModelRecord dataclass
   - ExperimentGenerator class
-  - ExperimentHistory class
-  - ModelRegistry class
+  - ExperimentHistory class (SQLite-backed via RegistryDB)
   - compute_realistic_backtest_metrics() function
   - calibrate_probabilities() function
 """
 
-import json
 import random
+import hashlib
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -41,15 +40,13 @@ ENGINE_CONFIG = {
     "results_dir": project_root / "experiments",
     "models_dir": project_root / "models",
     "max_experiments_per_hour": 20,
-    "experiment_history_file": project_root / "experiments" / "experiment_history.json",
-    "model_registry_file": project_root / "experiments" / "model_registry.json",
     # Transaction cost settings for realistic backtesting
     "slippage_bps": 5,      # 5 basis points per trade
     "commission_bps": 1,    # 1 basis point per trade
     "min_trade_return": 0.001,  # 0.1% minimum to cover costs
     # Walk-forward validation settings
-    "purge_days": 5,        # Days to purge between train/test
-    "embargo_days": 2,      # Days to embargo after test
+    "purge_days": 10,       # Days to purge between train/test (Wave 25: SPY autocorrelation)
+    "embargo_days": 3,      # Days to embargo after test (Wave 25: extra safety margin)
     # Leak-proof CV (recommended - fixes data leakage)
     "use_leak_proof_cv": True,  # Use leak-proof pipeline
     "use_model_ensemble": True,  # Ensemble models for reduced overfitting
@@ -92,6 +89,7 @@ def compute_realistic_backtest_metrics(
             "n_trades": 0,
             "avg_trade_return": 0.0,
             "avg_trade_return_net": 0.0,
+            "transaction_cost_per_trade": 0.0,
         }
 
     # Transaction costs per trade (entry + exit = 2x)
@@ -121,13 +119,23 @@ def compute_realistic_backtest_metrics(
     avg_trade_return_gross = total_return_gross / n_trades if n_trades > 0 else 0
     avg_trade_return_net = total_return_net / n_trades if n_trades > 0 else 0
 
-    # Sharpe calculations
+    # Sharpe calculations — computed on TRADING DAYS ONLY to avoid inflation
+    # from zero-return non-trading days in the denominator.
+    # Subtract daily risk-free rate (~4% annual / 252 trading days) per standard Sharpe definition.
     sharpe_gross = 0.0
     sharpe_net = 0.0
-    if np.std(gross_returns) > 0:
-        sharpe_gross = np.mean(gross_returns) / np.std(gross_returns) * np.sqrt(252)
-    if np.std(net_returns) > 0:
-        sharpe_net = np.mean(net_returns) / np.std(net_returns) * np.sqrt(252)
+    risk_free_daily = 0.04 / 252  # ~0.000159 per day
+    trade_gross = gross_returns[trade_mask]
+    trade_net = net_returns[trade_mask]
+    if len(trade_gross) > 1 and np.std(trade_gross) > 0:
+        # Annualize by estimated trades per year, not calendar days
+        trades_per_year = n_trades / max(len(signals), 1) * 252
+        excess_gross = np.mean(trade_gross) - risk_free_daily
+        sharpe_gross = excess_gross / np.std(trade_gross) * np.sqrt(max(trades_per_year, 1))
+    if len(trade_net) > 1 and np.std(trade_net) > 0:
+        trades_per_year = n_trades / max(len(signals), 1) * 252
+        excess_net = np.mean(trade_net) - risk_free_daily
+        sharpe_net = excess_net / np.std(trade_net) * np.sqrt(max(trades_per_year, 1))
 
     # Max drawdown (on net returns)
     cumulative = np.cumsum(net_returns)
@@ -232,6 +240,34 @@ class ExperimentResult:
     wmes_score: float = 0.0
     stability_score: float = 0.0
     fragility_score: float = 0.0
+    permutation_auc_mean: float = 0.0  # Mean AUC on shuffled targets (should be ~0.50)
+    permutation_passed: bool = True     # False if permutation test detected leakage
+
+    # Walk-forward validation
+    walk_forward_aucs: List[float] = field(default_factory=list)
+    worst_window_auc: float = 0.0
+    walk_forward_passed: bool = False
+
+    # Regime-specific evaluation
+    regime_auc_low_vol: float = 0.0
+    regime_auc_high_vol: float = 0.0
+    regime_sensitive: bool = False
+
+    # Multi-faceted stability (Wave 29)
+    stability_bootstrap: float = 0.0
+    stability_feature_dropout: float = 0.0
+    stability_seed: float = 0.0
+    stability_prediction: float = 0.0
+    stability_composite: float = 0.0
+
+    # Advanced stability metrics (Wave 30) — flexible dict for all methods
+    # Stores PSI, CSI, adversarial, ECE, DSR, SFI, meta_label, knockoff,
+    # ADWIN, CPCV, stability_selection, rashomon, SHAP, conformal, composite
+    stability_advanced: Dict[str, Any] = field(default_factory=dict)
+
+    # Wave 35: Training augmentation metrics
+    nested_cv_auc: float = 0.0           # Honest nested CV estimate
+    distillation_gap: float = 0.0        # AUC gap: teacher - distilled student
 
     # Metadata
     n_features_initial: int = 0
@@ -242,6 +278,9 @@ class ExperimentResult:
     model_path: str = ""
     error_message: str = ""
 
+    # Scoring version (Wave 36: tracks measurement methodology)
+    scoring_version: str = ""
+
     def to_dict(self) -> Dict:
         d = asdict(self)
         d["status"] = self.status.value
@@ -250,60 +289,13 @@ class ExperimentResult:
 
     @classmethod
     def from_dict(cls, d: Dict) -> "ExperimentResult":
+        d = dict(d)  # Copy to avoid mutating caller
         d["status"] = ExperimentStatus(d["status"])
         d["config"] = ExperimentConfig.from_dict(d["config"])
+        # Filter unknown fields for forward compatibility
+        valid_keys = {f.name for f in fields(cls)}
+        d = {k: v for k, v in d.items() if k in valid_keys}
         return cls(**d)
-
-
-@dataclass
-class ModelRecord:
-    """Record of a trained model and its performance."""
-    model_id: str
-    experiment_id: str
-    created_at: str
-    model_path: str
-    config: Dict
-
-    # Performance metrics
-    cv_auc: float = 0.0
-    test_auc: float = 0.0
-    backtest_sharpe: float = 0.0
-    backtest_win_rate: float = 0.0
-    backtest_total_return: float = 0.0
-    wmes_score: float = 0.0
-
-    # Robustness metrics (from multi-tier gates)
-    stability_score: float = 0.0   # 0-1, higher = more stable (HP plateau)
-    fragility_score: float = 1.0   # 0-1, lower = more robust (dim/param perturbation)
-    train_test_gap: float = 0.0    # train_auc - test_auc
-    tier: int = 1                  # 1=registry, 2=paper-eligible, 3=live-eligible
-
-    # Live performance (from paper trading)
-    live_trades: int = 0
-    live_win_rate: float = 0.0
-    live_total_return: float = 0.0
-    live_sharpe: float = 0.0
-
-    def __post_init__(self):
-        """Handle unknown fields from future JSON versions."""
-        pass
-
-    def score(self, weights: Dict = None) -> float:
-        """Calculate weighted score for ranking, with stability bonus."""
-        weights = weights or {
-            "cv_auc": 0.15,
-            "backtest_sharpe": 0.25,
-            "wmes_score": 0.20,
-            "live_sharpe": 0.25,
-            "stability_score": 0.15,
-        }
-        base = sum(
-            weights.get(k, 0) * getattr(self, k, 0)
-            for k in weights
-        )
-        # Penalize fragile models (fragility 0=robust, 1=fragile)
-        fragility_penalty = self.fragility_score * 0.1
-        return base - fragility_penalty
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -314,25 +306,106 @@ class ExperimentGenerator:
     Generates new experiment configurations.
 
     Creates variants of the base config for systematic exploration.
+
+    Wave 31: Configurable min/max weight bounds prevent any single method,
+    model type, or experiment type from monopolizing the search space.
     """
 
-    def __init__(self):
+    # ── Configurable weight bounds (Wave 31) ──
+    # These prevent overfitting to any single option. After raw weights are
+    # set (by hand or by adaptive logic), _clamp_weights() enforces these
+    # bounds and re-normalizes so weights sum to 1.0.
+    MIN_EXPERIMENT_TYPE_WEIGHT = 0.03   # Every experiment type gets at least 3%
+    MAX_EXPERIMENT_TYPE_WEIGHT = 0.25   # No type gets more than 25%
+    MIN_DIM_REDUCTION_WEIGHT = 0.05     # Every dim method gets at least 5%
+    MAX_DIM_REDUCTION_WEIGHT = 0.25     # No dim method gets more than 25%
+    MIN_MODEL_TYPE_WEIGHT = 0.03        # Every model type gets at least 3%
+    MAX_MODEL_TYPE_WEIGHT = 0.15        # No model type gets more than 15%
+
+    def __init__(self, history: "ExperimentHistory" = None):
         self.base_config = create_default_config("base")
         self.best_configs: List[ExperimentConfig] = []
+        self.history = history  # Used for failure-pattern avoidance
 
         # Experiment type weights
-        # ANTI-OVERFITTING: Weight regularization and ensemble higher
-        self.experiment_weights = {
-            "hyperparameter": 0.20,  # Reduced from 0.30
-            "feature_subset": 0.15,  # Reduced from 0.20
-            "dim_reduction": 0.15,
-            "regularization": 0.25,  # Increased from 0.15 - key for anti-overfit
-            "ensemble": 0.15,  # Increased from 0.10 - diverse ensemble helps
-            "threshold": 0.10,
-        }
+        # Wave 31: Regime experiments increased — they have
+        # 0% failure rate, 100% WF pass rate, and highest stability scores.
+        # ensemble type reduced (worst WF pass + WMES corruption source).
+        self.experiment_weights = self._clamp_weights({
+            "hyperparameter": 0.14,
+            "feature_subset": 0.09,
+            "dim_reduction": 0.12,
+            "regularization": 0.09,
+            "ensemble": 0.05,
+            "threshold": 0.06,
+            "regime_lowvol": 0.16,
+            "regime_highvol": 0.16,
+            "feature_research": 0.07,   # Wave 32: iterative feature discovery
+            "augmented_training": 0.08, # Wave 35: training augmentations
+        }, self.MIN_EXPERIMENT_TYPE_WEIGHT, self.MAX_EXPERIMENT_TYPE_WEIGHT)
+
+    @staticmethod
+    def _clamp_weights(
+        weights: Dict[str, float],
+        min_weight: float,
+        max_weight: float,
+    ) -> Dict[str, float]:
+        """Clamp all weights to [min_weight, max_weight] and re-normalize to sum=1.0.
+
+        Ensures no single option can monopolize or be starved out of the search.
+        Normalizes first, then iteratively clamps and redistributes until stable.
+        """
+        # Normalize to sum=1.0 first (handles raw integer weights like 16, 13, etc.)
+        w = dict(weights)
+        total = sum(w.values())
+        if total > 0:
+            w = {k: v / total for k, v in w.items()}
+
+        # Iteratively clamp and re-normalize until stable
+        for _ in range(10):
+            changed = False
+            for k in w:
+                if w[k] < min_weight:
+                    w[k] = min_weight
+                    changed = True
+                elif w[k] > max_weight:
+                    w[k] = max_weight
+                    changed = True
+            # Re-normalize
+            total = sum(w.values())
+            if total > 0:
+                w = {k: v / total for k, v in w.items()}
+            if not changed:
+                break
+        return w
 
     def generate_next(self) -> ExperimentConfig:
-        """Generate next experiment configuration."""
+        """Generate next experiment configuration (with dedup).
+
+        Uses ExperimentHistory._config_hash() for consistent hashing
+        across both history storage and novelty checking.
+        """
+        # Get previously tried configs to avoid duplicates
+        tried_hashes = set()
+        if self.history is not None:
+            try:
+                tried_hashes = self.history.get_config_hashes()
+            except Exception:
+                pass
+
+        # Try up to 10 times to generate a novel config
+        for _attempt in range(10):
+            config = self._generate_config()
+            if not tried_hashes:
+                return config
+            h = ExperimentHistory._config_hash(config)
+            if h is None or h not in tried_hashes:
+                return config
+
+        return config  # After 10 attempts, return whatever we have
+
+    def _generate_config(self) -> ExperimentConfig:
+        """Generate a single experiment configuration."""
         # Choose experiment type
         exp_type = random.choices(
             list(self.experiment_weights.keys()),
@@ -345,8 +418,41 @@ class ExperimentGenerator:
         else:
             base = self.base_config
 
-        # Generate variant based on type
-        # ANTI-OVERFITTING: Use aggressive regularization across all experiment types
+        # ── ALWAYS vary foundational dimensions (base layer) ──
+        # This ensures ALL experiment types explore diverse dim_reduction
+        # methods and model types, not just the 15% that explicitly vary them.
+        # Wave 31: All weights are clamped by MIN/MAX bounds to guarantee
+        # diversity — no method can monopolize or be starved out.
+        _dim_methods = ["pca", "kernel_pca", "ica", "umap", "ensemble_plus", "mutual_info", "agglomeration"]
+        _dim_raw = dict(zip(_dim_methods, [16, 13, 17, 11, 11, 16, 16]))
+        _dim_clamped = self._clamp_weights(_dim_raw, self.MIN_DIM_REDUCTION_WEIGHT, self.MAX_DIM_REDUCTION_WEIGHT)
+        base.dim_reduction.method = random.choices(
+            list(_dim_clamped.keys()), weights=list(_dim_clamped.values()))[0]
+        base.dim_reduction.feature_selection_method = random.choice(["mutual_info", "f_classif"])
+        base.dim_reduction.mi_n_features = random.choice([20, 25, 30, 35, 40])
+        base.dim_reduction.target_dimensions = random.randint(15, 50)
+        _model_types = [
+            "logistic_l2", "logistic_l1", "logistic_elastic",
+            "gradient_boosting", "hist_gradient_boosting",
+            "ensemble", "diverse_ensemble",
+            "mlp_small", "mlp_medium", "sgd_linear",
+            "ridge", "extra_trees", "bagged_linear",
+            # Wave 35: 5 new complexity baselines
+            "lda", "gaussian_nb", "svc_linear", "bayesian_ridge", "quantile_gb",
+        ]
+        _model_raw = dict(zip(_model_types, [
+            8, 9, 8,       # logistic variants
+            5, 7,           # tree boosting
+            6, 7,           # ensembles
+            9, 8, 8,        # MLP + SGD
+            8, 5, 8,        # ridge, extra_trees, bagged_linear
+            7, 7, 7, 7, 8,  # Wave 35: lda, nb, svc, bayesian, quantile
+        ]))
+        _model_clamped = self._clamp_weights(_model_raw, self.MIN_MODEL_TYPE_WEIGHT, self.MAX_MODEL_TYPE_WEIGHT)
+        base.model.model_type = random.choices(
+            list(_model_clamped.keys()), weights=list(_model_clamped.values()))[0]
+
+        # Generate variant based on type — applies experiment-specific overrides on top
         if exp_type == "hyperparameter":
             # AGGRESSIVE: C range 0.001-0.5 (was 0.01-10.0), fewer/shallower trees
             config = create_experiment_variant(base, exp_type,
@@ -369,10 +475,26 @@ class ExperimentGenerator:
 
         elif exp_type == "dim_reduction":
             methods = ["pca", "kernel_pca", "ica", "umap", "ensemble_plus"]
+            # Avoid dim_reduction methods that fail >60% of the time (Wave 17)
+            if self.history is not None:
+                try:
+                    patterns = self.history.get_failure_patterns()
+                    bad_methods = patterns.get("dim_methods_failing", {})
+                    n_fail = patterns.get("n_failures", 0)
+                    if n_fail > 10:
+                        methods = [
+                            m for m in methods
+                            if bad_methods.get(m, 0) / max(n_fail, 1) < 0.6
+                        ] or methods  # Fallback to all if everything fails
+                except Exception:
+                    pass
             config = create_experiment_variant(base, exp_type,
                 method=random.choice(methods),
                 target_dimensions=random.randint(25, 50),  # Fewer dimensions
             )
+            # Also vary feature selection method and n_features
+            config.dim_reduction.feature_selection_method = random.choice(["mutual_info", "f_classif"])
+            config.dim_reduction.mi_n_features = random.choice([20, 25, 30, 35, 40])
 
         elif exp_type == "regularization":
             # AGGRESSIVE: Much stronger regularization
@@ -385,6 +507,8 @@ class ExperimentGenerator:
             # Add diverse_ensemble option - combines models with DIFFERENT regularization
             ensemble_options = [
                 ["logistic_l2", "gradient_boosting"],
+                ["logistic_l1", "gradient_boosting"],
+                ["logistic_l2", "logistic_l1"],
                 ["logistic_l2"],
                 ["gradient_boosting"],
             ]
@@ -395,6 +519,7 @@ class ExperimentGenerator:
                 )
             else:
                 config = create_experiment_variant(base, exp_type,
+                    model_type="ensemble",  # Explicit: ensemble type needs ensemble model_type
                     ensemble_models=random.choice(ensemble_options),
                 )
 
@@ -406,12 +531,55 @@ class ExperimentGenerator:
                 stop_loss_pct=random.uniform(0.005, 0.02),
             )
 
+        elif exp_type == "regime_lowvol":
+            config = create_experiment_variant(base, exp_type)
+            config.data.regime_filter = "low_vol"
+            config.description = "Train on low-volatility periods only"
+
+        elif exp_type == "regime_highvol":
+            config = create_experiment_variant(base, exp_type)
+            config.data.regime_filter = "high_vol"
+            config.description = "Train on high-volatility periods only"
+
+        elif exp_type == "feature_research":
+            # Wave 32: Feature research — generate candidate features to test
+            config = create_experiment_variant(base, exp_type)
+            config.description = "Feature research: testing candidate features"
+            try:
+                from src.phase_09_features_calendar.feature_researcher import FeatureResearchAgent
+                agent = FeatureResearchAgent()
+                config.metadata["candidates"] = agent.get_candidates_for_config(n=3)
+            except Exception as fr_err:
+                logging.warning(f"[FEATURE_RESEARCH] Could not generate candidates: {fr_err}")
+                config.metadata["candidates"] = []
+
+        elif exp_type == "augmented_training":
+            # Wave 35: Training augmentations — test anti-overfitting training mods
+            config = create_experiment_variant(base, exp_type)
+            aug = config.training_augmentation
+            r = random.random()
+            if r < 0.40:
+                aug.use_temporal_decay = True
+                aug.temporal_decay_lambda = random.uniform(0.3, 1.0)
+                config.description = f"Augmented: temporal decay (lambda={aug.temporal_decay_lambda:.2f})"
+            elif r < 0.70:
+                aug.use_noise_injection = True
+                aug.noise_sigma = random.uniform(0.05, 0.20)
+                config.description = f"Augmented: noise injection (sigma={aug.noise_sigma:.2f})"
+            elif r < 0.90:
+                aug.use_nested_cv = True
+                config.description = "Augmented: nested CV (honest evaluation)"
+            else:
+                config.description = "Augmented: distillation baseline"
+            # Distillation always on by default
+
         else:
             config = create_experiment_variant(base, "hyperparameter")
 
         # Generate new experiment name
         config.experiment_name = f"{exp_type}_{datetime.now().strftime('%H%M%S')}"
-        config.description = f"Auto-generated {exp_type} experiment"
+        if not config.description.startswith("Train on"):
+            config.description = f"Auto-generated {exp_type} experiment"
 
         return config
 
@@ -426,164 +594,189 @@ class ExperimentGenerator:
 # EXPERIMENT HISTORY
 # ═══════════════════════════════════════════════════════════════════════════════
 class ExperimentHistory:
-    """Stores and queries experiment history."""
+    """Stores and queries experiment history via SQLite (RegistryDB)."""
 
-    def __init__(self, history_path: Path = None):
-        self.history_path = history_path or ENGINE_CONFIG["experiment_history_file"]
-        self.history_path.parent.mkdir(parents=True, exist_ok=True)
+    def __init__(self, db, **_kwargs):
+        self._db = db
+        self._lock = threading.Lock()
         self.results: List[ExperimentResult] = []
         self._load()
 
     def _load(self):
-        """Load history from disk."""
-        if self.history_path.exists():
-            try:
-                with open(self.history_path) as f:
-                    data = json.load(f)
-                    self.results = [ExperimentResult.from_dict(e) for e in data]
-            except Exception as e:
-                logging.warning(f"Could not load experiment history: {e}")
-                self.results = []
-
-    def _save(self):
-        """Save history to disk."""
-        data = [r.to_dict() for r in self.results]
-        with open(self.history_path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
+        """Load history from SQLite."""
+        try:
+            data = self._db.get_experiments()
+            self.results = [ExperimentResult.from_dict(e) for e in data]
+        except Exception as e:
+            logging.warning(f"Could not load experiment history: {e}")
+            self.results = []
 
     def add(self, result: ExperimentResult):
-        """Add experiment result to history."""
-        self.results.append(result)
-        self._save()
+        """Add experiment result to history (thread-safe)."""
+        with self._lock:
+            self.results.append(result)
+            self._db.add_experiment(
+                result.to_dict(),
+                self._config_hash(result.config),
+            )
+
+    @staticmethod
+    def _config_hash(cfg) -> Optional[str]:
+        """Compute hash of an ExperimentConfig's key hyperparameters.
+
+        Covers dim_reduction, model, feature engineering, and CV settings
+        that define unique experiment configurations.
+        """
+        try:
+            key_parts = [
+                # Experiment type
+                str(cfg.experiment_type),
+                # Dimensionality reduction (all significant params)
+                str(getattr(cfg.dim_reduction, 'method', '')),
+                str(getattr(cfg.dim_reduction, 'target_dimensions', 0)),
+                str(getattr(cfg.dim_reduction, 'feature_selection_method', '')),
+                str(getattr(cfg.dim_reduction, 'mi_n_features', 0)),
+                str(getattr(cfg.dim_reduction, 'kpca_n_components', 0)),
+                str(getattr(cfg.dim_reduction, 'kpca_kernel', '')),
+                str(getattr(cfg.dim_reduction, 'ica_n_components', 0)),
+                str(getattr(cfg.dim_reduction, 'umap_n_components', 0)),
+                # Model (type + key hyperparameters)
+                str(getattr(cfg.model, 'model_type', '')),
+                str(getattr(cfg.model, 'regularization', '')),
+                str(getattr(cfg.model, 'l2_C', 0)),
+                str(getattr(cfg.model, 'gb_n_estimators', 0)),
+                str(getattr(cfg.model, 'gb_max_depth', 0)),
+                str(getattr(cfg.model, 'gb_learning_rate', 0)),
+                str(getattr(cfg.model, 'gb_min_samples_leaf', 0)),
+                str(getattr(cfg.model, 'gb_subsample', 0)),
+                # Feature engineering flags
+                str(getattr(cfg.feature_engineering, 'use_premarket_features', True)),
+                str(getattr(cfg.feature_engineering, 'use_afterhours_features', True)),
+                str(getattr(cfg.feature_engineering, 'use_pattern_recognition', True)),
+                str(getattr(cfg.feature_engineering, 'swing_threshold', 0)),
+                # CV settings
+                str(getattr(cfg.cross_validation, 'n_cv_folds', 5)),
+                str(getattr(cfg.cross_validation, 'use_soft_targets', True)),
+            ]
+            return hashlib.md5("|".join(key_parts).encode()).hexdigest()[:12]
+        except Exception:
+            return None
+
+    def get_config_hashes(self) -> set:
+        """Return set of config hashes for all previously attempted experiments.
+
+        Used by ExperimentGenerator to avoid re-running identical configs.
+        """
+        return self._db.get_config_hashes()
 
     def get_recent(self, n: int = 50) -> List[ExperimentResult]:
         """Get recent experiments."""
-        return self.results[-n:]
+        with self._lock:
+            return list(self.results[-n:])
 
     def get_by_status(self, status: ExperimentStatus) -> List[ExperimentResult]:
         """Filter by status."""
-        return [r for r in self.results if r.status == status]
+        with self._lock:
+            return [r for r in self.results if r.status == status]
 
     def get_statistics(self) -> Dict:
-        """Get experiment statistics."""
-        if not self.results:
-            return {"total": 0}
+        """Get experiment statistics (thread-safe).
 
-        completed = [r for r in self.results if r.status == ExperimentStatus.COMPLETED]
-        failed = [r for r in self.results if r.status == ExperimentStatus.FAILED]
-
-        return {
-            "total": len(self.results),
-            "completed": len(completed),
-            "failed": len(failed),
-            "success_rate": len(completed) / len(self.results) if self.results else 0,
-            "avg_duration": np.mean([r.duration_seconds for r in completed]) if completed else 0,
-            "avg_test_auc": np.mean([r.test_auc for r in completed]) if completed else 0,
-            "avg_wmes": np.mean([r.wmes_score for r in completed]) if completed else 0,
-            "best_test_auc": max([r.test_auc for r in completed]) if completed else 0,
-        }
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# MODEL REGISTRY
-# ═══════════════════════════════════════════════════════════════════════════════
-class ModelRegistry:
-    """Tracks all trained models and their performance."""
-
-    def __init__(self, registry_path: Path = None):
-        self.registry_path = registry_path or ENGINE_CONFIG["model_registry_file"]
-        self.registry_path.parent.mkdir(parents=True, exist_ok=True)
-        self.models: Dict[str, ModelRecord] = {}
-        self._load()
-
-    def _load(self):
-        """Load registry from disk (backward-compatible with old JSON)."""
-        if self.registry_path.exists():
-            try:
-                with open(self.registry_path) as f:
-                    data = json.load(f)
-                    # Filter to only known ModelRecord fields for backward compat
-                    known_fields = {f.name for f in fields(ModelRecord)}
-                    self.models = {}
-                    for k, v in data.items():
-                        filtered = {fk: fv for fk, fv in v.items() if fk in known_fields}
-                        self.models[k] = ModelRecord(**filtered)
-            except Exception as e:
-                logging.warning(f"Could not load model registry: {e}")
-                self.models = {}
-
-    def _save(self):
-        """Save registry to disk."""
-        data = {k: asdict(v) for k, v in self.models.items()}
-        with open(self.registry_path, 'w') as f:
-            json.dump(data, f, indent=2, default=str)
-
-    def _compute_tier(self, result: ExperimentResult) -> int:
-        """Compute quality tier based on robustness metrics.
-
-        Tier 1: Registry (AUC + gap + WMES)
-        Tier 2: Paper-eligible (Tier 1 + stability_score >= 0.50)
-        Tier 3: Live-eligible (Tier 2 + fragility < 0.35 + AUC >= 0.60)
+        Only includes completed experiments with AUC > 0 in averaging
+        to avoid contamination from partial failures.
         """
-        tier = 1  # Passed registration gate to get here
+        with self._lock:
+            if not self.results:
+                return {"total": 0}
 
-        # Tier 2: stability verified
-        if result.stability_score >= 0.50:
-            tier = 2
+            completed = [r for r in self.results if r.status == ExperimentStatus.COMPLETED]
+            failed = [r for r in self.results if r.status == ExperimentStatus.FAILED]
 
-            # Tier 3: fragility verified + higher AUC
-            if result.fragility_score < 0.35 and result.test_auc >= 0.60:
-                tier = 3
+            # Filter out completed-but-zero-AUC (partial failures) from averaging
+            scored = [r for r in completed if r.test_auc > 0]
 
-        return tier
+            # Wave 16: separate realistic best_auc (excluding leaky pre-Wave-14 results)
+            realistic = [r for r in scored if r.test_auc < 0.85]
+            return {
+                "total": len(self.results),
+                "completed": len(completed),
+                "failed": len(failed),
+                "scored": len(scored),
+                "success_rate": len(completed) / len(self.results) if self.results else 0,
+                "avg_duration": np.mean([r.duration_seconds for r in completed]) if completed else 0,
+                "avg_test_auc": np.mean([r.test_auc for r in scored]) if scored else 0,
+                "avg_wmes": np.mean([r.wmes_score for r in scored]) if scored else 0,
+                "best_test_auc": max([r.test_auc for r in scored]) if scored else 0,
+                "best_realistic_auc": max([r.test_auc for r in realistic]) if realistic else 0,
+            }
 
-    def register_model(self, result: ExperimentResult) -> str:
-        """Register a new model from experiment result."""
-        model_id = f"model_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+    def get_failure_patterns(self) -> Dict:
+        """Analyze which experiment configurations tend to fail.
 
-        train_test_gap = result.train_auc - result.test_auc if result.train_auc > 0 else 0.0
-        tier = self._compute_tier(result)
+        Returns dict with failure counts by dim_reduction method and model type,
+        plus overall failure rate for the last 20 experiments.
+        """
+        failed = [r for r in self.results if r.status == ExperimentStatus.FAILED]
+        if not failed:
+            return {"n_failures": 0, "dim_methods_failing": {}, "model_types_failing": {}}
 
-        record = ModelRecord(
-            model_id=model_id,
-            experiment_id=result.experiment_id,
-            created_at=datetime.now().isoformat(),
-            model_path=result.model_path,
-            config=result.config.to_dict(),
-            cv_auc=result.cv_auc_mean,
-            test_auc=result.test_auc,
-            backtest_sharpe=result.backtest_sharpe,
-            backtest_win_rate=result.backtest_win_rate,
-            backtest_total_return=result.backtest_total_return,
-            wmes_score=result.wmes_score,
-            stability_score=result.stability_score,
-            fragility_score=result.fragility_score,
-            train_test_gap=train_test_gap,
-            tier=tier,
-        )
+        dim_methods: Dict[str, int] = {}
+        model_types: Dict[str, int] = {}
+        for r in failed:
+            try:
+                dm = r.config.dim_reduction.method if hasattr(r.config, "dim_reduction") else "unknown"
+                dim_methods[dm] = dim_methods.get(dm, 0) + 1
+            except Exception:
+                pass
+            try:
+                mt = r.config.model.model_type if hasattr(r.config, "model") else "unknown"
+                model_types[mt] = model_types.get(mt, 0) + 1
+            except Exception:
+                pass
 
-        self.models[model_id] = record
-        self._save()
+        recent = self.results[-20:] if len(self.results) >= 20 else self.results
+        recent_failure_rate = sum(
+            1 for r in recent if r.status == ExperimentStatus.FAILED
+        ) / max(len(recent), 1)
 
-        return model_id
-
-    def get_top_models(self, n: int = 10) -> List[ModelRecord]:
-        """Get top N models by score."""
-        models = list(self.models.values())
-        models.sort(key=lambda m: m.score(), reverse=True)
-        return models[:n]
-
-    def get_statistics(self) -> Dict:
-        """Get registry statistics."""
-        if not self.models:
-            return {"total_models": 0}
-
-        records = list(self.models.values())
         return {
-            "total_models": len(records),
-            "avg_cv_auc": np.mean([r.cv_auc for r in records]),
-            "avg_backtest_sharpe": np.mean([r.backtest_sharpe for r in records]),
-            "best_cv_auc": max(r.cv_auc for r in records),
-            "best_backtest_sharpe": max(r.backtest_sharpe for r in records),
-            "best_wmes": max(r.wmes_score for r in records),
+            "n_failures": len(failed),
+            "dim_methods_failing": dim_methods,
+            "model_types_failing": model_types,
+            "recent_failure_rate": round(recent_failure_rate, 3),
         }
+
+    def get_recent_trend(self, n: int = 20) -> Dict:
+        """Detect if recent experiment quality is improving or degrading.
+
+        Compares the first half of the last N completed experiments to the
+        second half. A decline of >0.02 AUC flags the trend as 'declining'.
+        """
+        completed = [r for r in self.results if r.status == ExperimentStatus.COMPLETED
+                     and r.test_auc < 0.85]
+        recent = completed[-n:] if len(completed) >= n else completed
+
+        if len(recent) < 6:
+            return {"trend": "insufficient_data", "n_completed": len(recent)}
+
+        mid = len(recent) // 2
+        first_half_auc = float(np.mean([r.test_auc for r in recent[:mid]]))
+        second_half_auc = float(np.mean([r.test_auc for r in recent[mid:]]))
+        delta = second_half_auc - first_half_auc
+
+        if delta < -0.02:
+            trend = "declining"
+        elif delta > 0.02:
+            trend = "improving"
+        else:
+            trend = "stable"
+
+        return {
+            "trend": trend,
+            "first_half_auc": round(first_half_auc, 4),
+            "second_half_auc": round(second_half_auc, 4),
+            "auc_delta": round(delta, 4),
+            "n_completed": len(recent),
+        }
+
+

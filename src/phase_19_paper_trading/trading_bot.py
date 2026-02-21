@@ -14,6 +14,7 @@ import sys
 import json
 import time
 import logging
+import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
@@ -38,6 +39,7 @@ from src.phase_19_paper_trading.alpaca_client import (
 )
 from src.phase_19_paper_trading.signal_generator import SignalGenerator
 from src.phase_19_paper_trading.risk_management import RiskManager, OrderManager
+from src.core.state_manager import atomic_write_json
 
 # Alpaca imports
 try:
@@ -73,21 +75,50 @@ except ImportError:
 # LOGGING SETUP
 # ═══════════════════════════════════════════════════════════════════════════════
 def setup_logging():
-    """Setup logging configuration."""
+    """Setup logging configuration with rotation.
+
+    Uses RotatingFileHandler to cap each log file at 50 MB with 5 backups.
+    Also cleans up log files older than 30 days on each startup.
+    """
+    from logging.handlers import RotatingFileHandler
+
     log_dir = project_root / "logs"
     log_dir.mkdir(exist_ok=True)
 
     log_file = log_dir / f"trading_{datetime.now().strftime('%Y%m%d')}.log"
 
+    # Rotate at 50 MB, keep 5 backups per daily file
+    file_handler = RotatingFileHandler(
+        log_file, maxBytes=50 * 1024 * 1024, backupCount=5, encoding="utf-8",
+    )
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s [%(levelname)s] %(message)s",
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler(),
-        ]
+        handlers=[file_handler, logging.StreamHandler()],
     )
+
+    # Cleanup old log files (>30 days)
+    _cleanup_old_logs(log_dir, max_age_days=30)
+
     return logging.getLogger("GigaTrader")
+
+
+def _cleanup_old_logs(log_dir: Path, max_age_days: int = 30):
+    """Remove log files older than max_age_days."""
+    import os
+    cutoff = time.time() - max_age_days * 86400
+    cleaned = 0
+    for f in log_dir.glob("*.log*"):
+        try:
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+                cleaned += 1
+        except OSError:
+            pass
+    if cleaned > 0:
+        logging.getLogger("GigaTrader").info(f"Cleaned up {cleaned} old log files")
 
 
 logger = logging.getLogger("GigaTrader")
@@ -126,13 +157,16 @@ class PaperPerformanceTracker:
     dashboard consumption.
     """
 
-    def __init__(self, log_dir: Path = None):
+    def __init__(self, log_dir: Path = None, calibrator=None, max_predictions: int = 1000):
         self.log_dir = log_dir or (project_root / "logs")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.perf_file = self.log_dir / "paper_performance.json"
+        self.max_predictions = max_predictions
+        self._lock = threading.Lock()
 
         self.predictions: List[PredictionRecord] = []
         self.open_prediction: Optional[PredictionRecord] = None
+        self._calibrator = calibrator  # ConfidenceCalibrator instance
         self._load()
 
     def _load(self):
@@ -160,7 +194,7 @@ class PaperPerformanceTracker:
                 "summary": self.get_summary(),
                 "updated_at": datetime.now().isoformat(),
             }
-            self.perf_file.write_text(json.dumps(data, indent=2, default=str))
+            atomic_write_json(self.perf_file, data)
         except Exception as e:
             logger.warning(f"Could not save paper performance: {e}")
 
@@ -174,36 +208,49 @@ class PaperPerformanceTracker:
             confidence=getattr(signal, "confidence", 0.0),
             entry_price=entry_price,
         )
-        self.open_prediction = pred
-        self._save()
+        with self._lock:
+            self.open_prediction = pred
+            self._save()
 
     def record_close(self, exit_price: float, reason: str = ""):
         """Record position close and evaluate prediction accuracy."""
-        if not self.open_prediction:
-            return
+        with self._lock:
+            if not self.open_prediction:
+                return
 
-        pred = self.open_prediction
-        pred.exit_price = exit_price
-        pred.closed_at = datetime.now().isoformat()
-        pred.close_reason = reason
+            pred = self.open_prediction
+            pred.exit_price = exit_price
+            pred.closed_at = datetime.now().isoformat()
+            pred.close_reason = reason
 
-        # Calculate actual return
-        if pred.entry_price > 0:
-            if pred.signal_type == "BUY":
-                pred.actual_return = (exit_price - pred.entry_price) / pred.entry_price
-                pred.predicted_correct = pred.actual_return > 0
-            elif pred.signal_type == "SELL":
-                pred.actual_return = (pred.entry_price - exit_price) / pred.entry_price
-                pred.predicted_correct = pred.actual_return > 0
+            # Calculate actual return
+            if pred.entry_price > 0:
+                if pred.signal_type == "BUY":
+                    pred.actual_return = (exit_price - pred.entry_price) / pred.entry_price
+                    pred.predicted_correct = pred.actual_return > 0
+                elif pred.signal_type == "SELL":
+                    pred.actual_return = (pred.entry_price - exit_price) / pred.entry_price
+                    pred.predicted_correct = pred.actual_return > 0
 
-        self.predictions.append(pred)
-        self.open_prediction = None
-        self._save()
+            self.predictions.append(pred)
+            # Cap history to prevent unbounded memory growth
+            if len(self.predictions) > self.max_predictions:
+                self.predictions = self.predictions[-self.max_predictions:]
+            self.open_prediction = None
+            self._save()
+
+        # Feed outcome to calibrator if available (outside lock)
+        self._calibrator_callback(pred.confidence, pred.predicted_correct)
 
         logger.info(
             f"[PERF] {pred.signal_type} {'CORRECT' if pred.predicted_correct else 'WRONG'} "
             f"return={pred.actual_return:.4f} conf={pred.confidence:.3f}"
         )
+
+    def _calibrator_callback(self, confidence: float, was_correct: bool):
+        """Feed trade outcome to signal generator's confidence calibrator."""
+        if self._calibrator is not None:
+            self._calibrator.add_outcome(confidence, was_correct)
 
     def get_summary(self) -> dict:
         """Get cumulative performance summary."""
@@ -259,6 +306,32 @@ class PaperPerformanceTracker:
             "win_rate_by_confidence": win_rate_by_conf,
         }
 
+    def check_win_rate_degradation(
+        self, window: int = 20, min_win_rate: float = 0.40
+    ) -> tuple:
+        """Check if recent win rate has degraded below threshold.
+
+        Args:
+            window: Number of recent closed trades to evaluate.
+            min_win_rate: Minimum acceptable win rate (0-1).
+
+        Returns:
+            (is_ok, message) — is_ok=False means circuit breaker should trigger.
+        """
+        with self._lock:
+            closed = [p for p in self.predictions if p.exit_price > 0]
+        if len(closed) < window:
+            return True, f"Insufficient trades ({len(closed)}/{window}) for win rate check"
+        recent = closed[-window:]
+        wins = sum(1 for p in recent if p.predicted_correct)
+        win_rate = wins / len(recent)
+        if win_rate < min_win_rate:
+            return False, (
+                f"Rolling win rate {win_rate:.1%} over last {window} trades "
+                f"is below minimum {min_win_rate:.1%}"
+            )
+        return True, f"Rolling win rate OK: {win_rate:.1%} over last {window} trades"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 5. TRADING BOT
@@ -276,10 +349,19 @@ class TradingBot:
       6. Update stops
     """
 
+    # Keys that MUST be present in TRADING_CONFIG
+    _REQUIRED_CONFIG_KEYS = (
+        "symbol", "max_position_pct", "max_daily_trades",
+        "max_daily_loss_pct", "market_open", "market_close",
+        "stop_loss_pct", "order_timeout_seconds",
+    )
+
     def __init__(self):
+        self._validate_config()
         self.client = AlpacaPaperClient()
         self.signal_generator = SignalGenerator()
-        self.risk_manager = RiskManager()
+        risk_state_path = project_root / "logs" / "risk_state.json"
+        self.risk_manager = RiskManager(state_path=risk_state_path)
         self.order_manager = OrderManager(self.client)
 
         self.is_running = False
@@ -293,8 +375,11 @@ class TradingBot:
             logger.info("Position history tracker initialized")
 
         # Initialize performance tracker (real-world model accuracy)
-        self.performance_tracker = PaperPerformanceTracker()
-        logger.info("Paper performance tracker initialized")
+        # Wire calibrator from signal generator so trade outcomes feed back
+        calibrator = getattr(self.signal_generator, 'calibrator', None)
+        self.performance_tracker = PaperPerformanceTracker(calibrator=calibrator)
+        logger.info("Paper performance tracker initialized"
+                     + (" (with calibrator)" if calibrator else ""))
 
         # Initialize supervision service
         self.supervisor = None
@@ -316,7 +401,56 @@ class TradingBot:
                 logger.warning(f"Failed to initialize supervision: {e}")
                 self.supervisor = None
 
+        # Reconcile any existing positions from previous session
+        self._reconcile_positions_on_startup()
+
         logger.info("Trading Bot initialized")
+
+    def _validate_config(self):
+        """Validate TRADING_CONFIG has all required keys with sensible values."""
+        missing = [k for k in self._REQUIRED_CONFIG_KEYS if k not in TRADING_CONFIG]
+        if missing:
+            raise ValueError(f"TRADING_CONFIG missing required keys: {missing}")
+
+        # Validate percentage ranges
+        for pct_key in ("max_position_pct", "max_daily_loss_pct", "stop_loss_pct"):
+            val = TRADING_CONFIG.get(pct_key, 0)
+            if not (0 < val <= 1.0):
+                raise ValueError(f"TRADING_CONFIG['{pct_key}'] must be 0 < x <= 1.0, got {val}")
+
+        # Validate time ordering
+        if TRADING_CONFIG["market_open"] >= TRADING_CONFIG["market_close"]:
+            raise ValueError("TRADING_CONFIG: market_open must be before market_close")
+
+        logger.info("TRADING_CONFIG validated successfully")
+
+    def _reconcile_positions_on_startup(self):
+        """Check for open positions left over from a previous session.
+
+        On startup, queries Alpaca for any existing positions and logs them.
+        This ensures the operator knows about orphaned positions that may
+        need manual attention.
+        """
+        try:
+            symbol = TRADING_CONFIG["symbol"]
+            position = self.client.get_position(symbol)
+            if position:
+                logger.warning(
+                    f"[RECONCILIATION] Found existing {position.side} position "
+                    f"in {symbol}: qty={position.quantity}, "
+                    f"entry={position.entry_price}, "
+                    f"unrealized_pnl={position.unrealized_pnl}"
+                )
+                # Update risk manager with current position state
+                account = self.client.get_account()
+                if account and account.get("equity"):
+                    self.risk_manager.update_pnl(
+                        position.unrealized_pnl, account["equity"]
+                    )
+            else:
+                logger.info("[RECONCILIATION] No existing positions found — starting clean")
+        except Exception as e:
+            logger.warning(f"Position reconciliation failed: {e}")
 
     def fetch_latest_data(self, lookback_days: int = 30) -> pd.DataFrame:
         """Fetch latest 1-minute data."""
@@ -355,8 +489,28 @@ class TradingBot:
     def run_once(self):
         """Run one iteration of the trading loop."""
         try:
+            # Reset daily risk counters at start of new trading day
+            today = datetime.now().date()
+            if not hasattr(self, '_last_trading_date') or self._last_trading_date != today:
+                self.risk_manager.reset_daily()
+                self._last_trading_date = today
+
             # Get account info
             account = self.client.get_account()
+            if not account or not account.get("equity"):
+                logger.warning("Could not get account info from Alpaca")
+                return
+
+            # Margin / buying power safety check
+            if account.get("buying_power", 0) < 0:
+                logger.error(
+                    "[MARGIN ALERT] Buying power is negative "
+                    f"(${account['buying_power']:.2f}) — halting trading"
+                )
+                self.risk_manager.is_halted = True
+                self.risk_manager.halt_reason = "Negative buying power (margin call)"
+                self.risk_manager._persist_state()
+                return
 
             # Get current position
             position = self.client.get_position(TRADING_CONFIG["symbol"])
@@ -364,7 +518,7 @@ class TradingBot:
             # Get current price
             current_price = self.client.get_latest_price(TRADING_CONFIG["symbol"])
 
-            if current_price <= 0:
+            if not current_price or current_price <= 0:
                 logger.warning("Could not get current price")
                 return
 
@@ -434,6 +588,20 @@ class TradingBot:
                     logger.info(f"Position closed: {reason}")
                     return
 
+            # ═══════════════════════════════════════════════════════════════
+            # MODEL FRESHNESS CHECK (Wave 17)
+            # ═══════════════════════════════════════════════════════════════
+            if not self._check_model_freshness():
+                return
+
+            # ═══════════════════════════════════════════════════════════════
+            # WIN RATE DEGRADATION CHECK (Wave 22)
+            # ═══════════════════════════════════════════════════════════════
+            wr_ok, wr_msg = self.performance_tracker.check_win_rate_degradation()
+            if not wr_ok:
+                logger.error(f"[CIRCUIT BREAKER] {wr_msg} — skipping signal generation")
+                return
+
             # Generate new signal
             should_generate = (
                 self.last_signal_time is None or
@@ -443,7 +611,7 @@ class TradingBot:
             if should_generate:
                 df_1min = self.fetch_latest_data()
 
-                if len(df_1min) > 0:
+                if len(df_1min) > 0 and self._validate_data(df_1min):
                     signal = self.signal_generator.generate_signal(df_1min, current_price)
                     self.last_signal_time = datetime.now()
 
@@ -480,6 +648,98 @@ class TradingBot:
 
         except Exception as e:
             logger.error(f"Error in trading loop: {e}")
+
+    # Required OHLCV columns for signal generation
+    _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
+
+    def _validate_data(self, df: pd.DataFrame) -> bool:
+        """Validate input data quality before signal generation.
+
+        Checks for required OHLCV columns, excessive NaN values, and
+        positive prices. Returns False (skip this cycle) if data is too
+        degraded to produce reliable signals.
+        """
+        # Check required columns exist
+        missing = self._REQUIRED_COLUMNS - set(c.lower() for c in df.columns)
+        if missing:
+            logger.warning(f"Data missing required columns: {missing}")
+            return False
+
+        # Map to actual column names (case-insensitive)
+        col_map = {c.lower(): c for c in df.columns}
+        ohlcv = [col_map[c] for c in ("open", "high", "low", "close", "volume")]
+
+        # Check NaN fraction in OHLCV — reject if >20% NaN
+        nan_frac = df[ohlcv].isna().mean().mean()
+        if nan_frac > 0.20:
+            logger.warning(f"Data quality too low: {nan_frac:.1%} NaN in OHLCV columns")
+            return False
+
+        # Check that close prices are positive
+        close_col = col_map["close"]
+        if (df[close_col].dropna() <= 0).any():
+            logger.warning("Data contains non-positive close prices")
+            return False
+
+        return True
+
+    def _check_model_freshness(self) -> bool:
+        """Check if loaded models are fresh enough for trading.
+
+        Returns True if trading should proceed, False to skip this cycle.
+        Logs warnings for stale models and halts trading if all models are
+        older than 60 days.
+        """
+        try:
+            selector = getattr(self.signal_generator, 'dynamic_selector', None)
+            if selector is None or not selector.candidates:
+                return True  # No dynamic selector — can't check, proceed
+
+            # Check model registry for staleness
+            registry_path = getattr(selector, 'registry_path', None)
+            if registry_path is None or not Path(str(registry_path)).exists():
+                return True
+
+            import json as _json
+            with open(registry_path) as f:
+                registry_data = _json.load(f)
+
+            oldest_age = 0
+            n_stale = 0
+            n_total = 0
+            for model_id, record in registry_data.items():
+                created_at = record.get("created_at", "")
+                if not created_at:
+                    continue
+                try:
+                    created = datetime.fromisoformat(created_at)
+                    age_days = (datetime.now() - created).days
+                    oldest_age = max(oldest_age, age_days)
+                    n_total += 1
+                    if age_days > 30:
+                        n_stale += 1
+                except (ValueError, TypeError):
+                    continue
+
+            if n_total > 0 and n_stale == n_total and oldest_age > 60:
+                logger.error(
+                    f"[CIRCUIT BREAKER] ALL {n_total} models are stale "
+                    f"(oldest: {oldest_age} days). Halting trading until "
+                    f"fresh models are trained."
+                )
+                return False
+
+            if n_stale > 0:
+                logger.warning(
+                    f"[MODEL FRESHNESS] {n_stale}/{n_total} models are >30 days old "
+                    f"(oldest: {oldest_age} days)"
+                )
+
+            return True
+
+        except Exception as e:
+            logger.warning(f"Model freshness check failed: {e}")
+            return True  # On error, allow trading to continue
 
     def _write_dashboard_data(self, account: dict, position, current_price: float):
         """Write current state to JSON in orchestrator-compatible format for dashboard."""
@@ -562,10 +822,10 @@ class TradingBot:
                     "models_required": gate_status.get("min_models_required", 0),
                     "best_model_auc": gate_status.get("best_model_auc", 0.0),
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                logger.debug(f"Gate check for dashboard failed: {e}")
 
-            (logs_dir / "status.json").write_text(json.dumps(status, indent=2, default=str))
+            atomic_write_json(logs_dir / "status.json", status)
         except Exception as e:
             logger.debug(f"Could not write dashboard data: {e}")
 

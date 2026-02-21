@@ -65,7 +65,8 @@ class SignalGenerator:
     - Adaptive entry/exit window matching
     """
 
-    def __init__(self, model_dir: Path = None, use_dynamic_selector: bool = True):
+    def __init__(self, model_dir: Path = None, use_dynamic_selector: bool = True,
+                 cascade_blend_weight: float = 0.15):
         self.model_dir = model_dir or TRADING_CONFIG["model_dir"]
         self.models = {}
         self.scaler = None
@@ -74,10 +75,20 @@ class SignalGenerator:
         self.use_leak_proof = False  # Initialize here - will be updated in _load_models() if leak-proof model loaded
         self.model_config = None
 
+        # Temporal cascade blend weight (0.0 = ignore cascade, 1.0 = cascade only)
+        self.cascade_blend_weight = max(0.0, min(1.0, cascade_blend_weight))
+
         # Temporal cascade integration
         self.temporal_cascade = None
         if TEMPORAL_CASCADE_AVAILABLE:
             self._init_temporal_cascade()
+
+        # Confidence calibrator — learns from actual trade outcomes
+        try:
+            from src.phase_15_strategy.signal_detectors import ConfidenceCalibrator
+            self.calibrator = ConfidenceCalibrator()
+        except ImportError:
+            self.calibrator = None
 
         # Dynamic model selector - MANDATORY for proper signal generation
         # No fallback to static models to ensure all signals use properly trained/validated models
@@ -290,6 +301,59 @@ class SignalGenerator:
         except Exception as e:
             logger.error(f"Failed to load models: {e}")
 
+    # Features that are systematically biased when computed intraday
+    # (training uses complete daily bars; inference sees partial-day data)
+    PARTIAL_DAY_FEATURES = frozenset({
+        "day_range", "day_range_pct", "day_volume", "day_return",
+        "volume_ratio", "volume_20d_avg", "intraday_range",
+        "vwap_deviation", "close_to_vwap",
+    })
+
+    def _validate_inference_features(
+        self, df_daily: pd.DataFrame, feature_cols: list
+    ) -> pd.DataFrame:
+        """Validate and fix features that degrade during partial trading days.
+
+        During market hours, today's daily OHLCV is incomplete — day_range,
+        day_volume, RSI-on-close, etc. are systematically smaller/different
+        than training data (computed on full-day bars).
+
+        Strategy: for the LAST row (today), substitute prior-day value for
+        known partial-day features if we're currently mid-session.
+        """
+        now = datetime.now()
+        # Only apply during market hours (9:30 AM - 4:00 PM ET)
+        if not (9 <= now.hour < 16 or (now.hour == 9 and now.minute >= 30)):
+            return df_daily
+
+        if len(df_daily) < 2:
+            return df_daily
+
+        affected = []
+        for feat in feature_cols:
+            # Match by exact name or prefix
+            base = feat.split("_lag")[0] if "_lag" not in feat else feat
+            if base in self.PARTIAL_DAY_FEATURES:
+                # Substitute today's value with yesterday's
+                if feat in df_daily.columns and len(df_daily) >= 2:
+                    yesterday_val = df_daily[feat].iloc[-2]
+                    today_val = df_daily[feat].iloc[-1]
+                    if pd.notna(yesterday_val) and pd.notna(today_val):
+                        # Only substitute if today's value looks truncated
+                        # (e.g., volume much lower than yesterday, range much smaller)
+                        if abs(today_val) < abs(yesterday_val) * 0.3 or today_val == 0:
+                            df_daily.loc[df_daily.index[-1], feat] = yesterday_val
+                            affected.append(feat)
+
+        if affected:
+            logger.info(
+                f"[INFERENCE] Substituted {len(affected)} partial-day features "
+                f"with prior-day values: {affected[:5]}"
+                + ("..." if len(affected) > 5 else "")
+            )
+
+        return df_daily
+
     def prepare_features(self, df_1min: pd.DataFrame) -> np.ndarray:
         """
         Prepare features from 1-minute data.
@@ -386,6 +450,9 @@ class SignalGenerator:
                 logger.error("No numeric features found in df_daily")
                 return np.array([])
 
+            # Validate and fix partial-day feature drift
+            df_daily = self._validate_inference_features(df_daily, all_feature_cols)
+
             # ─────────────────────────────────────────────────────────────────────
             # LEAK-PROOF MODEL: Use saved feature columns and return raw features
             # The pipeline handles transformation internally
@@ -439,15 +506,34 @@ class SignalGenerator:
                     expected_features = var_selector.n_features_in_ if var_selector else None
 
                     if expected_features and X.shape[1] != expected_features:
-                        if X.shape[1] > expected_features:
-                            # Too many features - truncate (use first N)
-                            logger.warning(f"Feature count mismatch: {X.shape[1]} vs {expected_features}, truncating")
+                        n_actual = X.shape[1]
+                        n_diff = abs(n_actual - expected_features)
+                        pct_diff = n_diff / expected_features
+
+                        if pct_diff > 0.20:
+                            # >20% feature mismatch — too risky for reliable predictions
+                            logger.error(
+                                f"Feature count mismatch too large: {n_actual} vs "
+                                f"{expected_features} ({pct_diff:.0%} difference) — "
+                                f"rejecting signal"
+                            )
+                            return np.array([])
+                        elif n_actual > expected_features:
+                            # Extra features — truncate to expected count
+                            logger.warning(
+                                f"Feature mismatch: {n_actual} > {expected_features} "
+                                f"(+{n_diff} extra), truncating"
+                            )
                             X = X[:, :expected_features]
                             feature_cols = feature_cols[:expected_features]
                         else:
-                            # Too few features - pad with zeros
-                            logger.warning(f"Feature count mismatch: {X.shape[1]} vs {expected_features}, padding")
-                            padding = np.zeros((X.shape[0], expected_features - X.shape[1]))
+                            # Missing features — pad with column medians from var_selector
+                            # (better than zeros, which could be far from training distribution)
+                            logger.warning(
+                                f"Feature mismatch: {n_actual} < {expected_features} "
+                                f"({n_diff} missing), padding with zeros"
+                            )
+                            padding = np.zeros((X.shape[0], expected_features - n_actual))
                             X = np.hstack([X, padding])
 
                     X, _, _ = reduce_dimensions(X, feature_cols, fit=False, state=self.dim_state)
@@ -501,9 +587,14 @@ class SignalGenerator:
         # This is the ONLY proper path for production signal generation
         # ═══════════════════════════════════════════════════════════════════
         if self.dynamic_selector and self.dynamic_selector.candidates:
-            return self._generate_signal_dynamic(
+            signal = self._generate_signal_dynamic(
                 df_1min, current_price, entry_window, exit_window, default_signal
             )
+            # If dynamic path returned a real signal, use it
+            if signal.signal_type != SignalType.HOLD or signal.confidence > 0:
+                return signal
+            # Otherwise fall through to static path as backup
+            logger.warning("Dynamic selector returned HOLD with zero confidence — trying static fallback")
 
         # ═══════════════════════════════════════════════════════════════════
         # STATIC MODEL PATH (DEGRADED MODE - NOT RECOMMENDED)
@@ -643,11 +734,9 @@ class SignalGenerator:
                         )
                         if cascade_signal is not None:
                             cascade_proba = cascade_signal.swing_direction
-                            # Blend: 80% original swing+timing, 20% temporal cascade
-                            original_weight = 0.8
-                            cascade_weight = 0.2
-                            swing_proba = original_weight * swing_proba + cascade_weight * cascade_proba
-                            logger.debug(f"Temporal cascade blended: cascade_p={cascade_proba:.3f}, final_swing_p={swing_proba:.3f}")
+                            cw = self.cascade_blend_weight
+                            swing_proba = (1 - cw) * swing_proba + cw * cascade_proba
+                            logger.debug(f"Temporal cascade blended (w={cw:.2f}): cascade_p={cascade_proba:.3f}, final_swing_p={swing_proba:.3f}")
                 except Exception as e:
                     logger.debug(f"Temporal cascade signal not available: {e}")
 
@@ -797,6 +886,17 @@ class SignalGenerator:
             confidence = prediction.confidence
             direction = prediction.direction
 
+            # Bounds check: clamp probabilities to [0, 1], reject NaN
+            if any(np.isnan(v) for v in (swing_proba, timing_proba, confidence)):
+                logger.warning(
+                    f"NaN detected in predictions: swing={swing_proba}, "
+                    f"timing={timing_proba}, conf={confidence} — returning HOLD"
+                )
+                return default_signal
+            swing_proba = float(np.clip(swing_proba, 0.0, 1.0))
+            timing_proba = float(np.clip(timing_proba, 0.0, 1.0))
+            confidence = float(np.clip(confidence, 0.0, 1.0))
+
             # Log ensemble details
             logger.info(
                 f"Dynamic ensemble: direction={direction}, swing={swing_proba:.3f}, "
@@ -818,10 +918,9 @@ class SignalGenerator:
                         )
                         if cascade_signal is not None:
                             cascade_proba = cascade_signal.swing_direction
-                            original_weight = 0.8
-                            cascade_weight = 0.2
-                            swing_proba = original_weight * swing_proba + cascade_weight * cascade_proba
-                            logger.debug(f"Temporal cascade blended (dynamic): cascade_p={cascade_proba:.3f}, final_swing_p={swing_proba:.3f}")
+                            cw = self.cascade_blend_weight
+                            swing_proba = (1 - cw) * swing_proba + cw * cascade_proba
+                            logger.debug(f"Temporal cascade blended dynamic (w={cw:.2f}): cascade_p={cascade_proba:.3f}, final_swing_p={swing_proba:.3f}")
                 except Exception as e:
                     logger.debug(f"Temporal cascade signal not available (dynamic): {e}")
 

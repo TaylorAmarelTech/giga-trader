@@ -38,6 +38,7 @@ from src.phase_18_persistence.registry_configs import (
     ModelEntry,
 )
 from src.phase_18_persistence.model_registry import ModelRegistryV2
+from src.core.registry_db import get_registry_db
 
 logger = logging.getLogger("MODEL_REGISTRY_V2")
 
@@ -312,11 +313,12 @@ class GridSearchConfigGenerator:
         """Create standard grid search (500+ configs)."""
         gen = cls()
 
-        # Data period (3)
+        # Data period (4)
         gen.add_dimension('data_config.period', [
-            DataPeriod.YEARS_2.value,
             DataPeriod.YEARS_3.value,
             DataPeriod.YEARS_5.value,
+            DataPeriod.YEARS_7.value,
+            DataPeriod.YEARS_10.value,
         ])
 
         # Bar resolution (4)
@@ -398,9 +400,10 @@ class GridSearchConfigGenerator:
         ])
 
         gen.add_dimension('data_config.period', [
-            DataPeriod.YEARS_2.value,
             DataPeriod.YEARS_3.value,
             DataPeriod.YEARS_5.value,
+            DataPeriod.YEARS_7.value,
+            DataPeriod.YEARS_10.value,
         ])
 
         gen.add_dimension('data_config.primary_resolution', [
@@ -557,8 +560,8 @@ class GridSearchConfigGenerator:
                 DataSource.ALPACA.value, DataSource.YFINANCE.value
             ])
             gen.add_dimension('data_config.period', [
-                DataPeriod.YEAR_1.value, DataPeriod.YEARS_2.value,
-                DataPeriod.YEARS_3.value, DataPeriod.YEARS_5.value
+                DataPeriod.YEARS_2.value, DataPeriod.YEARS_3.value,
+                DataPeriod.YEARS_5.value, DataPeriod.YEARS_10.value
             ])
             gen.add_dimension('data_config.primary_resolution', [
                 TimeResolution.MINUTE_1.value, TimeResolution.MINUTE_5.value,
@@ -1011,7 +1014,7 @@ if __name__ == "__main__":
     print("MODEL REGISTRY TEST")
     print("=" * 70)
 
-    registry = ModelRegistryV2()
+    registry = ModelRegistryV2(db=get_registry_db())
     print(f"\nRegistry location: {registry.registry_dir}")
     print(f"Current models: {len(registry.models)}")
 

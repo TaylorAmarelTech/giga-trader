@@ -105,10 +105,17 @@ class PositionHistoryTracker:
         return default
 
     def _save_json(self, path: Path, data: Any):
-        """Save data to JSON file."""
+        """Save data to JSON file atomically."""
         try:
-            with open(path, "w") as f:
-                json.dump(data, f, indent=2)
+            from src.core.state_manager import atomic_write_json
+            atomic_write_json(path, data)
+        except ImportError:
+            # Fallback if core module unavailable
+            try:
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
+            except Exception as e:
+                logger.error(f"Error saving {path}: {e}")
         except Exception as e:
             logger.error(f"Error saving {path}: {e}")
 

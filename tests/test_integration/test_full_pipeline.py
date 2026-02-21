@@ -101,8 +101,10 @@ def test_create_multi_phase_objects(tmp_path):
     assert state_manager.state.mode == "TESTING"
 
     # Phase 18 - Registry
+    from src.core.registry_db import RegistryDB
+    test_db = RegistryDB(db_path=tmp_path / "test.db")
     registry = ModelRegistryV2(
-        registry_dir=tmp_path / "registry",
+        db=test_db,
         models_dir=tmp_path / "artifacts",
     )
     entry = ModelEntry(target_type=TargetType.SWING.value)
@@ -180,8 +182,10 @@ def test_minimal_pipeline_flow(tmp_path, sample_daily_df):
     from src.core.state_manager import StateManager
 
     # Step 1: Registry
+    from src.core.registry_db import RegistryDB
+    test_db2 = RegistryDB(db_path=tmp_path / "test2.db")
     registry = ModelRegistryV2(
-        registry_dir=tmp_path / "reg",
+        db=test_db2,
         models_dir=tmp_path / "art",
     )
 

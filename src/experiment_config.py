@@ -34,7 +34,7 @@ class DataConfig:
     """Data source and preprocessing configuration."""
     # Data sources
     symbol: str = "SPY"
-    years_to_download: int = 5
+    years_to_download: int = 10
     chunk_days: int = 30
 
     # Quality thresholds
@@ -46,6 +46,9 @@ class DataConfig:
     fill_missing_bars: bool = True
     max_gap_minutes: int = 15
     flag_incomplete_extended: bool = True
+
+    # Regime filtering (Wave 26: regime-specific training)
+    regime_filter: str = ""  # "", "low_vol", "high_vol"
 
 
 @dataclass
@@ -109,7 +112,9 @@ class DimensionalityReductionConfig:
     """Dimensionality reduction configuration."""
     # Method: "pca", "kernel_pca", "ica", "umap", "mutual_info",
     #         "agglomeration", "kmedoids", "ensemble", "ensemble_plus"
-    method: str = "ensemble_plus"
+    # Wave 31: Default changed to ica — but ExperimentGenerator randomizes
+    # across all methods for diversity. This default only affects manual runs.
+    method: str = "ica"
 
     # Pre-filtering
     variance_threshold: float = 0.01
@@ -135,6 +140,9 @@ class DimensionalityReductionConfig:
     # ICA params
     ica_n_components: int = 20
     ica_max_iter: int = 500
+
+    # Feature selection method: "mutual_info" or "f_classif"
+    feature_selection_method: str = "mutual_info"
 
     # Mutual Information params
     mi_n_features: int = 30
@@ -188,8 +196,8 @@ class CrossValidationConfig:
     """Cross-validation and evaluation configuration."""
     # CV settings
     n_cv_folds: int = 5
-    purge_days: int = 5
-    embargo_days: int = 2
+    purge_days: int = 10  # Increased from 5 — SPY features have 10-20 day autocorrelation
+    embargo_days: int = 3  # Increased from 2 — extra safety margin
 
     # Soft targets (EDGE 4)
     use_soft_targets: bool = True
@@ -261,6 +269,23 @@ class AntiOverfitConfig:
                                   "NVDA", "TSLA", "BRK-B", "UNH", "XOM"]
     )
 
+    # Bear market synthetic universes (bull bias correction)
+    use_bear_universes: bool = True
+    bear_mean_shift_bps: List[int] = field(default_factory=lambda: [5, 10])
+    bear_vol_amplify_factor: float = 1.5
+    bear_vol_dampen_factor: float = 0.7
+
+    # Multi-timescale regime bootstrap (weekly/monthly/magnitude/vol resampling)
+    use_multiscale_bootstrap: bool = True
+
+    # Economic indicator features (yields, VIX, credit spreads via yfinance)
+    use_economic_features: bool = True
+
+    # Synthetic weight penalty (prevents overfitting to synthetic data)
+    synthetic_weight_penalty: float = 0.5   # Synthetic rows get 50% of confidence weight
+    synthetic_weight_floor: float = 0.10    # Min weight for any synthetic sample
+    synthetic_weight_ceiling: float = 0.60  # Max weight for any synthetic sample
+
     # Evaluation thresholds
     wmes_threshold: float = 0.55
     stability_threshold: float = 0.5
@@ -275,6 +300,26 @@ class RobustnessEnsembleConfig:
     param_noise_pct: float = 0.05
     ensemble_center_weight: float = 0.5
     fragility_threshold: float = 0.35
+
+
+@dataclass
+class TrainingAugmentationConfig:
+    """Wave 35: Training augmentation configuration for anti-overfitting."""
+    # Temporal decay weighting — emphasize recent samples
+    use_temporal_decay: bool = False
+    temporal_decay_lambda: float = 0.5  # Higher = more recent emphasis
+
+    # Noise injection — add Gaussian noise to features during training
+    use_noise_injection: bool = False
+    noise_sigma: float = 0.1  # Std dev multiplier per feature
+
+    # Nested CV — double cross-validation for honest evaluation
+    use_nested_cv: bool = False
+    nested_outer_folds: int = 3
+    nested_inner_folds: int = 3
+
+    # Calibrated ensemble distillation — detect memorization
+    use_distillation: bool = True  # Always on by default (cheap)
 
 
 @dataclass
@@ -305,8 +350,8 @@ class TemporalCascadeConfig:
 
     # Training settings
     cv_folds: int = 5
-    purge_days: int = 5
-    embargo_days: int = 2
+    purge_days: int = 10
+    embargo_days: int = 3
 
     # Thresholds for model registration
     min_cv_auc: float = 0.55
@@ -356,7 +401,11 @@ class ExperimentConfig:
     robustness_ensemble: RobustnessEnsembleConfig = field(default_factory=RobustnessEnsembleConfig)
     entry_exit: EntryExitConfig = field(default_factory=EntryExitConfig)
     temporal_cascade: TemporalCascadeConfig = field(default_factory=TemporalCascadeConfig)
+    training_augmentation: TrainingAugmentationConfig = field(default_factory=TrainingAugmentationConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
+
+    # Wave 32: Arbitrary metadata for research experiments, feature candidates, etc.
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
         if not self.experiment_id:
@@ -404,7 +453,9 @@ class ExperimentConfig:
             robustness_ensemble=RobustnessEnsembleConfig(**d.get("robustness_ensemble", {})),
             entry_exit=EntryExitConfig(**d.get("entry_exit", {})),
             temporal_cascade=TemporalCascadeConfig(**d.get("temporal_cascade", {})),
+            training_augmentation=TrainingAugmentationConfig(**d.get("training_augmentation", {})),
             trading=TradingConfig(**d.get("trading", {})),
+            metadata=d.get("metadata", {}),
         )
         return config
 
