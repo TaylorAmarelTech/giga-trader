@@ -7,8 +7,9 @@ Main integration function that combines all anti-overfitting measures:
   3. MAG Market Breadth Features (MAG3/5/6/7/10/15)
   4. Sector Breadth Features (S&P 500 Sectors)
   5. Volatility Regime Features (VXX-based)
-  6. Economic Indicator Features (yields, VIX, credit spreads)
-  7. Synthetic SPY Universes
+  6. Calendar & Event Features (FOMC, opex, NFP, CPI, GDP)
+  7. Economic Indicator Features (yields, VIX, credit spreads)
+  8. Synthetic SPY Universes
 """
 
 import os
@@ -30,6 +31,7 @@ from src.phase_08_features_breadth.sector_breadth import SectorBreadthFeatures
 from src.phase_08_features_breadth.volatility_regime import VolatilityRegimeFeatures
 from src.phase_03_synthetic_data.synthetic_universe import SyntheticSPYGenerator
 from src.phase_08_features_breadth.economic_features import EconomicFeatures
+from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
 
 
 def integrate_anti_overfit(
@@ -42,6 +44,7 @@ def integrate_anti_overfit(
     use_sector_breadth: bool = True,  # Sector rotation features
     use_vol_regime: bool = True,  # Volatility regime features
     use_economic_features: bool = True,  # Economic indicators (yields, VIX, credit)
+    use_calendar_features: bool = True,  # FOMC, opex, NFP/CPI/GDP event features
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -179,7 +182,36 @@ def integrate_anti_overfit(
                 print(f"    Market Condition: {vol_signal.get('market_condition', 'N/A')}")
                 print(f"    VXX Percentile: {vol_signal.get('vxx_percentile', 0):.1%}")
 
-    # 6. Economic Indicator Features (yields, VIX, credit spreads)
+    # 6. Calendar & Event Features (FOMC, opex, NFP, CPI, GDP)
+    if use_calendar_features:
+        try:
+            cal_gen = CalendarFeatureGenerator(
+                include_fomc=True,
+                include_opex=True,
+                include_economic=True,
+                include_calendar_basics=True,
+            )
+            n_before = len(df_daily.columns)
+            df_daily = cal_gen.create_all_features(df_daily)
+            n_cal_features = len(df_daily.columns) - n_before
+            metadata["calendar_features"] = True
+            metadata["n_calendar_features"] = n_cal_features
+            print(f"  [CALENDAR] Added {n_cal_features} calendar/event features "
+                  f"(FOMC, opex, NFP, CPI, PMI, GDP)")
+
+            # Log upcoming events
+            feature_names = cal_gen.get_feature_names()
+            fomc_cols = [c for c in df_daily.columns if c.startswith("fomc_")]
+            opex_cols = [c for c in df_daily.columns if c.startswith("opex_")]
+            econ_event_cols = [c for c in df_daily.columns if c.startswith("econ_is_")]
+            cal_cols = [c for c in df_daily.columns if c.startswith("cal_")]
+            print(f"    FOMC: {len(fomc_cols)} features | Opex: {len(opex_cols)} | "
+                  f"Economic events: {len(econ_event_cols)} | Calendar: {len(cal_cols)}")
+        except Exception as e:
+            print(f"  [CALENDAR] Warning: Calendar feature generation failed: {e}")
+            metadata["calendar_features"] = False
+
+    # 7. Economic Indicator Features (yields, VIX, credit spreads)
     if use_economic_features:
         econ_features = EconomicFeatures()
         econ_data = econ_features.download_economic_data(start_date, end_date)
@@ -201,7 +233,7 @@ def integrate_anti_overfit(
                 if "credit_signal" in econ_signal:
                     print(f"  Credit: {econ_signal['credit_signal']}")
 
-    # 7. Synthetic SPY Universes (do last since it multiplies data)
+    # 8. Synthetic SPY Universes (do last since it multiplies data)
     if use_synthetic:
         real_weight = 1 - synthetic_weight
         synth_gen = SyntheticSPYGenerator(

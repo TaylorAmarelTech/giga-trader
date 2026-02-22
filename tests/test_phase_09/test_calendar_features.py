@@ -225,3 +225,90 @@ def test_calendar_features_preserve_original_data(daily_df):
     result = gen.create_all_features(daily_df)
 
     pd.testing.assert_series_equal(result["close"], original_close, check_names=True)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline Integration tests
+# ---------------------------------------------------------------------------
+
+def test_calendar_features_config_flag():
+    """AntiOverfitConfig should have use_calendar_features flag."""
+    from src.experiment_config import AntiOverfitConfig
+    config = AntiOverfitConfig()
+    assert hasattr(config, "use_calendar_features")
+    assert config.use_calendar_features is True
+
+
+def test_calendar_features_config_disable():
+    """use_calendar_features should be disableable."""
+    from src.experiment_config import AntiOverfitConfig
+    config = AntiOverfitConfig(use_calendar_features=False)
+    assert config.use_calendar_features is False
+
+
+def test_integrate_anti_overfit_accepts_calendar_param():
+    """integrate_anti_overfit should accept use_calendar_features parameter."""
+    import inspect
+    from src.phase_13_validation.anti_overfit_integration import integrate_anti_overfit
+    sig = inspect.signature(integrate_anti_overfit)
+    assert "use_calendar_features" in sig.parameters
+
+
+def test_calendar_features_in_feature_groups():
+    """Calendar features should map to the 'calendar' group in GroupAwareProcessor."""
+    from src.phase_10_feature_processing.group_aware_processor import (
+        FEATURE_GROUPS,
+        assign_feature_groups,
+    )
+
+    # The calendar group should include our prefixes
+    assert "calendar" in FEATURE_GROUPS
+    cal_prefixes = FEATURE_GROUPS["calendar"]
+    assert "fomc_" in cal_prefixes
+    assert "opex_" in cal_prefixes
+    assert "cal_" in cal_prefixes
+
+    # Test that actual calendar feature names map to the group
+    test_features = [
+        "fomc_is_meeting_day", "fomc_days_until_next", "fomc_cycle_position",
+        "opex_is_monthly", "opex_is_quad_witching", "opex_days_until_next",
+        "cal_day_of_week", "cal_is_monday", "cal_is_friday",
+        "econ_is_nfp_day", "econ_is_cpi_day",
+        "some_other_feature",  # should go to "other"
+    ]
+    groups = assign_feature_groups(test_features)
+    assert "calendar" in groups
+    assert len(groups["calendar"]) >= 10  # At least 10 of 11 should map to calendar
+    assert 11 in groups.get("other", [])  # "some_other_feature" index
+
+
+def test_calendar_generator_feature_count(daily_df):
+    """CalendarFeatureGenerator should produce exactly 29 features."""
+    gen = CalendarFeatureGenerator()
+    result = gen.create_all_features(daily_df)
+
+    initial_cols = len(daily_df.columns)
+    new_cols = len(result.columns) - initial_cols
+
+    # 11 calendar basics + 7 FOMC + 5 opex + 6 economic events = 29
+    assert new_cols == 29, f"Expected 29 calendar features, got {new_cols}"
+
+
+def test_calendar_feature_names_match():
+    """get_feature_names() should match actual columns added."""
+    gen = CalendarFeatureGenerator()
+    expected_names = gen.get_feature_names()
+
+    dates = pd.bdate_range(start="2024-01-02", end="2024-06-30", freq="B")
+    np.random.seed(42)
+    n = len(dates)
+    df = pd.DataFrame({
+        "close": 450.0 + np.cumsum(np.random.normal(0, 0.5, n)),
+    }, index=dates)
+    df.index.name = "date"
+
+    result = gen.create_all_features(df)
+    actual_new = [c for c in result.columns if c not in df.columns]
+
+    for name in expected_names:
+        assert name in actual_new, f"Expected feature '{name}' not found in output"

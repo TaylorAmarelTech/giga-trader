@@ -281,6 +281,9 @@ class AntiOverfitConfig:
     # Economic indicator features (yields, VIX, credit spreads via yfinance)
     use_economic_features: bool = True
 
+    # Calendar & event features (FOMC, opex, NFP, CPI, PMI, GDP, seasonality)
+    use_calendar_features: bool = True
+
     # Synthetic weight penalty (prevents overfitting to synthetic data)
     synthetic_weight_penalty: float = 0.5   # Synthetic rows get 50% of confidence weight
     synthetic_weight_floor: float = 0.10    # Min weight for any synthetic sample

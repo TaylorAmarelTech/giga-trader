@@ -28,8 +28,10 @@ Optional FRED integration (requires fredapi + FRED_API_KEY):
   - T10Y2Y: 10Y-2Y yield spread (recession indicator)
   - DFF: Fed Funds Rate
   - BAMLH0A0HYM2: High Yield OAS (credit spread)
-  - ICSA: Initial Jobless Claims
-  - UMCSENT: Michigan Consumer Sentiment
+  - TEDRATE: TED Spread (interbank risk)
+  - ICSA: Initial Jobless Claims (weekly, forward-filled)
+  - UNRATE: Unemployment Rate (monthly, forward-filled)
+  - UMCSENT: Michigan Consumer Sentiment (monthly, forward-filled)
 """
 
 import warnings
@@ -75,10 +77,14 @@ class EconomicFeatures:
 
     # Optional FRED series (downloaded only if fredapi + FRED_API_KEY are available)
     FRED_SERIES = {
+        # Daily series (high coverage, high IC)
         "T10Y2Y": {"desc": "10Y-2Y Yield Spread (recession indicator)", "prefix": "fred_t10y2y"},
         "DFF": {"desc": "Fed Funds Rate", "prefix": "fred_dff"},
         "BAMLH0A0HYM2": {"desc": "High Yield OAS (credit spread)", "prefix": "fred_hy_oas"},
+        "TEDRATE": {"desc": "TED Spread (interbank risk)", "prefix": "fred_ted"},
+        # Weekly/monthly series (forward-filled to daily, strong Granger causality)
         "ICSA": {"desc": "Initial Jobless Claims (weekly)", "prefix": "fred_claims"},
+        "UNRATE": {"desc": "Unemployment Rate (monthly)", "prefix": "fred_unrate"},
         "UMCSENT": {"desc": "Michigan Consumer Sentiment (monthly)", "prefix": "fred_sentiment"},
     }
 
@@ -149,6 +155,16 @@ class EconomicFeatures:
     def _download_fred(self, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Download FRED series if fredapi + FRED_API_KEY are available."""
         import os
+        # Load .env if python-dotenv is available
+        try:
+            from dotenv import load_dotenv
+            from pathlib import Path
+            env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+            if env_path.is_file():
+                load_dotenv(env_path)
+        except ImportError:
+            pass
+
         api_key = os.environ.get("FRED_API_KEY", "")
         if not api_key:
             return pd.DataFrame()
@@ -286,7 +302,11 @@ class EconomicFeatures:
             prefix = meta["prefix"]
 
             # Forward-fill to daily frequency
-            daily = raw.reindex(pd.date_range(raw.index.min(), raw.index.max(), freq="B")).ffill()
+            # Use calendar days first (handles weekend-dated series like ICSA)
+            # then resample to business days
+            cal_idx = pd.date_range(raw.index.min(), raw.index.max(), freq="D")
+            daily = raw.reindex(cal_idx).ffill()
+            daily = daily.reindex(pd.bdate_range(daily.index.min(), daily.index.max())).ffill()
             if len(daily) < 60:
                 continue
 

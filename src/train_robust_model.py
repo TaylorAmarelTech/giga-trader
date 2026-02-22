@@ -471,7 +471,7 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
     """
     Engineer comprehensive features following EDGE 2 and EDGE 3.
 
-    Feature categories:
+    Feature categories (from 1-minute bars):
       1. Premarket features (today)
       2. Afterhours features (lagged 1-5 days)
       3. Overnight combined features
@@ -479,7 +479,9 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
       5. Price/volume patterns
       6. Momentum/trend features
       7. Volatility features
-      8. Calendar features
+
+    Note: Calendar/event features (FOMC, opex, NFP/CPI/GDP) are added
+    in integrate_anti_overfit() step 6, not here (date-based, no bars needed).
     """
     print("\n" + "=" * 70)
     print("STEP 2: COMPREHENSIVE FEATURE ENGINEERING")
@@ -2364,6 +2366,7 @@ def main():
             use_sector_breadth=CONFIG.get("use_sector_breadth", True),
             use_vol_regime=CONFIG.get("use_vol_regime", True),
             use_economic_features=CONFIG.get("use_economic_features", True),
+            use_calendar_features=CONFIG.get("use_calendar_features", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
         )
         print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")

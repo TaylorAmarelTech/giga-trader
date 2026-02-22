@@ -29,6 +29,13 @@ import warnings
 
 warnings.filterwarnings("ignore")
 
+# Load .env file if python-dotenv available
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+except ImportError:
+    pass
+
 # ─── yfinance Sources ─────────────────────────────────────────────────────────
 
 YFINANCE_SOURCES = {
@@ -56,13 +63,13 @@ YFINANCE_SOURCES = {
 
 # FRED sources (optional)
 FRED_SOURCES = {
-    "T10Y2Y": {"desc": "10Y-2Y Yield Spread (recession indicator)", "category": "rates"},
-    "DFF": {"desc": "Fed Funds Rate", "category": "rates"},
-    "BAMLH0A0HYM2": {"desc": "High Yield OAS (credit spread)", "category": "credit"},
-    "TEDRATE": {"desc": "TED Spread (interbank risk)", "category": "credit"},
-    "UMCSENT": {"desc": "U of Michigan Consumer Sentiment", "category": "sentiment"},
-    "ICSA": {"desc": "Initial Jobless Claims", "category": "employment"},
-    "UNRATE": {"desc": "Unemployment Rate", "category": "employment"},
+    "T10Y2Y": {"desc": "10Y-2Y Yield Spread (recession indicator)", "category": "rates", "freq": "daily"},
+    "DFF": {"desc": "Fed Funds Rate", "category": "rates", "freq": "daily"},
+    "BAMLH0A0HYM2": {"desc": "High Yield OAS (credit spread)", "category": "credit", "freq": "daily"},
+    "TEDRATE": {"desc": "TED Spread (interbank risk)", "category": "credit", "freq": "daily"},
+    "UMCSENT": {"desc": "U of Michigan Consumer Sentiment", "category": "sentiment", "freq": "monthly"},
+    "ICSA": {"desc": "Initial Jobless Claims", "category": "employment", "freq": "weekly"},
+    "UNRATE": {"desc": "Unemployment Rate", "category": "employment", "freq": "monthly"},
 }
 
 
@@ -453,8 +460,17 @@ def main():
     if not fred_data.empty:
         for series_id in fred_data.columns:
             meta = FRED_SOURCES.get(series_id, {"desc": series_id, "category": "unknown"})
-            # Forward-fill FRED data to daily (many are weekly/monthly)
-            fred_daily = fred_data[series_id].reindex(spy_ret.index, method="ffill")
+            raw = fred_data[series_id].dropna()
+            if len(raw) < 10:
+                print(f"  {series_id:20s} | Insufficient raw data ({len(raw)} obs)")
+                continue
+            # Forward-fill: calendar days first (handles weekend-dated series
+            # like ICSA which reports on Saturdays), then to business days
+            cal_idx = pd.date_range(raw.index.min(), raw.index.max(), freq="D")
+            fred_cal = raw.reindex(cal_idx).ffill()
+            fred_daily = fred_cal.reindex(spy_ret.index).ffill()
+            n_valid = fred_daily.notna().sum()
+            freq = meta.get("freq", "?")
             result = analyze_source(series_id, fred_daily, spy_ret, fwd_returns, meta)
             all_results.append(result)
             print(f"  {series_id:20s} | IC(best)={result['best_ic']:+.4f} | "

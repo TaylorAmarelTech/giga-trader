@@ -37,6 +37,7 @@ optuna>=3.4.0  # Bayesian optimization
 # ─────────────────────────────────────────────────────────────────────────────────
 alpaca-py>=0.21.0
 yfinance>=0.2.30
+fredapi>=0.5.0  # FRED economic data (requires FRED_API_KEY in .env)
 
 # ─────────────────────────────────────────────────────────────────────────────────
 # Technical Analysis
