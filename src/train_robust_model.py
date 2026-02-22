@@ -2389,13 +2389,14 @@ def main():
 
     print(f"\n[INFO] Initial features: {len(feature_cols)}")
 
-    # Clean data
+    # Clean data — replace inf with NaN, then drop NaN rows
+    df_daily[feature_cols] = df_daily[feature_cols].replace([np.inf, -np.inf], np.nan)
     df_clean = df_daily.dropna(subset=feature_cols + ["target_up"]).copy()
     print(f"[INFO] Clean samples: {len(df_clean)}")
 
-    X = df_clean[feature_cols].values
-    y = df_clean["target_up"].astype(int).values
-    weights = df_clean["sample_weight"].values
+    X = df_clean[feature_cols].astype(np.float64).values.copy()
+    y = df_clean["target_up"].astype(int).values.copy()
+    weights = df_clean["sample_weight"].astype(np.float64).values.copy()
 
     # ── Synthetic weight penalty (prevents overfitting to synthetic data) ──
     if "sample_weight_augment" in df_clean.columns:

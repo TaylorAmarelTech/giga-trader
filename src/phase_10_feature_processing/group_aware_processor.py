@@ -448,8 +448,11 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         """Return boolean mask of features passing variance threshold."""
         if X.shape[1] == 0:
             return np.array([], dtype=bool)
+        # Cast and replace inf/nan for safe variance computation
+        X_safe = np.asarray(X, dtype=np.float64)
+        X_safe = np.nan_to_num(X_safe, nan=0.0, posinf=0.0, neginf=0.0)
         vt = VarianceThreshold(threshold=self.variance_threshold)
-        vt.fit(X)
+        vt.fit(X_safe)
         return vt.get_support()
 
     def _apply_correlation_filter(self, X: np.ndarray) -> np.ndarray:
@@ -457,8 +460,20 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         if X.shape[1] <= 1:
             return np.ones(X.shape[1], dtype=bool)
 
-        corr = np.corrcoef(X.T)
-        corr = np.nan_to_num(corr, nan=0.0)
+        # Cast to float64 and replace inf/nan for safe correlation
+        X_safe = np.asarray(X, dtype=np.float64)
+        X_safe = np.where(np.isfinite(X_safe), X_safe, 0.0)
+
+        try:
+            corr = np.corrcoef(X_safe.T)
+            corr = np.nan_to_num(corr, nan=0.0)
+        except (ValueError, AttributeError, FloatingPointError):
+            # Fallback: keep all features if corrcoef fails
+            return np.ones(X.shape[1], dtype=bool)
+
+        # Ensure corr is 2D (can be scalar/0d if only 1 feature after filtering)
+        if corr.ndim < 2:
+            return np.ones(X.shape[1], dtype=bool)
 
         to_drop = set()
         for i in range(len(corr)):

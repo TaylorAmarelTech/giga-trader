@@ -505,17 +505,17 @@ class CalendarFeatureGenerator:
         if isinstance(df.index, pd.DatetimeIndex):
             dt_index = df.index
         elif "date" in df.columns:
-            dt_index = pd.to_datetime(df["date"])
+            dt_index = pd.DatetimeIndex(pd.to_datetime(df["date"]))
         else:
             return df
 
         # Day of week (0=Monday, 4=Friday)
-        df["cal_day_of_week"] = dt_index.dayofweek
+        df["cal_day_of_week"] = dt_index.dayofweek.values
         df["cal_is_monday"] = (dt_index.dayofweek == 0).astype(int)
         df["cal_is_friday"] = (dt_index.dayofweek == 4).astype(int)
 
         # Month features
-        df["cal_month"] = dt_index.month
+        df["cal_month"] = dt_index.month.values
         df["cal_is_month_end"] = dt_index.is_month_end.astype(int)
         df["cal_is_month_start"] = dt_index.is_month_start.astype(int)
         df["cal_is_quarter_end"] = dt_index.is_quarter_end.astype(int)
