@@ -281,11 +281,13 @@ def api_logs_stream():
     """Server-Sent Events stream for live logs."""
     def generate():
         last_size = 0
+        heartbeat_counter = 0
         today = datetime.now().strftime("%Y%m%d")
         log_path = project_root / "logs" / f"trading_{today}.log"
 
         while True:
             try:
+                sent_data = False
                 if log_path.exists():
                     current_size = log_path.stat().st_size
                     if current_size > last_size:
@@ -297,8 +299,17 @@ def api_logs_stream():
                             for line in new_content.strip().split("\n"):
                                 if line:
                                     yield f"data: {json.dumps({'line': line})}\n\n"
+                                    sent_data = True
+
+                # Send heartbeat every 15 seconds to keep connection alive
+                heartbeat_counter += 1
+                if not sent_data and heartbeat_counter >= 15:
+                    yield ": heartbeat\n\n"
+                    heartbeat_counter = 0
 
                 time.sleep(1)
+            except GeneratorExit:
+                return
             except Exception as e:
                 yield f"data: {json.dumps({'error': str(e)})}\n\n"
                 time.sleep(5)

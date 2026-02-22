@@ -87,8 +87,8 @@ def _make_data(n_samples=200, feature_names=None):
 class TestFeatureGroups:
     """Tests for FEATURE_GROUPS constant."""
 
-    def test_has_10_groups(self):
-        assert len(FEATURE_GROUPS) == 10
+    def test_has_11_groups(self):
+        assert len(FEATURE_GROUPS) == 11
 
     def test_all_groups_have_prefixes(self):
         for name, prefixes in FEATURE_GROUPS.items():

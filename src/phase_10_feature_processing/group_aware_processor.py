@@ -42,6 +42,7 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
     ],
     "volatility": ["vxx_", "vol_", "realized_vol_"],
     "calendar": ["cal_", "fomc_", "opex_", "econ_"],
+    "sentiment": ["sent_"],
     "intraday": [
         "return_at_", "high_to_", "low_to_", "range_to_",
         "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",

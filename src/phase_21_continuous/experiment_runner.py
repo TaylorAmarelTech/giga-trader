@@ -664,6 +664,7 @@ class UnifiedExperimentRunner:
                         use_mag_breadth=config.anti_overfit.use_mag_breadth,
                         use_economic_features=config.anti_overfit.use_economic_features,
                         use_calendar_features=config.anti_overfit.use_calendar_features,
+                        use_sentiment_features=config.anti_overfit.use_sentiment_features,
                         use_synthetic=config.anti_overfit.use_synthetic_universes,
                         synthetic_weight=config.anti_overfit.synthetic_weight,
                         use_bear_universes=config.anti_overfit.use_bear_universes,

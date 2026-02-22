@@ -2367,6 +2367,7 @@ def main():
             use_vol_regime=CONFIG.get("use_vol_regime", True),
             use_economic_features=CONFIG.get("use_economic_features", True),
             use_calendar_features=CONFIG.get("use_calendar_features", True),
+            use_sentiment_features=CONFIG.get("use_sentiment_features", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
         )
         print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")

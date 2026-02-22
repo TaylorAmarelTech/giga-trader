@@ -284,6 +284,9 @@ class AntiOverfitConfig:
     # Calendar & event features (FOMC, opex, NFP, CPI, PMI, GDP, seasonality)
     use_calendar_features: bool = True
 
+    # Sentiment features (VIX-derived fear/greed, cross-asset flows, optional news)
+    use_sentiment_features: bool = True
+
     # Synthetic weight penalty (prevents overfitting to synthetic data)
     synthetic_weight_penalty: float = 0.5   # Synthetic rows get 50% of confidence weight
     synthetic_weight_floor: float = 0.10    # Min weight for any synthetic sample

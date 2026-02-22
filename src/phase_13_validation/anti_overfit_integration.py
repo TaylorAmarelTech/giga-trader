@@ -8,8 +8,9 @@ Main integration function that combines all anti-overfitting measures:
   4. Sector Breadth Features (S&P 500 Sectors)
   5. Volatility Regime Features (VXX-based)
   6. Calendar & Event Features (FOMC, opex, NFP, CPI, GDP)
-  7. Economic Indicator Features (yields, VIX, credit spreads)
-  8. Synthetic SPY Universes
+  7. Sentiment Features (VIX fear/greed, cross-asset flows, optional news)
+  8. Economic Indicator Features (yields, VIX, credit spreads)
+  9. Synthetic SPY Universes
 """
 
 import os
@@ -31,6 +32,7 @@ from src.phase_08_features_breadth.sector_breadth import SectorBreadthFeatures
 from src.phase_08_features_breadth.volatility_regime import VolatilityRegimeFeatures
 from src.phase_03_synthetic_data.synthetic_universe import SyntheticSPYGenerator
 from src.phase_08_features_breadth.economic_features import EconomicFeatures
+from src.phase_08_features_breadth.sentiment_features import SentimentFeatures
 from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
 
 
@@ -45,6 +47,7 @@ def integrate_anti_overfit(
     use_vol_regime: bool = True,  # Volatility regime features
     use_economic_features: bool = True,  # Economic indicators (yields, VIX, credit)
     use_calendar_features: bool = True,  # FOMC, opex, NFP/CPI/GDP event features
+    use_sentiment_features: bool = True,  # VIX fear/greed, cross-asset flows, news
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -211,7 +214,32 @@ def integrate_anti_overfit(
             print(f"  [CALENDAR] Warning: Calendar feature generation failed: {e}")
             metadata["calendar_features"] = False
 
-    # 7. Economic Indicator Features (yields, VIX, credit spreads)
+    # 7. Sentiment Features (VIX fear/greed, cross-asset flows, optional news)
+    if use_sentiment_features:
+        try:
+            sent_engine = SentimentFeatures()
+            sent_data = sent_engine.download_sentiment_data(start_date, end_date)
+
+            if not sent_data.empty:
+                df_daily = sent_engine.create_sentiment_features(df_daily)
+                sent_cols = [c for c in df_daily.columns if c.startswith("sent_")]
+                metadata["sentiment_features"] = True
+                metadata["n_sentiment_features"] = len(sent_cols)
+                print(f"  [SENTIMENT] Added {len(sent_cols)} sentiment features")
+
+                # Analyze current sentiment conditions
+                conditions = sent_engine.analyze_current_sentiment(df_daily)
+                if conditions:
+                    regime = conditions.get("sentiment_regime", "N/A")
+                    appetite = conditions.get("risk_appetite", "N/A")
+                    print(f"    Sentiment Regime: {regime} | Risk Appetite: {appetite}")
+            else:
+                metadata["sentiment_features"] = False
+        except Exception as e:
+            print(f"  [SENTIMENT] Warning: Sentiment feature generation failed: {e}")
+            metadata["sentiment_features"] = False
+
+    # 8. Economic Indicator Features (yields, VIX, credit spreads)
     if use_economic_features:
         econ_features = EconomicFeatures()
         econ_data = econ_features.download_economic_data(start_date, end_date)
@@ -233,7 +261,7 @@ def integrate_anti_overfit(
                 if "credit_signal" in econ_signal:
                     print(f"  Credit: {econ_signal['credit_signal']}")
 
-    # 8. Synthetic SPY Universes (do last since it multiplies data)
+    # 9. Synthetic SPY Universes (do last since it multiplies data)
     if use_synthetic:
         real_weight = 1 - synthetic_weight
         synth_gen = SyntheticSPYGenerator(

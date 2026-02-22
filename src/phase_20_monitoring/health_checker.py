@@ -329,6 +329,7 @@ class HealthChecker:
 
         self._checks: Dict[str, Callable] = {}
         self._results: Dict[str, HealthCheckResult] = {}
+        self._results_lock = threading.Lock()
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -686,7 +687,6 @@ class HealthChecker:
             try:
                 result = check_fn()
                 results[name] = result
-                self._results[name] = result
 
                 # Trigger alerts for unhealthy checks
                 if result.status == HealthStatus.UNHEALTHY:
@@ -714,14 +714,19 @@ class HealthChecker:
                 )
                 logger.error(f"Health check {name} failed: {e}")
 
+        with self._results_lock:
+            self._results.update(results)
+
         return results
 
     def get_overall_status(self) -> HealthStatus:
         """Get overall system health status."""
-        if not self._results:
-            return HealthStatus.UNKNOWN
+        with self._results_lock:
+            if not self._results:
+                return HealthStatus.UNKNOWN
 
-        statuses = [r.status for r in self._results.values()]
+            statuses = [r.status for r in self._results.values()]
+
         if any(s == HealthStatus.UNHEALTHY for s in statuses):
             return HealthStatus.UNHEALTHY
         if any(s == HealthStatus.DEGRADED for s in statuses):
@@ -732,6 +737,9 @@ class HealthChecker:
 
     def get_status_report(self) -> Dict:
         """Get a full status report."""
+        with self._results_lock:
+            checks_snapshot = dict(self._results)
+
         return {
             "timestamp": datetime.now().isoformat(),
             "overall_status": self.get_overall_status().value,
@@ -743,7 +751,7 @@ class HealthChecker:
                     "threshold": r.threshold,
                     "timestamp": r.timestamp.isoformat(),
                 }
-                for name, r in self._results.items()
+                for name, r in checks_snapshot.items()
             },
             "alert_stats": self.alert_manager.get_alert_stats(),
         }
