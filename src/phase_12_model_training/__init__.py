@@ -49,6 +49,14 @@ from src.phase_12_model_training.temporal_integrated_training import (
     train_all_temporal_models,
 )
 
+from src.phase_12_model_training.quantile_forest_wrapper import (
+    QuantileForestClassifier,
+)
+
+from src.phase_12_model_training.stacking_ensemble import (
+    StackingEnsembleClassifier,
+)
+
 from src.phase_12_model_training.training_pipeline_v2 import (
     DataLoader,
     FeatureEngineer,
@@ -104,6 +112,10 @@ __all__ = [
     "TemporalIntegratedTrainer",
     "reset_model_registry",
     "train_all_temporal_models",
+    # quantile_forest_wrapper
+    "QuantileForestClassifier",
+    # stacking_ensemble
+    "StackingEnsembleClassifier",
     # training_pipeline_v2
     "DataLoader",
     "FeatureEngineer",

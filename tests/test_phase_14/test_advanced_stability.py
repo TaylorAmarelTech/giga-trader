@@ -434,8 +434,8 @@ class TestComposite:
         assert composite > 0.5  # All scores are decent
 
     def test_19_weights(self):
-        """DEFAULT_WEIGHTS should have 19 entries summing to 1.0."""
-        assert len(DEFAULT_WEIGHTS) == 19, f"Expected 19 weights, got {len(DEFAULT_WEIGHTS)}"
+        """DEFAULT_WEIGHTS should have 22 entries summing to 1.0."""
+        assert len(DEFAULT_WEIGHTS) == 22, f"Expected 22 weights, got {len(DEFAULT_WEIGHTS)}"
         total = sum(DEFAULT_WEIGHTS.values())
         assert abs(total - 1.0) < 0.01, f"Weights sum to {total}, expected 1.0"
         assert "adversarial_overfitting" in DEFAULT_WEIGHTS
@@ -533,7 +533,7 @@ class TestDistributionRobust:
 
 class TestRunAll:
     def test_returns_all_methods(self):
-        """run_all should return results for all 19 methods + composite."""
+        """run_all should return results for all 22 methods + composite."""
         X_train, y_train = _make_data(n=300, seed=42)
         X_test, y_test = _make_data(n=100, seed=43)
         model, predictions = _fit_and_predict(X_train, y_train, X_test)
@@ -553,7 +553,7 @@ class TestRunAll:
             n_experiments_total=100,
         )
 
-        # All 19 methods should be present
+        # All 22 methods should be present
         expected_keys = [
             "psi", "csi", "adversarial", "ece", "dsr",
             "sfi", "meta_label", "knockoff", "adwin",
@@ -562,6 +562,7 @@ class TestRunAll:
             "adversarial_overfitting", "disagreement_smoothing",
             "feature_causality", "prediction_interval_coverage",
             "distribution_robust",
+            "label_noise", "fi_stability", "knockoff_gate",
             "composite_advanced", "weights_used",
         ]
         for key in expected_keys:

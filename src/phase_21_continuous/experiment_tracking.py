@@ -137,10 +137,11 @@ def compute_realistic_backtest_metrics(
         excess_net = np.mean(trade_net) - risk_free_daily
         sharpe_net = excess_net / np.std(trade_net) * np.sqrt(max(trades_per_year, 1))
 
-    # Max drawdown (on net returns)
-    cumulative = np.cumsum(net_returns)
-    peak = np.maximum.accumulate(cumulative)
-    drawdown = (cumulative - peak) / (peak + 1e-10)
+    # Max drawdown (on net returns, equity-curve based)
+    # Convert cumulative log-returns to equity curve starting at 1.0
+    equity = 1.0 + np.cumsum(net_returns)
+    peak = np.maximum.accumulate(equity)
+    drawdown = (equity - peak) / peak  # Percentage drawdown from peak
     max_drawdown = float(np.min(drawdown)) if len(drawdown) > 0 else 0
 
     return {
@@ -269,6 +270,13 @@ class ExperimentResult:
     nested_cv_auc: float = 0.0           # Honest nested CV estimate
     distillation_gap: float = 0.0        # AUC gap: teacher - distilled student
 
+    # Wave 40: Meta-labeling metrics
+    meta_label_auc: float = 0.0          # Meta-model cross-validated AUC
+    meta_label_fitted: bool = False       # Whether meta-model was successfully trained
+    meta_sharpe: float = 0.0             # Sharpe ratio after meta-label filtering
+    meta_win_rate: float = 0.0           # Win rate after meta-label filtering
+    meta_improvement: float = 0.0        # Sharpe improvement vs unfiltered
+
     # Metadata
     n_features_initial: int = 0
     n_features_final: int = 0
@@ -332,16 +340,17 @@ class ExperimentGenerator:
         # 0% failure rate, 100% WF pass rate, and highest stability scores.
         # ensemble type reduced (worst WF pass + WMES corruption source).
         self.experiment_weights = self._clamp_weights({
-            "hyperparameter": 0.14,
-            "feature_subset": 0.09,
-            "dim_reduction": 0.12,
-            "regularization": 0.09,
+            "hyperparameter": 0.13,
+            "feature_subset": 0.08,
+            "dim_reduction": 0.11,
+            "regularization": 0.08,
             "ensemble": 0.05,
             "threshold": 0.06,
-            "regime_lowvol": 0.16,
-            "regime_highvol": 0.16,
-            "feature_research": 0.07,   # Wave 32: iterative feature discovery
-            "augmented_training": 0.08, # Wave 35: training augmentations
+            "regime_lowvol": 0.15,
+            "regime_highvol": 0.15,
+            "feature_research": 0.06,   # Wave 32: iterative feature discovery
+            "augmented_training": 0.07, # Wave 35: training augmentations
+            "data_source": 0.08,        # Wave 38: explore data source combinations
         }, self.MIN_EXPERIMENT_TYPE_WEIGHT, self.MAX_EXPERIMENT_TYPE_WEIGHT)
 
     @staticmethod
@@ -439,6 +448,10 @@ class ExperimentGenerator:
             "ridge", "extra_trees", "bagged_linear",
             # Wave 35: 5 new complexity baselines
             "lda", "gaussian_nb", "svc_linear", "bayesian_ridge", "quantile_gb",
+            # Wave E3: Quantile random forest
+            "quantile_forest",
+            # Wave F2: CatBoost + Stacking
+            "catboost", "stacking_ensemble",
         ]
         _model_raw = dict(zip(_model_types, [
             8, 9, 8,       # logistic variants
@@ -446,7 +459,9 @@ class ExperimentGenerator:
             6, 7,           # ensembles
             9, 8, 8,        # MLP + SGD
             8, 5, 8,        # ridge, extra_trees, bagged_linear
-            7, 7, 7, 7, 8,  # Wave 35: lda, nb, svc, bayesian, quantile
+            7, 7, 7, 7, 8,  # Wave 35: lda, nb, svc, bayesian, quantile_gb
+            6,               # Wave E3: quantile_forest
+            6, 7,            # Wave F2: catboost, stacking_ensemble
         ]))
         _model_clamped = self._clamp_weights(_model_raw, self.MIN_MODEL_TYPE_WEIGHT, self.MAX_MODEL_TYPE_WEIGHT)
         base.model.model_type = random.choices(
@@ -573,12 +588,43 @@ class ExperimentGenerator:
                 config.description = "Augmented: distillation baseline"
             # Distillation always on by default
 
+        elif exp_type == "data_source":
+            # Wave 38: Explore data source combinations — randomly toggle 2-4 flags
+            config = create_experiment_variant(base, exp_type)
+            source_flags = [
+                "use_fear_greed", "use_reddit_sentiment", "use_crypto_sentiment",
+                "use_gamma_exposure", "use_finnhub_social", "use_dark_pool",
+                "use_options_features", "use_amihud_features", "use_range_vol_features",
+                "use_entropy_features", "use_hurst_features", "use_nmi_features",
+                "use_absorption_ratio", "use_drift_features",
+                "use_changepoint_features", "use_hmm_features",
+                "use_vpin_features", "use_intraday_momentum", "use_futures_basis",
+                "use_congressional_features", "use_insider_aggregate", "use_etf_flow",
+                "use_wavelet_features", "use_sax_features", "use_transfer_entropy",
+                "use_mfdfa_features", "use_rqa_features",
+                "use_copula_features", "use_network_centrality",
+                "use_path_signatures", "use_wavelet_scattering", "use_wasserstein_regime",
+                "use_market_structure", "use_time_series_models",
+                "use_har_rv", "use_l_moments", "use_multiscale_entropy",
+                "use_rv_signature_plot", "use_tda_homology",
+            ]
+            # Randomly pick 2-4 flags to disable
+            n_disable = random.randint(2, 4)
+            to_disable = random.sample(source_flags, min(n_disable, len(source_flags) - 1))
+            enabled = []
+            for flag in source_flags:
+                val = flag not in to_disable
+                setattr(config.anti_overfit, flag, val)
+                if val:
+                    enabled.append(flag.replace("use_", ""))
+            config.description = f"Data source: {', '.join(enabled)}"
+
         else:
             config = create_experiment_variant(base, "hyperparameter")
 
         # Generate new experiment name
         config.experiment_name = f"{exp_type}_{datetime.now().strftime('%H%M%S')}"
-        if not config.description.startswith("Train on"):
+        if not config.description.startswith(("Train on", "Augmented:", "Data source:", "Feature research:")):
             config.description = f"Auto-generated {exp_type} experiment"
 
         return config
@@ -657,6 +703,46 @@ class ExperimentHistory:
                 # CV settings
                 str(getattr(cfg.cross_validation, 'n_cv_folds', 5)),
                 str(getattr(cfg.cross_validation, 'use_soft_targets', True)),
+                # Data source flags (Wave 38)
+                str(getattr(cfg.anti_overfit, 'use_fear_greed', True)),
+                str(getattr(cfg.anti_overfit, 'use_reddit_sentiment', True)),
+                str(getattr(cfg.anti_overfit, 'use_crypto_sentiment', True)),
+                str(getattr(cfg.anti_overfit, 'use_gamma_exposure', True)),
+                str(getattr(cfg.anti_overfit, 'use_finnhub_social', True)),
+                str(getattr(cfg.anti_overfit, 'use_dark_pool', True)),
+                str(getattr(cfg.anti_overfit, 'use_options_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_amihud_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_range_vol_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_entropy_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_hurst_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_nmi_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_absorption_ratio', True)),
+                str(getattr(cfg.anti_overfit, 'use_drift_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_changepoint_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_hmm_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_vpin_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_intraday_momentum', True)),
+                str(getattr(cfg.anti_overfit, 'use_futures_basis', True)),
+                str(getattr(cfg.anti_overfit, 'use_congressional_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_insider_aggregate', True)),
+                str(getattr(cfg.anti_overfit, 'use_etf_flow', True)),
+                str(getattr(cfg.anti_overfit, 'use_wavelet_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_sax_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_transfer_entropy', True)),
+                str(getattr(cfg.anti_overfit, 'use_mfdfa_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_rqa_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_copula_features', True)),
+                str(getattr(cfg.anti_overfit, 'use_network_centrality', True)),
+                str(getattr(cfg.anti_overfit, 'use_path_signatures', True)),
+                str(getattr(cfg.anti_overfit, 'use_wavelet_scattering', True)),
+                str(getattr(cfg.anti_overfit, 'use_wasserstein_regime', True)),
+                str(getattr(cfg.anti_overfit, 'use_market_structure', True)),
+                str(getattr(cfg.anti_overfit, 'use_time_series_models', False)),
+                str(getattr(cfg.anti_overfit, 'use_har_rv', True)),
+                str(getattr(cfg.anti_overfit, 'use_l_moments', True)),
+                str(getattr(cfg.anti_overfit, 'use_multiscale_entropy', True)),
+                str(getattr(cfg.anti_overfit, 'use_rv_signature_plot', False)),
+                str(getattr(cfg.anti_overfit, 'use_tda_homology', False)),
             ]
             return hashlib.md5("|".join(key_parts).encode()).hexdigest()[:12]
         except Exception:

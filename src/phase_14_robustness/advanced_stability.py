@@ -1,7 +1,7 @@
 """
-GIGA TRADER - Advanced Stability Suite (Wave 30 + 34 + 35)
-============================================================
-19 complementary stability and robustness measures covering:
+GIGA TRADER - Advanced Stability Suite (Wave 30 + 34 + 35 + F3)
+=================================================================
+22 complementary stability and robustness measures covering:
 
 Fast (post-hoc, no retraining):
   1. PSI  — Population Stability Index (train/test distribution shift)
@@ -29,6 +29,11 @@ Expensive (5-10 retrains):
 Optional (external packages):
   18. SHAP Consistency — feature ranking stability across folds
   19. Conformal Prediction — distribution-free prediction intervals
+
+Wave F3 Gates (standalone modules):
+  20. Label Noise Robustness — flip labels, retrain, measure AUC drop
+  21. Feature Importance Stability — rank correlation across CV folds
+  22. Knockoff Gate — FDR-controlled feature discovery
 
 All methods return a dict with at minimum {"score": float, ...metadata}.
 Scores are 0-1 (1 = maximally stable/good). Skipped methods return
@@ -81,31 +86,34 @@ except ImportError:
 # DEFAULT WEIGHTS — adjustable without code changes
 # ═══════════════════════════════════════════════════════════════════════════════
 DEFAULT_WEIGHTS: Dict[str, float] = {
-    "psi": 0.06,
+    "psi": 0.05,
     "csi": 0.04,
-    "adversarial": 0.06,
-    "ece": 0.05,
+    "adversarial": 0.05,
+    "ece": 0.04,
     "dsr": 0.05,
     "sfi": 0.05,
-    "meta_label": 0.05,
-    "knockoff": 0.05,
-    "adwin": 0.05,
-    "cpcv": 0.07,
-    "stability_selection": 0.06,
+    "meta_label": 0.04,
+    "knockoff": 0.04,
+    "adwin": 0.04,
+    "cpcv": 0.06,
+    "stability_selection": 0.05,
     "rashomon": 0.05,
-    "shap": 0.05,
-    "conformal": 0.05,
-    "adversarial_overfitting": 0.06,    # Wave 34: memorization detection
-    "disagreement_smoothing": 0.05,     # Wave 34: cross-model smoothing
-    "feature_causality": 0.05,          # Wave 35: Granger-like F-test
-    "prediction_interval_coverage": 0.05,  # Wave 35: bootstrap prediction intervals
+    "shap": 0.04,
+    "conformal": 0.04,
+    "adversarial_overfitting": 0.05,    # Wave 34: memorization detection
+    "disagreement_smoothing": 0.04,     # Wave 34: cross-model smoothing
+    "feature_causality": 0.04,          # Wave 35: Granger-like F-test
+    "prediction_interval_coverage": 0.04,  # Wave 35: bootstrap prediction intervals
     "distribution_robust": 0.05,        # Wave 35: worst-slice robustness
+    "label_noise": 0.05,               # Wave F3.1: label noise robustness
+    "fi_stability": 0.05,              # Wave F3.3: feature importance stability
+    "knockoff_gate": 0.04,             # Wave F3.4: knockoff feature hard gate
 }
 
 
 class AdvancedStabilitySuite:
     """
-    19 advanced stability and robustness measures.
+    22 advanced stability and robustness measures.
 
     Parameters
     ----------
@@ -139,6 +147,7 @@ class AdvancedStabilitySuite:
         n_noise_levels: int = 3,
         n_disagreement_folds: int = 5,
         weights: Optional[Dict[str, float]] = None,
+        skip_expensive: bool = False,
     ):
         self.n_cpcv_groups = n_cpcv_groups
         self.n_stability_sel = n_stability_sel
@@ -150,6 +159,7 @@ class AdvancedStabilitySuite:
         self.n_noise_levels = n_noise_levels
         self.n_disagreement_folds = n_disagreement_folds
         self.weights = weights or DEFAULT_WEIGHTS.copy()
+        self.skip_expensive = skip_expensive
 
     # ═══════════════════════════════════════════════════════════════════════════
     # MAIN ENTRY POINT
@@ -197,7 +207,7 @@ class AdvancedStabilitySuite:
         """
         results: Dict[str, Any] = {}
 
-        logger.info("[ADVANCED STABILITY] Running 19-method suite...")
+        logger.info("[ADVANCED STABILITY] Running 22-method suite...")
 
         # ── Fast group (post-hoc, no retraining) ──
         results["psi"] = self._population_stability_index(X_train, X_test)
@@ -229,19 +239,26 @@ class AdvancedStabilitySuite:
         )
 
         # ── Expensive group (5-10 retrains) ──
-        results["cpcv"] = self._combinatorial_purged_cv(
-            X_train, y_train, model_factory_fn
-        )
-        results["stability_selection"] = self._stability_selection(
-            X_train, y_train, model_factory_fn
-        )
-        results["rashomon"] = self._rashomon_set(
-            X_train, y_train, X_test, y_test, model_factory_fn, base_auc
-        )
-        results["adversarial_overfitting"] = self._adversarial_overfitting_detection(
-            X_train, y_train, X_test, y_test,
-            model_factory_fn, trained_model, predictions, base_auc
-        )
+        _skip_info = {"score": -1.0, "skipped": True, "reason": "skip_expensive=True (resource tier)"}
+        if self.skip_expensive:
+            results["cpcv"] = _skip_info
+            results["stability_selection"] = _skip_info
+            results["rashomon"] = _skip_info
+            results["adversarial_overfitting"] = _skip_info
+        else:
+            results["cpcv"] = self._combinatorial_purged_cv(
+                X_train, y_train, model_factory_fn
+            )
+            results["stability_selection"] = self._stability_selection(
+                X_train, y_train, model_factory_fn
+            )
+            results["rashomon"] = self._rashomon_set(
+                X_train, y_train, X_test, y_test, model_factory_fn, base_auc
+            )
+            results["adversarial_overfitting"] = self._adversarial_overfitting_detection(
+                X_train, y_train, X_test, y_test,
+                model_factory_fn, trained_model, predictions, base_auc
+            )
 
         # ── Optional group (external packages) ──
         results["shap"] = self._shap_consistency(
@@ -249,6 +266,17 @@ class AdvancedStabilitySuite:
         )
         results["conformal"] = self._conformal_prediction(
             trained_model, X_train, y_train, X_test, y_test
+        )
+
+        # ── Wave F3 gates (standalone modules) ──
+        results["label_noise"] = self._label_noise_robustness(
+            X_train, y_train, X_test, y_test, model_factory_fn, base_auc
+        )
+        results["fi_stability"] = self._feature_importance_stability(
+            X_train, y_train, model_factory_fn
+        )
+        results["knockoff_gate"] = self._knockoff_gate(
+            X_train, y_train, model_factory_fn
         )
 
         # ── Composite score ──
@@ -562,6 +590,7 @@ class AdvancedStabilitySuite:
                 class _PredictOnlyWrapper(ClassifierMixin, BaseEstimator):
                     def __init__(self, pipeline):
                         self._pipeline = pipeline
+                        self.classes_ = np.array([0, 1])
                     def fit(self, X, y):
                         return self
                     def predict_proba(self, X):
@@ -1739,6 +1768,78 @@ class AdvancedStabilitySuite:
             }
         except Exception as e:
             logger.warning(f"  Distribution-robust scoring failed: {e}")
+            return {"score": 0.5, "error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 20. LABEL NOISE ROBUSTNESS (Wave F3.1)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _label_noise_robustness(
+        self,
+        X_train: np.ndarray, y_train: np.ndarray,
+        X_test: np.ndarray, y_test: np.ndarray,
+        model_factory_fn: Callable, base_auc: float,
+    ) -> Dict[str, Any]:
+        """Wrapper for standalone LabelNoiseTest (Wave F3.1)."""
+        try:
+            from src.phase_14_robustness.label_noise_test import LabelNoiseTest
+            test = LabelNoiseTest(noise_levels=[0.05, 0.10], n_repeats=2)
+            result = test.run(
+                model_factory=model_factory_fn,
+                X=X_train, y=y_train,
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"  Label noise robustness failed: {e}")
+            return {"score": 0.5, "error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 21. FEATURE IMPORTANCE STABILITY (Wave F3.3)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _feature_importance_stability(
+        self,
+        X_train: np.ndarray, y_train: np.ndarray,
+        model_factory_fn: Callable,
+    ) -> Dict[str, Any]:
+        """Wrapper for standalone FeatureImportanceStabilityGate (Wave F3.3)."""
+        try:
+            from src.phase_14_robustness.feature_importance_stability import (
+                FeatureImportanceStabilityGate,
+            )
+            gate = FeatureImportanceStabilityGate(
+                n_folds=min(5, max(2, len(y_train) // 50)),
+                threshold=0.5,
+            )
+            result = gate.run(
+                model=model_factory_fn(),
+                X=X_train, y=y_train,
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"  Feature importance stability failed: {e}")
+            return {"score": 0.5, "error": str(e)}
+
+    # ═══════════════════════════════════════════════════════════════════════════
+    # 22. KNOCKOFF GATE (Wave F3.4)
+    # ═══════════════════════════════════════════════════════════════════════════
+
+    def _knockoff_gate(
+        self,
+        X_train: np.ndarray, y_train: np.ndarray,
+        model_factory_fn: Callable,
+    ) -> Dict[str, Any]:
+        """Wrapper for standalone KnockoffGate (Wave F3.4)."""
+        try:
+            from src.phase_14_robustness.knockoff_gate import KnockoffGate
+            gate = KnockoffGate(top_k_fraction=0.3, n_repeats=1)
+            result = gate.run(
+                model=model_factory_fn(),
+                X=X_train, y=y_train,
+            )
+            return result
+        except Exception as e:
+            logger.warning(f"  Knockoff gate failed: {e}")
             return {"score": 0.5, "error": str(e)}
 
     # ═══════════════════════════════════════════════════════════════════════════

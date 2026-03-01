@@ -25,6 +25,8 @@ from dataclasses import dataclass, field, asdict
 from enum import Enum
 import copy
 
+from src.core.system_resources import ResourceConfig, create_resource_config
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # EXPERIMENT CONFIGURATION SCHEMA
@@ -49,6 +51,13 @@ class DataConfig:
 
     # Regime filtering (Wave 26: regime-specific training)
     regime_filter: str = ""  # "", "low_vol", "high_vol"
+
+    # OHLC data validation (Wave F1.1)
+    validate_ohlc: bool = True
+
+    # Wave G4: Information-driven bars (dollar/volume/tick bars)
+    use_information_bars: bool = False  # Default OFF: alternative to time bars
+    information_bar_type: str = "dollar"  # "dollar", "volume", "tick"
 
 
 @dataclass
@@ -106,6 +115,20 @@ class FeatureEngineeringConfig:
         default_factory=lambda: [5, 10, 20, 50]
     )
 
+    # CUSUM event filter (Wave E4) — filter training data to significant-move dates
+    use_cusum_filter: bool = False  # Default OFF: opt-in via grid search
+    cusum_threshold: float = 0.01   # 1% cumulative return triggers event
+
+    # Triple barrier labeling (Wave F5.1) — first-touch-wins: TP, SL, or time expiry
+    use_triple_barrier: bool = False  # Default OFF: alternative to standard swing labeling
+    tp_pct: float = 0.01           # Take-profit threshold
+    sl_pct: float = 0.01           # Stop-loss threshold
+    max_holding_days: int = 5      # Maximum holding period
+
+    # Feature interaction discovery (Wave F5.2) — pairwise products/ratios
+    use_interaction_discovery: bool = False  # Default OFF: expensive
+    max_interactions: int = 20
+
 
 @dataclass
 class DimensionalityReductionConfig:
@@ -119,6 +142,9 @@ class DimensionalityReductionConfig:
     # Pre-filtering
     variance_threshold: float = 0.01
     correlation_threshold: float = 0.95
+
+    # Feature neutralization (Wave E1) — remove market beta from features
+    neutralize_features: bool = False  # Default OFF: opt-in via full grid
 
     # Target output dimensions
     target_dimensions: int = 50
@@ -190,6 +216,21 @@ class ModelConfig:
     ensemble_voting: str = "soft"  # "soft", "hard"
     ensemble_weights: Optional[List[float]] = None
 
+    # Wave F2: Class weight balancing for imbalanced data
+    use_class_weights: bool = False
+
+    # Wave F2: Stacking ensemble base models
+    stacking_base_models: List[str] = field(
+        default_factory=lambda: ["logistic_l2", "gradient_boosting", "hist_gradient_boosting"]
+    )
+
+    # Wave F4.1: Regime-conditional model routing
+    use_regime_router: bool = False
+    regime_split_method: str = "vix_quartile"  # "vix_quartile", "vix_fixed", "binary_vol"
+
+    # Wave F6.2: Bayesian model averaging
+    use_bma: bool = False
+
 
 @dataclass
 class CrossValidationConfig:
@@ -209,6 +250,9 @@ class CrossValidationConfig:
     secondary_metrics: List[str] = field(
         default_factory=lambda: ["accuracy", "precision", "recall", "f1"]
     )
+
+    # Wave F4.3: Isotonic probability recalibration
+    use_isotonic_calibration: bool = False
 
 
 @dataclass
@@ -287,10 +331,155 @@ class AntiOverfitConfig:
     # Sentiment features (VIX-derived fear/greed, cross-asset flows, optional news)
     use_sentiment_features: bool = True
 
+    # CNN Fear & Greed Index features (contrarian indicator)
+    use_fear_greed: bool = True
+
+    # Reddit sentiment features (ApeWisdom)
+    use_reddit_sentiment: bool = True
+
+    # Congressional trading proxy features (smart-money volume signal)
+    use_congressional_features: bool = True
+
+    # Crypto Fear & Greed Index (risk-on/off proxy)
+    use_crypto_sentiment: bool = True
+
+    # Gamma Exposure (GEX) proxy from VIX term structure
+    use_gamma_exposure: bool = True
+
+    # Finnhub Social sentiment (requires FINNHUB_API_KEY)
+    use_finnhub_social: bool = True
+
+    # FINRA Dark Pool short sale volume features (2-4 week lag)
+    use_dark_pool: bool = True
+
+    # Options IV/Skew features (VIX rank, CBOE SKEW Index, vol-of-vol)
+    use_options_features: bool = True
+
+    # Event recency features (days since last -1%/-2% drop, reversal, etc.)
+    use_event_recency: bool = True
+
+    # Block structure features (multi-day 3d/5d blocks, cascades, texture)
+    use_block_structure: bool = True
+
+    # Amihud illiquidity ratio features (|return|/dollar_volume)
+    use_amihud_features: bool = True
+
+    # Range-based volatility features (Garman-Klass, Yang-Zhang, Rogers-Satchell)
+    use_range_vol_features: bool = True
+
+    # Entropy features (Shannon, permutation, sample entropy)
+    use_entropy_features: bool = True
+
+    # Hurst exponent features (R/S analysis, trending/mean-reverting regimes)
+    use_hurst_features: bool = True
+
+    # NMI market efficiency features (mutual information between returns and lags)
+    use_nmi_features: bool = True
+
+    # Absorption ratio features (PCA-based systemic risk)
+    use_absorption_ratio: bool = True
+
+    # ADWIN drift detection features (distribution change detection)
+    use_drift_features: bool = True
+
+    # Changepoint detection features (Bayesian online changepoint detection)
+    use_changepoint_features: bool = True
+
+    # HMM regime features (rolling hidden Markov model states)
+    use_hmm_features: bool = True
+
+    # VPIN order flow toxicity features (bulk volume classification)
+    use_vpin_features: bool = True
+
+    # Intraday momentum features (overnight gap, close location, reversal)
+    use_intraday_momentum: bool = True
+
+    # Futures-spot basis features (ES=F vs SPY spread proxy)
+    use_futures_basis: bool = True
+
+    # Insider aggregate proxy features (price+volume accumulation signals)
+    use_insider_aggregate: bool = True
+
+    # ETF fund flow proxy features (volume-price divergence, creation/redemption)
+    use_etf_flow: bool = True
+
+    # Wavelet decomposition features (multi-resolution price decomposition)
+    use_wavelet_features: bool = True
+
+    # SAX pattern features (symbolic aggregate approximation)
+    use_sax_features: bool = True
+
+    # Transfer entropy features (cross-asset information flow)
+    use_transfer_entropy: bool = True
+
+    # MFDFA features (multifractal detrended fluctuation analysis)
+    use_mfdfa_features: bool = True
+
+    # RQA features (recurrence quantification analysis)
+    use_rqa_features: bool = True
+
+    # Copula tail dependence features (empirical copula lower/upper lambda)
+    use_copula_features: bool = True
+
+    # Correlation network centrality features (cross-asset graph metrics)
+    use_network_centrality: bool = True
+
+    # Path signature features (iterated integrals of price/volume paths)
+    use_path_signatures: bool = True
+
+    # Wavelet scattering transform features (multi-scale time-frequency)
+    use_wavelet_scattering: bool = True
+
+    # Wasserstein regime detection features (distribution-distance regime changes)
+    use_wasserstein_regime: bool = True
+
+    # Market structure features (compression/squeeze, attractors, inflection zones)
+    use_market_structure: bool = True
+
+    # Time series model features (ARIMA residuals, optional Chronos/catch22)
+    use_time_series_models: bool = False   # Needs statsmodels; Chronos/catch22 optional
+
+    # catch22 canonical time series features (requires pycatch22)
+    use_catch22: bool = False
+
+    # HAR-RV features (multi-horizon volatility cascade)
+    use_har_rv: bool = True
+
+    # L-Moments features (robust distributional shape)
+    use_l_moments: bool = True
+
+    # Multiscale sample entropy features (cross-scale complexity)
+    use_multiscale_entropy: bool = True
+
+    # RV signature plot features (cross-frequency microstructure noise)
+    use_rv_signature_plot: bool = False
+
+    # TDA persistent homology features (topological crash detection, requires giotto-tda)
+    use_tda_homology: bool = False
+
+    # Meta-labeling: secondary classifier predicting signal profitability
+    use_meta_labeling: bool = True
+
     # Synthetic weight penalty (prevents overfitting to synthetic data)
     synthetic_weight_penalty: float = 0.5   # Synthetic rows get 50% of confidence weight
     synthetic_weight_floor: float = 0.10    # Min weight for any synthetic sample
     synthetic_weight_ceiling: float = 0.60  # Max weight for any synthetic sample
+
+    # Wave F3.1: Label noise robustness test
+    use_label_noise_test: bool = True
+
+    # Wave F3.2: Adversarial validation hard gate threshold
+    adversarial_gate_threshold: float = 0.65
+
+    # Wave F3.3: Feature importance stability gate
+    use_fi_stability_gate: bool = True
+    fi_stability_threshold: float = 0.5
+
+    # Wave F3.4: Knockoff feature hard gate (expensive, default OFF)
+    use_knockoff_gate: bool = False
+
+    # Wave F4.4: Purge/embargo at synthetic data boundary
+    purge_synthetic_boundary: bool = True
 
     # Evaluation thresholds
     wmes_threshold: float = 0.55
@@ -378,6 +567,42 @@ class TradingConfig:
     max_daily_trades: int = 5
     position_sizing: str = "fixed"  # "fixed", "kelly", "volatility_scaled"
 
+    # Wave F1.2: Circuit breaker enforcement
+    use_circuit_breaker: bool = True
+    max_daily_loss_pct: float = 0.02
+    max_drawdown_pct: float = 0.10
+    max_consecutive_losses: int = 5
+
+    # Wave F1.3: Model staleness check
+    max_model_age_days: int = 30
+
+    # Wave F2.2: Dynamic ensemble weighting
+    use_dynamic_weights: bool = False
+    dynamic_weight_lookback: int = 20
+
+    # Wave F4.2: Conformal prediction sizing
+    use_conformal_sizing: bool = False
+    conformal_alpha: float = 0.1
+
+    # Wave F6.1: Feature drift monitoring
+    use_drift_monitor: bool = True
+    drift_psi_threshold: float = 0.2
+
+    # Wave F6.3: Online learning updates
+    use_online_learning: bool = False
+    online_buffer_days: int = 5
+
+    # Wave G2: CVaR-based position sizing (tail-risk-aware)
+    use_cvar_sizing: bool = False
+    cvar_alpha: float = 0.05
+    cvar_lookback: int = 60
+    cvar_target: float = 0.02
+
+    # Wave G3: Thompson Sampling model selection (bandit-based)
+    use_thompson_selector: bool = False
+    thompson_decay: float = 0.995
+    thompson_min_weight: float = 0.1
+
 
 @dataclass
 class ExperimentConfig:
@@ -409,6 +634,9 @@ class ExperimentConfig:
     temporal_cascade: TemporalCascadeConfig = field(default_factory=TemporalCascadeConfig)
     training_augmentation: TrainingAugmentationConfig = field(default_factory=TrainingAugmentationConfig)
     trading: TradingConfig = field(default_factory=TradingConfig)
+
+    # System resource detection and adaptive scaling
+    resources: ResourceConfig = field(default_factory=create_resource_config)
 
     # Wave 32: Arbitrary metadata for research experiments, feature candidates, etc.
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -461,6 +689,10 @@ class ExperimentConfig:
             temporal_cascade=TemporalCascadeConfig(**d.get("temporal_cascade", {})),
             training_augmentation=TrainingAugmentationConfig(**d.get("training_augmentation", {})),
             trading=TradingConfig(**d.get("trading", {})),
+            resources=(
+                ResourceConfig(**d["resources"]) if d.get("resources")
+                else create_resource_config()
+            ),
             metadata=d.get("metadata", {}),
         )
         return config

@@ -13,6 +13,18 @@ from src.phase_14_robustness.stability_suite import (
 from src.phase_14_robustness.advanced_stability import (
     AdvancedStabilitySuite,
 )
+from src.phase_14_robustness.feature_importance_stability import (
+    FeatureImportanceStabilityGate,
+)
+from src.phase_14_robustness.label_noise_test import (
+    LabelNoiseTest,
+)
+from src.phase_14_robustness.knockoff_gate import (
+    KnockoffGate,
+)
+from src.phase_14_robustness.wasserstein_regime import (
+    WassersteinRegimeDetector,
+)
 
 __all__ = [
     "StabilityAnalyzer",
@@ -20,4 +32,8 @@ __all__ = [
     "create_robustness_ensemble",
     "StabilitySuite",
     "AdvancedStabilitySuite",
+    "FeatureImportanceStabilityGate",
+    "LabelNoiseTest",
+    "KnockoffGate",
+    "WassersteinRegimeDetector",
 ]

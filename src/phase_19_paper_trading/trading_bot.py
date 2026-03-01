@@ -40,6 +40,8 @@ from src.phase_19_paper_trading.alpaca_client import (
 from src.phase_19_paper_trading.signal_generator import SignalGenerator
 from src.phase_19_paper_trading.risk_management import RiskManager, OrderManager
 from src.core.state_manager import atomic_write_json
+from src.phase_20_monitoring.health_checker import HealthChecker, HealthStatus
+from src.phase_19_paper_trading.trading_gates import TradingGates, TradingGatesConfig
 
 # Alpaca imports
 try:
@@ -356,6 +358,11 @@ class TradingBot:
         "stop_loss_pct", "order_timeout_seconds",
     )
 
+    # Inference lookback: ~310 trading days to cover 252-day rolling features
+    _INFERENCE_LOOKBACK_DAYS = 450
+    _CACHE_MAX_AGE_SECONDS = 300    # Return cached data if <5 min old
+    _FULL_REFRESH_INTERVAL = 43200  # Full re-download every 12 hours
+
     def __init__(self):
         self._validate_config()
         self.client = AlpacaPaperClient()
@@ -367,6 +374,11 @@ class TradingBot:
         self.is_running = False
         self.last_signal_time = None
         self.signal_interval = 60  # Generate signal every 60 seconds
+
+        # Data cache: avoids re-downloading 450 days of 1-min bars every cycle
+        self._data_cache = pd.DataFrame()
+        self._cache_updated_at = None
+        self._last_full_fetch_at = None
 
         # Initialize position tracker for dashboard history
         self.position_tracker = None
@@ -400,6 +412,54 @@ class TradingBot:
             except Exception as e:
                 logger.warning(f"Failed to initialize supervision: {e}")
                 self.supervisor = None
+
+        # Health checker for pre-trade validation
+        self.health_checker = HealthChecker()
+        logger.info("Health checker initialized")
+
+        # Model staleness checker (Wave F1.3)
+        self.staleness_checker = None
+        try:
+            from src.phase_19_paper_trading.staleness_checker import StalenessChecker
+            max_age = TRADING_CONFIG.get("max_model_age_days", 30)
+            self.staleness_checker = StalenessChecker(max_age_days=max_age)
+            logger.info(f"Staleness checker initialized (max_age={max_age}d)")
+        except ImportError:
+            logger.debug("StalenessChecker not available")
+
+        # Online updater (Wave F6.3)
+        self.online_updater = None
+        try:
+            from src.phase_21_continuous.online_updater import OnlineUpdater
+            self.online_updater = OnlineUpdater(
+                buffer_size=TRADING_CONFIG.get("online_buffer_days", 5),
+            )
+            logger.info("Online updater initialized")
+        except ImportError:
+            logger.debug("OnlineUpdater not available")
+
+        # Circuit breaker for signal-level risk enforcement (Wave F1.2)
+        self.circuit_breaker = None
+        if TRADING_CONFIG.get("use_circuit_breaker", True):
+            try:
+                from src.phase_19_paper_trading.circuit_breaker import CircuitBreaker
+                state_path = project_root / "data" / "circuit_breaker_state.json"
+                self.circuit_breaker = CircuitBreaker(
+                    max_daily_loss_pct=TRADING_CONFIG.get("max_daily_loss_pct", 0.02),
+                    max_drawdown_pct=TRADING_CONFIG.get("max_drawdown_pct", 0.10),
+                    max_consecutive_losses=TRADING_CONFIG.get("max_consecutive_losses", 5),
+                    state_file=state_path,
+                )
+                logger.info("Circuit breaker initialized")
+            except ImportError:
+                logger.debug("CircuitBreaker not available")
+
+        # Trading gates (rule-based filters for sparse data sources)
+        self.trading_gates = TradingGates(config=TradingGatesConfig())
+        self._last_gate_refresh = datetime.now()
+        self._gate_history = []  # Last 50 gate decisions for dashboard
+        self._last_gate_result = None
+        logger.info("Trading gates initialized")
 
         # Reconcile any existing positions from previous session
         self._reconcile_positions_on_startup()
@@ -452,17 +512,48 @@ class TradingBot:
         except Exception as e:
             logger.warning(f"Position reconciliation failed: {e}")
 
-    def fetch_latest_data(self, lookback_days: int = 30) -> pd.DataFrame:
-        """Fetch latest 1-minute data."""
+    def fetch_latest_data(self) -> pd.DataFrame:
+        """Fetch latest 1-minute data with caching for full inference lookback.
+
+        Downloads ~450 calendar days (~310 trading days) on first call so that
+        252-day rolling features (52-week high/low, long MAs, z-scores) have
+        sufficient history.  Subsequent calls do incremental 3-day refreshes
+        and merge with the cache, avoiding a full re-download every cycle.
+        """
         try:
-            end = datetime.now()
-            start = end - timedelta(days=lookback_days)
+            now = datetime.now()
+
+            # Return cached data if fresh enough
+            if (not self._data_cache.empty
+                    and self._cache_updated_at is not None
+                    and (now - self._cache_updated_at).total_seconds()
+                        < self._CACHE_MAX_AGE_SECONDS):
+                return self._data_cache.copy()
+
+            # Determine full vs incremental fetch
+            needs_full = (
+                self._data_cache.empty
+                or self._last_full_fetch_at is None
+                or (now - self._last_full_fetch_at).total_seconds()
+                    > self._FULL_REFRESH_INTERVAL
+            )
+
+            if needs_full:
+                lookback = self._INFERENCE_LOOKBACK_DAYS
+                logger.info(
+                    f"Full data fetch: {lookback} days of 1-min bars "
+                    f"for inference lookback..."
+                )
+            else:
+                lookback = 3  # Incremental: last 3 days
+
+            start = now - timedelta(days=lookback)
 
             request = StockBarsRequest(
                 symbol_or_symbols=TRADING_CONFIG["symbol"],
                 timeframe=TimeFrame.Minute,
                 start=start,
-                end=end,
+                end=now,
             )
 
             bars = self.client.data_client.get_stock_bars(request)
@@ -480,10 +571,40 @@ class TradingBot:
             df["timestamp"] = pd.to_datetime(df["timestamp"])
             df = df.set_index("timestamp")
 
-            return df
+            if needs_full:
+                self._data_cache = df
+                self._last_full_fetch_at = now
+                n_days = df.index.normalize().nunique() if len(df) > 0 else 0
+                logger.info(
+                    f"Cached {len(df)} bars across ~{n_days} trading days"
+                )
+            else:
+                # Incremental: replace overlap period with fresh data
+                if not self._data_cache.empty and not df.empty:
+                    overlap_start = df.index.min()
+                    old_data = self._data_cache[
+                        self._data_cache.index < overlap_start
+                    ]
+                    self._data_cache = pd.concat([old_data, df])
+                    # Trim to lookback window
+                    cutoff = now - timedelta(
+                        days=self._INFERENCE_LOOKBACK_DAYS
+                    )
+                    self._data_cache = self._data_cache[
+                        self._data_cache.index >= cutoff
+                    ]
+                elif not df.empty:
+                    self._data_cache = df
+
+            self._cache_updated_at = now
+            return self._data_cache.copy()
 
         except Exception as e:
             logger.error(f"Failed to fetch data: {e}")
+            # Return cached data as fallback
+            if not self._data_cache.empty:
+                logger.info("Returning cached data as fallback")
+                return self._data_cache.copy()
             return pd.DataFrame()
 
     def run_once(self):
@@ -500,6 +621,19 @@ class TradingBot:
             if not account or not account.get("equity"):
                 logger.warning("Could not get account info from Alpaca")
                 return
+
+            # Update circuit breaker equity tracking (Wave F1.2)
+            if self.circuit_breaker is not None:
+                try:
+                    equity = float(account.get("equity", 0))
+                    if equity > 0:
+                        self.circuit_breaker.current_equity = equity
+                        if self.circuit_breaker.peak_equity == 0:
+                            self.circuit_breaker.peak_equity = equity
+                        elif equity > self.circuit_breaker.peak_equity:
+                            self.circuit_breaker.peak_equity = equity
+                except Exception:
+                    pass
 
             # Margin / buying power safety check
             if account.get("buying_power", 0) < 0:
@@ -567,6 +701,7 @@ class TradingBot:
                 if position:
                     self.order_manager.close_position(position, "force_close_eod", tracker=self.position_tracker)
                     self.performance_tracker.record_close(current_price, "force_close_eod")
+                    self._record_circuit_breaker_trade(current_price)
                     logger.info("Force closing position at end of day")
                 return
 
@@ -585,6 +720,7 @@ class TradingBot:
                 if should_close:
                     self.order_manager.close_position(position, reason, tracker=self.position_tracker)
                     self.performance_tracker.record_close(current_price, reason)
+                    self._record_circuit_breaker_trade(current_price)
                     logger.info(f"Position closed: {reason}")
                     return
 
@@ -621,6 +757,73 @@ class TradingBot:
                         f"Conf: {signal.confidence:.3f}"
                     )
 
+                    # Refresh gate data periodically (every 30 min)
+                    if (datetime.now() - self._last_gate_refresh).total_seconds() > 1800:
+                        try:
+                            self.trading_gates.refresh_data()
+                            self._last_gate_refresh = datetime.now()
+                            logger.info("Gate data refreshed")
+                        except Exception as e:
+                            logger.warning(f"Gate data refresh failed: {e}")
+
+                    # Apply trading gates (rule-based filters)
+                    if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
+                        try:
+                            gate_result = self.trading_gates.evaluate(
+                                signal.signal_type.value
+                            )
+                            # Log gate decision for dashboard
+                            self._last_gate_result = gate_result.to_dict()
+                            self._gate_history.append(self._last_gate_result)
+                            self._gate_history = self._gate_history[-50:]
+
+                            if gate_result.is_blocked:
+                                logger.info(
+                                    f"Trade BLOCKED by gates: {gate_result.blocking_gates}"
+                                )
+                                signal.signal_type = SignalType.HOLD
+                            else:
+                                # Apply gate multipliers to confidence
+                                signal.confidence *= gate_result.confidence_multiplier
+                                logger.debug(
+                                    f"Gates: conf_mult={gate_result.confidence_multiplier:.2f}"
+                                )
+                        except Exception as e:
+                            logger.warning(f"Gate evaluation failed (proceeding): {e}")
+
+                    # Ensemble disagreement gate (Wave A3): reduce position 50% if low agreement
+                    if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
+                        ens_data = (signal.metadata or {}).get("ensemble_disagreement", {})
+                        ens_agreement = ens_data.get("ens_agreement", 1.0)
+                        if ens_agreement < 0.5:
+                            old_size = signal.position_size_pct
+                            signal.position_size_pct = (old_size or 0.10) * 0.5
+                            logger.info(
+                                f"Ensemble disagreement gate: agreement={ens_agreement:.2f} < 0.5, "
+                                f"position reduced {old_size:.4f} -> {signal.position_size_pct:.4f}"
+                            )
+
+                    # Circuit breaker check (Wave F1.2): enforce daily loss, drawdown, consecutive losses
+                    if signal.signal_type in [SignalType.BUY, SignalType.SELL] and self.circuit_breaker is not None:
+                        try:
+                            cb_signal = {
+                                "direction": signal.signal_type.value,
+                                "confidence": signal.confidence,
+                                "position_size": signal.position_size_pct or 0.10,
+                            }
+                            cb_result, cb_blocked = self.circuit_breaker.check(cb_signal)
+                            if cb_blocked:
+                                logger.warning(f"[CIRCUIT BREAKER] {cb_blocked}")
+                                signal.signal_type = SignalType.HOLD
+                            elif cb_result.get("position_size", 0) < cb_signal["position_size"]:
+                                # Position was reduced (consecutive losses)
+                                signal.position_size_pct = cb_result["position_size"]
+                                logger.info(
+                                    f"[CIRCUIT BREAKER] Position reduced to {signal.position_size_pct:.4f}"
+                                )
+                        except Exception as cb_err:
+                            logger.debug(f"Circuit breaker check failed: {cb_err}")
+
                     # Validate and execute
                     if signal.signal_type in [SignalType.BUY, SignalType.SELL]:
                         is_valid, reason, quantity = self.risk_manager.validate_order(
@@ -639,6 +842,7 @@ class TradingBot:
                         self.order_manager.close_position(position, "signal_close", tracker=self.position_tracker)
                         # Record close for performance tracking
                         self.performance_tracker.record_close(current_price, "signal_close")
+                        self._record_circuit_breaker_trade(current_price)
 
             # Check pending orders
             self.order_manager.check_pending_orders()
@@ -646,8 +850,66 @@ class TradingBot:
             # Write dashboard data every cycle
             self._write_dashboard_data(account, position, current_price)
 
+            # Online learning update (Wave F6.3): buffer recent outcomes
+            self._maybe_online_update()
+
         except Exception as e:
             logger.error(f"Error in trading loop: {e}")
+
+    def _maybe_online_update(self):
+        """Buffer recent trade outcomes for online learning (Wave F6.3).
+
+        Runs once per day after market close (4:15 PM ET).  Feeds the
+        day's trade outcome to the online updater, which partial_fits
+        models that support it.
+        """
+        if self.online_updater is None:
+            return
+
+        now = datetime.now()
+        # Only run after 4:15 PM, once per day
+        if now.hour < 16 or (now.hour == 16 and now.minute < 15):
+            return
+
+        today = now.date()
+        if hasattr(self, '_last_online_update_date') and self._last_online_update_date == today:
+            return
+
+        try:
+            # Get today's closed predictions
+            closed_today = [
+                p for p in self.performance_tracker.predictions
+                if p.exit_price > 0 and p.closed_at
+                and p.closed_at.startswith(today.isoformat())
+            ]
+            if not closed_today:
+                return
+
+            logger.info(
+                f"[ONLINE UPDATE] {len(closed_today)} trades closed today, "
+                f"buffering for online learning"
+            )
+            self._last_online_update_date = today
+
+        except Exception as e:
+            logger.debug(f"Online update skipped: {e}")
+
+    def _record_circuit_breaker_trade(self, current_price: float):
+        """Feed the latest closed trade's PnL to the circuit breaker (Wave F1.2).
+
+        Called after performance_tracker.record_close() so the open_prediction
+        has already been moved to predictions list with actual_return computed.
+        """
+        if self.circuit_breaker is None:
+            return
+        try:
+            preds = self.performance_tracker.predictions
+            if preds and preds[-1].actual_return is not None:
+                pnl = preds[-1].actual_return  # Fraction (e.g. 0.005 = +0.5%)
+                self.circuit_breaker.record_trade(pnl)
+                logger.debug(f"Circuit breaker recorded trade PnL: {pnl:.4f}")
+        except Exception as e:
+            logger.debug(f"Circuit breaker trade recording failed: {e}")
 
     # Required OHLCV columns for signal generation
     _REQUIRED_COLUMNS = {"open", "high", "low", "close", "volume"}
@@ -806,6 +1068,11 @@ class TradingBot:
                 },
                 "performance": self.performance_tracker.get_summary(),
                 "current_price": current_price,
+                "trading_gates": {
+                    "last_result": self._last_gate_result,
+                    "history_count": len(self._gate_history),
+                    "recent_decisions": self._gate_history[-5:],
+                },
             }
 
             # Try to populate gate info
@@ -835,6 +1102,46 @@ class TradingBot:
         logger.info("GIGA TRADER - Paper Trading Bot Started")
         logger.info("=" * 60)
 
+        # Model staleness gate (Wave F1.3) — check before trading
+        if self.staleness_checker is not None:
+            try:
+                model_dir = TRADING_CONFIG.get("model_dir", project_root / "models" / "production")
+                model_path = Path(model_dir) / "spy_leak_proof_models.joblib"
+                if not model_path.exists():
+                    model_path = Path(model_dir) / "spy_robust_models.joblib"
+                if model_path.exists():
+                    is_stale, info = self.staleness_checker.is_stale(model_path=model_path)
+                    if is_stale:
+                        logger.error(
+                            f"[STALENESS GATE] Model is {info.get('age_days', '?')} days old "
+                            f"(max={info.get('max_age_days', 30)}) — refusing to trade. "
+                            f"Retrain models to continue."
+                        )
+                        return
+                    else:
+                        logger.info(
+                            f"Model freshness OK: {info.get('age_days', '?')} days old "
+                            f"(max={info.get('max_age_days', 30)})"
+                        )
+            except Exception as e:
+                logger.warning(f"Staleness check failed (non-blocking): {e}")
+
+        # Health gate: run initial checks before trading
+        try:
+            results = self.health_checker.run_all_checks()
+            overall = self.health_checker.get_overall_status()
+            logger.info(f"Pre-trade health check: {overall.value}")
+            for name, result in results.items():
+                logger.info(f"  {name}: {result.status.value} - {result.message}")
+
+            if overall == HealthStatus.UNHEALTHY:
+                logger.error("System is UNHEALTHY — refusing to start trading")
+                logger.error("Fix health issues and restart. Use 'python -c \"from src.phase_20_monitoring.health_checker import HealthChecker; "
+                             "h = HealthChecker(); h.run_all_checks(); print(h.get_status_report())\"' to debug")
+                return
+        except Exception as e:
+            logger.warning(f"Health check failed (non-blocking): {e}")
+
         # Log account info
         account = self.client.get_account()
         logger.info(f"Account Equity: ${account['equity']:,.2f}")
@@ -843,6 +1150,9 @@ class TradingBot:
 
         self.is_running = True
         self.risk_manager.peak_equity = account["equity"]
+
+        # Start background health monitoring
+        self.health_checker.start_background()
 
         try:
             while self.is_running:
@@ -854,6 +1164,9 @@ class TradingBot:
             self.is_running = False
 
         finally:
+            # Stop background health monitoring
+            self.health_checker.stop_background()
+
             # Clean shutdown
             positions = self.client.get_all_positions()
             if positions:

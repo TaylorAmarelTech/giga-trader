@@ -86,6 +86,15 @@ class EconomicFeatures:
         "ICSA": {"desc": "Initial Jobless Claims (weekly)", "prefix": "fred_claims"},
         "UNRATE": {"desc": "Unemployment Rate (monthly)", "prefix": "fred_unrate"},
         "UMCSENT": {"desc": "Michigan Consumer Sentiment (monthly)", "prefix": "fred_sentiment"},
+        # Wave 37a: Additional FRED series for broader economic coverage
+        "VIXCLS": {"desc": "CBOE VIX Close (daily, FRED mirror)", "prefix": "fred_vixcls"},
+        "DCOILWTICO": {"desc": "WTI Crude Oil Price (daily)", "prefix": "fred_oil"},
+        "MORTGAGE30US": {"desc": "30-Year Fixed Mortgage Rate (weekly)", "prefix": "fred_mtg30"},
+        "CPIAUCSL": {"desc": "CPI All Items (monthly)", "prefix": "fred_cpi"},
+        "INDPRO": {"desc": "Industrial Production Index (monthly)", "prefix": "fred_indpro"},
+        "M2SL": {"desc": "M2 Money Supply (monthly)", "prefix": "fred_m2"},
+        "RSXFS": {"desc": "Retail Sales Ex Food Services (monthly)", "prefix": "fred_retail"},
+        "PERMIT": {"desc": "New Private Housing Permits (monthly)", "prefix": "fred_permits"},
     }
 
     def __init__(self, sources: Optional[List[str]] = None):

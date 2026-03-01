@@ -1031,6 +1031,18 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
+        <!-- Trading Gates Section -->
+        <div class="card" style="margin-bottom: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <h2 style="margin: 0;">Trading Gates</h2>
+                <span id="gatesStatus" class="status-badge status-healthy">--</span>
+            </div>
+            <div id="gatesSummary" style="margin-top: 10px;">
+                <div class="no-data">No gate evaluations yet</div>
+            </div>
+            <div id="gatesDetail" style="max-height: 200px; overflow-y: auto; margin-top: 10px;"></div>
+        </div>
+
         <!-- Experiment Progress Section -->
         <div class="card" style="margin-bottom: 20px;" id="experimentCard">
             <div style="display: flex; justify-content: space-between; align-items: center;">
@@ -1352,6 +1364,41 @@ DASHBOARD_HTML = """
                     componentsHtml += `<div class="metric"><span class="metric-label">${shortName}</span><span class="status-badge status-${statusClass}">${state}</span></div>`;
                 }
                 document.getElementById('componentsContainer').innerHTML = componentsHtml || '<div class="no-data">No components</div>';
+
+                // Trading Gates
+                const gates = data.trading_gates;
+                if (gates && gates.last_result) {
+                    const gr = gates.last_result;
+                    const blocked = gr.is_blocked;
+                    const confMult = gr.confidence_multiplier || 1.0;
+                    const statusBadge = document.getElementById('gatesStatus');
+                    if (blocked) {
+                        statusBadge.textContent = 'BLOCKED';
+                        statusBadge.className = 'status-badge status-stopped';
+                    } else if (confMult < 0.9) {
+                        statusBadge.textContent = 'CAUTION';
+                        statusBadge.className = 'status-badge status-warning';
+                    } else {
+                        statusBadge.textContent = 'PASS';
+                        statusBadge.className = 'status-badge status-running';
+                    }
+                    document.getElementById('gatesSummary').innerHTML = `
+                        <div class="metric"><span class="metric-label">Confidence Mult</span><span class="metric-value">${confMult.toFixed(3)}x</span></div>
+                        <div class="metric"><span class="metric-label">Position Mult</span><span class="metric-value">${(gr.position_size_multiplier || 1.0).toFixed(3)}x</span></div>
+                        <div class="metric"><span class="metric-label">Gates Evaluated</span><span class="metric-value">${gr.n_gates_evaluated || 0}</span></div>
+                        <div class="metric"><span class="metric-label">Total Decisions</span><span class="metric-value">${gates.history_count || 0}</span></div>
+                    `;
+                    let gateDetailHtml = '';
+                    (gr.decisions || []).forEach(d => {
+                        const cls = d.action === 'BLOCK' ? 'status-stopped' : d.action === 'REDUCE' ? 'status-warning' : d.action === 'BOOST' ? 'status-running' : 'status-healthy';
+                        gateDetailHtml += `<div class="metric" style="font-size:0.75rem;">
+                            <span class="metric-label">${d.gate}</span>
+                            <span class="status-badge ${cls}" style="font-size:0.65rem;">${d.action}</span>
+                            <span style="color:#888;font-size:0.65rem;margin-left:6px;">${d.reason || ''}</span>
+                        </div>`;
+                    });
+                    document.getElementById('gatesDetail').innerHTML = gateDetailHtml;
+                }
 
                 document.getElementById('lastUpdate').textContent = new Date().toLocaleTimeString();
             } catch (e) {

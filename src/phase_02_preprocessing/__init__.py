@@ -21,10 +21,16 @@ from src.phase_02_preprocessing.bar_resampler import (
     RESOLUTION_MAP,
 )
 
+from src.phase_02_preprocessing.ohlc_validator import OHLCValidator
+
+from src.phase_02_preprocessing.information_bars import InformationBarGenerator
+
 
 __all__ = [
     "detect_and_handle_missing_bars",
     "BarResampler",
     "resolution_to_minutes",
     "RESOLUTION_MAP",
+    "OHLCValidator",
+    "InformationBarGenerator",
 ]

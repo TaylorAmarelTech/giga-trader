@@ -498,6 +498,15 @@ DASHBOARD_HTML = """
             </div>
         </div>
 
+        <!-- Trading Gates -->
+        <div class="card" style="margin-bottom: 20px;">
+            <h2>Trading Gates</h2>
+            <div id="gates-summary" style="padding: 5px 0;">
+                <span style="color: #666;">No gate data yet</span>
+            </div>
+            <div id="gates-detail" style="max-height: 200px; overflow-y: auto;"></div>
+        </div>
+
         <!-- Controls -->
         <div class="card" style="margin-bottom: 20px;">
             <h2>Controls</h2>
@@ -585,6 +594,45 @@ DASHBOARD_HTML = """
                         `;
                     }
                     document.getElementById('components').innerHTML = componentsHtml || '<span style="color:#666">No components</span>';
+
+                    // Trading Gates
+                    const gates = data.trading_gates;
+                    if (gates && gates.last_result) {
+                        const gr = gates.last_result;
+                        const blocked = gr.is_blocked;
+                        const confMult = gr.confidence_multiplier || 1.0;
+                        const summaryColor = blocked ? '#e74c3c' : (confMult < 0.9 ? '#f39c12' : '#2ecc71');
+                        const summaryText = blocked
+                            ? `BLOCKED by ${(gr.blocking_gates || []).join(', ')}`
+                            : `PASS (conf: ${confMult.toFixed(2)}x)`;
+                        document.getElementById('gates-summary').innerHTML = `
+                            <div class="status-item">
+                                <span class="status-label">Last Result</span>
+                                <span class="status-value" style="color:${summaryColor}">${summaryText}</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">Gates Evaluated</span>
+                                <span class="status-value">${gr.n_gates_evaluated || 0}</span>
+                            </div>
+                            <div class="status-item">
+                                <span class="status-label">History</span>
+                                <span class="status-value">${gates.history_count || 0} decisions</span>
+                            </div>
+                        `;
+                        // Detail: individual gate decisions
+                        let detailHtml = '';
+                        (gr.decisions || []).forEach(d => {
+                            const actionColor = d.action === 'BLOCK' ? '#e74c3c'
+                                : d.action === 'REDUCE' ? '#f39c12'
+                                : d.action === 'BOOST' ? '#2ecc71' : '#888';
+                            detailHtml += `<div style="padding:4px 0;border-bottom:1px solid #333;font-size:12px;">
+                                <span style="color:${actionColor};font-weight:bold;">${d.action}</span>
+                                <span style="color:#aaa;margin-left:8px;">${d.gate}</span>
+                                <span style="color:#666;margin-left:8px;">${d.reason || ''}</span>
+                            </div>`;
+                        });
+                        document.getElementById('gates-detail').innerHTML = detailHtml || '';
+                    }
 
                     // Update timestamp
                     document.getElementById('last-update').textContent = `Last update: ${new Date().toLocaleTimeString()}`;

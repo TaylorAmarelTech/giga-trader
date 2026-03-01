@@ -7,6 +7,8 @@ from src.phase_10_feature_processing.group_aware_processor import (
     FEATURE_GROUPS,
     assign_feature_groups,
 )
+from src.phase_10_feature_processing.feature_neutralizer import FeatureNeutralizer
+from src.phase_10_feature_processing.interaction_discovery import InteractionDiscovery
 
 __all__ = [
     "LeakProofFeatureSelector",
@@ -14,4 +16,6 @@ __all__ = [
     "GroupAwareFeatureProcessor",
     "FEATURE_GROUPS",
     "assign_feature_groups",
+    "FeatureNeutralizer",
+    "InteractionDiscovery",
 ]

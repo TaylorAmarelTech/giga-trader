@@ -366,6 +366,31 @@ class GridSearchConfigGenerator:
             FeatureGroupMode.GROUPED_PROTECTED.value,
         ])
 
+        # External data source bundles (2-3 each) — Wave 38/39
+        # Bundled to avoid combinatorial explosion; 3 bundles = 2^3=8x
+        # sentiment: fear_greed + crypto_sentiment
+        # social: reddit_sentiment + finnhub_social
+        # flow: gamma_exposure + dark_pool + options_features (Wave 39)
+        gen.add_dimension('feature_config.include_sentiment_data_sources', [True, False])
+        gen.add_dimension('feature_config.include_social_data_sources', [True, False])
+        gen.add_dimension('feature_config.include_flow_data_sources', [True, False])
+        # Microstructure bundle (amihud + range_vol)
+        gen.add_dimension('feature_config.include_microstructure_features', [True, False])
+        # Information theory bundle (entropy + hurst + NMI)
+        gen.add_dimension('feature_config.include_information_theory_features', [True, False])
+        # Regime detection bundle (absorption ratio + drift + changepoint + HMM)
+        gen.add_dimension('feature_config.include_regime_features', [True, False])
+        # Alternative data bundle (congressional + insider + ETF flows)
+        gen.add_dimension('feature_config.include_alternative_data_features', [True, False])
+        # Signal processing bundle (wavelet + SAX + TE + MFDFA + RQA)
+        gen.add_dimension('feature_config.include_signal_processing_features', [True, False])
+        # Market structure features (compression, attractors, inflection)
+        gen.add_dimension('anti_overfit_config.use_market_structure', [True, False])
+        # HAR-RV + L-Moments + Multiscale Entropy (Wave I core features)
+        gen.add_dimension('anti_overfit_config.use_har_rv', [True, False])
+        gen.add_dimension('anti_overfit_config.use_l_moments', [True, False])
+        gen.add_dimension('anti_overfit_config.use_multiscale_entropy', [True, False])
+
         # Model types (4)
         gen.add_dimension('model_config.model_type', [
             ModelType.LOGISTIC_L2.value,
@@ -382,7 +407,11 @@ class GridSearchConfigGenerator:
             CascadeType.MULTI_RESOLUTION.value,
         ])
 
-        # Total: 3 x 4 x 4 x 3 x 3 x 5 x 2 x 4 x 4 = 69,120 configs
+        # ===== Wave F Bundles (STANDARD level) =====
+        # F2: Model enhancements (class weights, isotonic calibration)
+        gen.add_dimension('model_config.use_class_weights', [False, True])
+        gen.add_dimension('cross_validation_config.use_isotonic_calibration', [False, True])
+
         return gen
 
     @classmethod
@@ -458,6 +487,17 @@ class GridSearchConfigGenerator:
         gen.add_dimension('feature_config.include_cross_asset_features', [False, True])
         gen.add_dimension('feature_config.include_breadth_features', [False, True])
 
+        # External data source bundles (Wave 38/39)
+        # flow bundle includes gamma_exposure + dark_pool + options_features
+        gen.add_dimension('feature_config.include_sentiment_data_sources', [True, False])
+        gen.add_dimension('feature_config.include_social_data_sources', [True, False])
+        gen.add_dimension('feature_config.include_flow_data_sources', [True, False])
+        gen.add_dimension('feature_config.include_microstructure_features', [True, False])
+        gen.add_dimension('feature_config.include_information_theory_features', [True, False])
+        gen.add_dimension('feature_config.include_regime_features', [True, False])
+        gen.add_dimension('feature_config.include_alternative_data_features', [True, False])
+        gen.add_dimension('feature_config.include_signal_processing_features', [True, False])
+
         # ===== STEP 6: Target Definition =====
         gen.add_dimension('target_config.swing_threshold', [0.002, 0.0025, 0.003])
         gen.add_dimension('target_config.use_soft_targets', [False, True])
@@ -489,6 +529,9 @@ class GridSearchConfigGenerator:
 
         gen.add_dimension('dim_reduction_config.n_components', [20, 30, 40, 50])
 
+        # Wave E1: Feature neutralization (full grid only)
+        gen.add_dimension('dim_reduction_config.neutralize_features', [False, True])
+
         # ===== STEP 9: Model Types =====
         gen.add_dimension('model_config.model_type', [
             ModelType.LOGISTIC_L1.value,
@@ -502,6 +545,9 @@ class GridSearchConfigGenerator:
             ModelType.EXTRA_TREES.value,
             ModelType.SVM_RBF.value,
             ModelType.MLP.value,
+            ModelType.QUANTILE_FOREST.value,  # Wave E3
+            ModelType.CATBOOST.value,         # Wave F2
+            ModelType.STACKING_ENSEMBLE.value, # Wave F2
         ])
 
         # ===== STEP 10: Cascade Types =====
@@ -527,9 +573,54 @@ class GridSearchConfigGenerator:
             CVMethod.TIMESERIES_SPLIT.value,
             CVMethod.PURGED_KFOLD.value,
             CVMethod.WALK_FORWARD.value,
+            CVMethod.COMBINATORIAL_PURGED.value,  # Wave E2
         ])
 
         gen.add_dimension('training_config.cv_folds', [3, 5])
+
+        # Wave E4: CUSUM event filter (full grid only)
+        gen.add_dimension('feature_engineering_config.use_cusum_filter', [False, True])
+
+        # ===== Wave F Bundles =====
+        # F2: Model enhancements (stacking, catboost in model_type above)
+        gen.add_dimension('model_config.use_class_weights', [False, True])
+        gen.add_dimension('model_config.use_bma', [False, True])
+
+        # F3: Anti-overfit gates (full grid only)
+        gen.add_dimension('anti_overfit_config.use_label_noise_test', [True, False])
+        gen.add_dimension('anti_overfit_config.use_fi_stability_gate', [True, False])
+        gen.add_dimension('anti_overfit_config.use_knockoff_gate', [False, True])
+
+        # F4: Training methods
+        gen.add_dimension('cross_validation_config.use_isotonic_calibration', [False, True])
+        gen.add_dimension('anti_overfit_config.purge_synthetic_boundary', [True, False])
+
+        # F5: Feature engineering research
+        gen.add_dimension('feature_engineering_config.use_triple_barrier', [False, True])
+        gen.add_dimension('feature_engineering_config.use_interaction_discovery', [False, True])
+
+        # ===== Wave G Bundles =====
+        # G2: CVaR position sizing
+        gen.add_dimension('trading_config.use_cvar_sizing', [False, True])
+        # G3: Thompson Sampling model selection
+        gen.add_dimension('trading_config.use_thompson_selector', [False, True])
+        # G4: Information-driven bars
+        gen.add_dimension('data_config.use_information_bars', [False, True])
+
+        # ===== Wave H Bundles =====
+        # H1: Market structure features (compression/squeeze/inflection)
+        gen.add_dimension('anti_overfit_config.use_market_structure', [True, False])
+        # H2: Time series model features (ARIMA residuals, optional Chronos/catch22)
+        gen.add_dimension('anti_overfit_config.use_time_series_models', [False, True])
+
+        # ===== Wave I Bundles =====
+        # I1-I3: Core HAR-RV, L-Moments, Multiscale Entropy
+        gen.add_dimension('anti_overfit_config.use_har_rv', [True, False])
+        gen.add_dimension('anti_overfit_config.use_l_moments', [True, False])
+        gen.add_dimension('anti_overfit_config.use_multiscale_entropy', [True, False])
+        # I4-I5: Conditional features
+        gen.add_dimension('anti_overfit_config.use_rv_signature_plot', [False, True])
+        gen.add_dimension('anti_overfit_config.use_tda_homology', [False, True])
 
         # Add constraint: no dim reduction when feature selection is strong
         gen.add_constraint(

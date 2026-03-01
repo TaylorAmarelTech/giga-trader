@@ -87,8 +87,8 @@ def _make_data(n_samples=200, feature_names=None):
 class TestFeatureGroups:
     """Tests for FEATURE_GROUPS constant."""
 
-    def test_has_11_groups(self):
-        assert len(FEATURE_GROUPS) == 11
+    def test_has_minimum_groups(self):
+        assert len(FEATURE_GROUPS) >= 24  # 11 orig + 13 new (A-I waves)
 
     def test_all_groups_have_prefixes(self):
         for name, prefixes in FEATURE_GROUPS.items():

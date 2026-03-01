@@ -60,6 +60,13 @@ from dotenv import load_dotenv
 
 load_dotenv(project_root / ".env")
 
+# System resource detection
+from src.core.system_resources import get_system_resources, create_resource_config
+
+_sys_resources = get_system_resources()
+_resource_config = create_resource_config()
+print(f"\n{_sys_resources.summary()}\n")
+
 # Import anti-overfitting module
 from src.anti_overfit import (
     integrate_anti_overfit,
@@ -2047,6 +2054,25 @@ def train_final_models_from_arrays(
     models["swing"] = {"l2": model_l2, "gb": model_gb}
     results["swing"] = {"auc": auc_swing, "accuracy": acc_swing}
 
+    # Fit BMA for swing ensemble if enabled (Wave F6.2)
+    bma_swing = None
+    if CONFIG.get("use_bma", False):
+        try:
+            from src.phase_15_strategy.bayesian_averaging import BayesianModelAverager
+            bma_swing = BayesianModelAverager(min_weight=0.01)
+            bma_swing.fit(
+                {"l2": model_l2, "gb": model_gb},
+                X_test_scaled, y_swing_test,
+            )
+            if bma_swing._fitted:
+                bma_weights = bma_swing.get_weights()
+                print(f"  [BMA] Swing weights: L2={bma_weights.get('l2', 0):.3f}, GB={bma_weights.get('gb', 0):.3f}")
+            else:
+                bma_swing = None
+        except Exception as bma_err:
+            print(f"  [BMA] Swing BMA skipped: {bma_err}")
+            bma_swing = None
+
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 2: TIMING
     # ─────────────────────────────────────────────────────────────────────────
@@ -2074,6 +2100,31 @@ def train_final_models_from_arrays(
 
     models["timing"] = {"l2": model_timing_l2, "gb": model_timing_gb}
     results["timing"] = {"auc": auc_timing, "accuracy": acc_timing}
+
+    # Fit BMA for timing ensemble if enabled (Wave F6.2)
+    bma_timing = None
+    if CONFIG.get("use_bma", False):
+        try:
+            from src.phase_15_strategy.bayesian_averaging import BayesianModelAverager
+            bma_timing = BayesianModelAverager(min_weight=0.01)
+            bma_timing.fit(
+                {"l2": model_timing_l2, "gb": model_timing_gb},
+                X_test_scaled, y_timing_test,
+            )
+            if bma_timing._fitted:
+                tw = bma_timing.get_weights()
+                print(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
+            else:
+                bma_timing = None
+        except Exception as bma_err:
+            print(f"  [BMA] Timing BMA skipped: {bma_err}")
+            bma_timing = None
+
+    # Save BMA weights in models dict (serialise weights only, not model refs)
+    if bma_swing is not None:
+        models["bma_swing_weights"] = bma_swing.get_weights()
+    if bma_timing is not None:
+        models["bma_timing_weights"] = bma_timing.get_weights()
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMBINED SIGNALS
@@ -2176,6 +2227,22 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     models["swing"] = {"l2": model_l2, "gb": model_gb}
     results["swing"] = {"auc": auc_swing, "accuracy": acc_swing}
 
+    # Fit BMA for swing ensemble if enabled (Wave F6.2) — legacy train_final_models
+    bma_swing = None
+    if CONFIG.get("use_bma", False):
+        try:
+            from src.phase_15_strategy.bayesian_averaging import BayesianModelAverager
+            bma_swing = BayesianModelAverager(min_weight=0.01)
+            bma_swing.fit({"l2": model_l2, "gb": model_gb}, X_test_scaled, y_test)
+            if bma_swing._fitted:
+                sw = bma_swing.get_weights()
+                print(f"  [BMA] Swing weights: L2={sw.get('l2', 0):.3f}, GB={sw.get('gb', 0):.3f}")
+            else:
+                bma_swing = None
+        except Exception as bma_err:
+            print(f"  [BMA] Swing BMA skipped: {bma_err}")
+            bma_swing = None
+
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 2: TIMING
     # ─────────────────────────────────────────────────────────────────────────
@@ -2207,6 +2274,28 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
 
     models["timing"] = {"l2": model_timing_l2, "gb": model_timing_gb}
     results["timing"] = {"auc": auc_timing, "accuracy": acc_timing}
+
+    # Fit BMA for timing ensemble if enabled (Wave F6.2) — legacy train_final_models
+    bma_timing = None
+    if CONFIG.get("use_bma", False):
+        try:
+            from src.phase_15_strategy.bayesian_averaging import BayesianModelAverager
+            bma_timing = BayesianModelAverager(min_weight=0.01)
+            bma_timing.fit({"l2": model_timing_l2, "gb": model_timing_gb}, X_test_scaled, y_test)
+            if bma_timing._fitted:
+                tw = bma_timing.get_weights()
+                print(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
+            else:
+                bma_timing = None
+        except Exception as bma_err:
+            print(f"  [BMA] Timing BMA skipped: {bma_err}")
+            bma_timing = None
+
+    # Save BMA weights in models dict (serialise weights only, not model refs)
+    if bma_swing is not None:
+        models["bma_swing_weights"] = bma_swing.get_weights()
+    if bma_timing is not None:
+        models["bma_timing_weights"] = bma_timing.get_weights()
 
     # ─────────────────────────────────────────────────────────────────────────
     # COMBINED SIGNALS
@@ -2368,7 +2457,51 @@ def main():
             use_economic_features=CONFIG.get("use_economic_features", True),
             use_calendar_features=CONFIG.get("use_calendar_features", True),
             use_sentiment_features=CONFIG.get("use_sentiment_features", True),
+            use_fear_greed=CONFIG.get("use_fear_greed", True),
+            use_reddit_sentiment=CONFIG.get("use_reddit_sentiment", True),
+            use_crypto_sentiment=CONFIG.get("use_crypto_sentiment", True),
+            use_gamma_exposure=CONFIG.get("use_gamma_exposure", True),
+            use_finnhub_social=CONFIG.get("use_finnhub_social", True),
+            use_dark_pool=CONFIG.get("use_dark_pool", True),
+            use_options_features=CONFIG.get("use_options_features", True),
+            use_event_recency=CONFIG.get("use_event_recency", True),
+            use_block_structure=CONFIG.get("use_block_structure", True),
+            use_amihud_features=CONFIG.get("use_amihud_features", True),
+            use_range_vol_features=CONFIG.get("use_range_vol_features", True),
+            use_entropy_features=CONFIG.get("use_entropy_features", True),
+            use_hurst_features=CONFIG.get("use_hurst_features", True),
+            use_nmi_features=CONFIG.get("use_nmi_features", True),
+            use_absorption_ratio=CONFIG.get("use_absorption_ratio", True),
+            use_drift_features=CONFIG.get("use_drift_features", True),
+            use_changepoint_features=CONFIG.get("use_changepoint_features", True),
+            use_hmm_features=CONFIG.get("use_hmm_features", True),
+            use_vpin_features=CONFIG.get("use_vpin_features", True),
+            use_intraday_momentum=CONFIG.get("use_intraday_momentum", True),
+            use_futures_basis=CONFIG.get("use_futures_basis", True),
+            use_congressional_features=CONFIG.get("use_congressional_features", True),
+            use_insider_aggregate=CONFIG.get("use_insider_aggregate", True),
+            use_etf_flow=CONFIG.get("use_etf_flow", True),
+            use_wavelet_features=CONFIG.get("use_wavelet_features", True),
+            use_sax_features=CONFIG.get("use_sax_features", True),
+            use_transfer_entropy=CONFIG.get("use_transfer_entropy", True),
+            use_mfdfa_features=CONFIG.get("use_mfdfa_features", True),
+            use_rqa_features=CONFIG.get("use_rqa_features", True),
+            use_copula_features=CONFIG.get("use_copula_features", True),
+            use_network_centrality=CONFIG.get("use_network_centrality", True),
+            use_path_signatures=CONFIG.get("use_path_signatures", True),
+            use_wavelet_scattering=CONFIG.get("use_wavelet_scattering", True),
+            use_wasserstein_regime=CONFIG.get("use_wasserstein_regime", True),
+            use_market_structure=CONFIG.get("use_market_structure", True),
+            use_time_series_models=CONFIG.get("use_time_series_models", False),
+            use_catch22=CONFIG.get("use_catch22", False),
+            use_har_rv=CONFIG.get("use_har_rv", True),
+            use_l_moments=CONFIG.get("use_l_moments", True),
+            use_multiscale_entropy=CONFIG.get("use_multiscale_entropy", True),
+            use_rv_signature_plot=CONFIG.get("use_rv_signature_plot", False),
+            use_tda_homology=CONFIG.get("use_tda_homology", False),
+            validate_ohlc=CONFIG.get("validate_ohlc", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
+            resource_config=_resource_config,
         )
         print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")
     else:
@@ -2506,6 +2639,30 @@ def main():
         models_dir = Path("models/production")
         models_dir.mkdir(parents=True, exist_ok=True)
 
+        # Fit conformal position sizer if enabled (Wave F4.2)
+        conformal_sizer = None
+        if CONFIG.get("use_conformal_sizing", False):
+            try:
+                from src.phase_15_strategy.conformal_sizer import ConformalPositionSizer
+                alpha = CONFIG.get("conformal_alpha", 0.1)
+                conformal_sizer = ConformalPositionSizer(alpha=alpha)
+                # Use last fold test data for calibration (from swing CV results)
+                if "X_test_last" in swing_cv_results and "y_test_last" in swing_cv_results:
+                    conformal_sizer.fit(
+                        swing_pipeline, swing_cv_results["X_test_last"],
+                        swing_cv_results["y_test_last"]
+                    )
+                    if conformal_sizer._fitted:
+                        print(f"  [CONFORMAL] Fitted position sizer (alpha={alpha})")
+                    else:
+                        conformal_sizer = None
+                else:
+                    print("  [CONFORMAL] Skipped: no calibration data available")
+                    conformal_sizer = None
+            except Exception as cs_err:
+                print(f"  [CONFORMAL] Skipped: {cs_err}")
+                conformal_sizer = None
+
         model_path = models_dir / "spy_leak_proof_models.joblib"
         leak_proof_save = {
             "swing_pipeline": swing_pipeline,
@@ -2514,6 +2671,8 @@ def main():
             "config": CONFIG,
             "cv_results": leak_proof_results,
         }
+        if conformal_sizer is not None and getattr(conformal_sizer, '_fitted', False):
+            leak_proof_save["conformal_sizer"] = conformal_sizer
         _save_versioned_model(models_dir, "spy_leak_proof_models", leak_proof_save, max_versions=5)
         joblib.dump(leak_proof_save, model_path)
 

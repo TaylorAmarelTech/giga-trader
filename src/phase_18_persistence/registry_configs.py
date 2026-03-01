@@ -293,6 +293,27 @@ class FeatureConfig:
     # Sentiment
     include_sentiment_features: bool = False
 
+    # External data source bundles (Wave 38)
+    # These bundle enable/disable groups of data source features together
+    include_sentiment_data_sources: bool = True   # fear_greed + crypto_sentiment
+    include_social_data_sources: bool = True       # reddit_sentiment + finnhub_social
+    include_flow_data_sources: bool = True         # gamma_exposure + dark_pool
+
+    # Microstructure features bundle (Wave A: amihud + range_vol)
+    include_microstructure_features: bool = True  # amihud illiquidity + range-based vol
+
+    # Information theory features bundle (Wave B: entropy + hurst + NMI)
+    include_information_theory_features: bool = True  # entropy + hurst + NMI efficiency
+
+    # Regime detection features bundle (Wave C: absorption ratio + drift + changepoint + HMM)
+    include_regime_features: bool = True  # absorption ratio + drift + changepoint + HMM
+
+    # Alternative data features bundle (Wave F: congressional + insider + ETF flows)
+    include_alternative_data_features: bool = True  # congressional + insider + ETF flows
+
+    # Signal processing + fractal features bundle (Wave G+H: wavelet + SAX + TE + MFDFA + RQA)
+    include_signal_processing_features: bool = True  # wavelet + SAX + transfer entropy + MFDFA + RQA
+
     # ===== Rolling/Lag Configuration =====
     rolling_windows: List[int] = field(default_factory=lambda: [5, 10, 20, 50, 100])
     lag_periods: List[int] = field(default_factory=lambda: [1, 2, 3, 5, 10])

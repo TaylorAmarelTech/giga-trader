@@ -209,6 +209,27 @@ def mock_registry_data() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# resource_config -- system-aware resource configuration
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def resource_config():
+    """Provide a ResourceConfig using actual system detection."""
+    from src.core.system_resources import create_resource_config
+    return create_resource_config()
+
+
+@pytest.fixture
+def resource_test_rows(resource_config):
+    """Return resource-appropriate test data sizes.
+
+    LOW: 100 rows, MEDIUM: 300, HIGH: 500, ULTRA: 1000.
+    """
+    tier_sizes = {"low": 100, "medium": 300, "high": 500, "ultra": 1000}
+    return tier_sizes.get(resource_config.tier, 300)
+
+
+# ---------------------------------------------------------------------------
 # Helpers (not fixtures -- internal use only)
 # ---------------------------------------------------------------------------
 

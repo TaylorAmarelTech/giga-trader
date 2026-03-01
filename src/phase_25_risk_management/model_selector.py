@@ -284,6 +284,10 @@ class DynamicModelSelector:
                 candidate.model = data
                 candidate.feature_cols = []
 
+            # Load conformal sizer if present (Wave F4.2)
+            if isinstance(data, dict) and "conformal_sizer" in data:
+                candidate.conformal_sizer = data["conformal_sizer"]
+
             self.loaded_models[candidate.model_id] = candidate
             logger.info(f"Loaded model: {candidate.model_id}")
             return True

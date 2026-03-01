@@ -337,6 +337,10 @@ class ModelType(str, Enum):
     # Calibrated models
     CALIBRATED_SIGMOID = "calibrated_sigmoid"
     CALIBRATED_ISOTONIC = "calibrated_isotonic"
+    # Quantile models (Wave E3)
+    QUANTILE_FOREST = "quantile_forest"
+    # Wave F2: Purge-aware stacking ensemble
+    STACKING_ENSEMBLE = "stacking_ensemble"
 
 
 class EnsembleMethod(str, Enum):

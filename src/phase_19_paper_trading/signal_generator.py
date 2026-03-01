@@ -90,6 +90,56 @@ class SignalGenerator:
         except ImportError:
             self.calibrator = None
 
+        # Feature drift monitor — detects distribution shift from training (Wave F6)
+        self.drift_monitor = None
+        self._drift_monitor_fitted = False
+        try:
+            from src.phase_20_monitoring.feature_drift_monitor import FeatureDriftMonitor
+            self.drift_monitor = FeatureDriftMonitor(psi_threshold=0.2, alert_fraction=0.2)
+        except ImportError:
+            pass
+
+        # Dynamic ensemble weighting (Wave F2.2) — weights models by recent OOS performance
+        self.dynamic_weighter = None
+        if TRADING_CONFIG.get("use_dynamic_weights", False):
+            try:
+                from src.phase_15_strategy.dynamic_weights import DynamicEnsembleWeighter
+                self.dynamic_weighter = DynamicEnsembleWeighter(
+                    lookback=TRADING_CONFIG.get("dynamic_weight_lookback", 20),
+                )
+                logger.info("Dynamic ensemble weighter initialized")
+            except ImportError:
+                pass
+
+        # Thompson Sampling model selector (Wave G3) — bandit-based online model weighting
+        self.thompson_selector = None
+        if TRADING_CONFIG.get("use_thompson_selector", False):
+            try:
+                from src.phase_15_strategy.thompson_selector import ThompsonSamplingSelector
+                self.thompson_selector = ThompsonSamplingSelector(
+                    model_ids=["l2", "gb"],
+                    decay=TRADING_CONFIG.get("thompson_decay", 0.995),
+                    min_weight=TRADING_CONFIG.get("thompson_min_weight", 0.1),
+                )
+                # Try to load saved state
+                state_path = Path("models/thompson_state.json")
+                if state_path.exists():
+                    self.thompson_selector.load_state(state_path)
+                    logger.info(f"Thompson selector loaded: {self.thompson_selector.get_weights()}")
+                else:
+                    logger.info("Thompson selector initialized with uniform priors")
+            except ImportError:
+                pass
+
+        # Feature source health tracking (Wave 38)
+        self._signal_count = 0
+        self._last_feature_quality = 1.0  # 1.0 = all features OK, 0.0 = all degraded
+
+        # Feature preparation cache (avoid re-running expensive feature engineering
+        # every 60s when the underlying 1-min data hasn't changed)
+        self._prep_cache_key = None
+        self._prep_cache_result = None
+
         # Dynamic model selector - MANDATORY for proper signal generation
         # No fallback to static models to ensure all signals use properly trained/validated models
         self.use_dynamic_selector = use_dynamic_selector and DYNAMIC_SELECTOR_AVAILABLE
@@ -208,6 +258,16 @@ class SignalGenerator:
                 if "config" in data:
                     self.model_config = data["config"]
 
+                # Load meta-labeler from leak-proof bundle if present
+                if "meta_model" in data and data["meta_model"] is not None:
+                    self.models["meta_labeler"] = data["meta_model"]
+                    logger.info("Loaded meta-labeler from leak-proof bundle")
+
+                # Load conformal sizer if present (Wave F4.2)
+                if "conformal_sizer" in data and data["conformal_sizer"] is not None:
+                    self.models["conformal_sizer"] = data["conformal_sizer"]
+                    logger.info("Loaded conformal sizer from leak-proof bundle")
+
                 self.use_leak_proof = True
                 logger.info(f"Models loaded from {leak_proof_path} (LEAK-PROOF)")
                 return
@@ -236,6 +296,14 @@ class SignalGenerator:
                     if "entry_exit_timing" in models_data:
                         self.models["entry_exit"] = models_data["entry_exit_timing"]
                         logger.info("Loaded entry/exit timing model")
+
+                    # BMA weights (Wave F6.2) — serialised as weight dicts, not model refs
+                    if "bma_swing_weights" in models_data:
+                        self.models["bma_swing_weights"] = models_data["bma_swing_weights"]
+                        logger.info(f"Loaded BMA swing weights: {models_data['bma_swing_weights']}")
+                    if "bma_timing_weights" in models_data:
+                        self.models["bma_timing_weights"] = models_data["bma_timing_weights"]
+                        logger.info(f"Loaded BMA timing weights: {models_data['bma_timing_weights']}")
 
                 # Extract scaler
                 if "scaler" in data:
@@ -297,6 +365,18 @@ class SignalGenerator:
             if entry_exit_path.exists():
                 self.models["entry_exit"] = joblib.load(entry_exit_path)
                 logger.info("Loaded entry/exit timing model (legacy)")
+
+            # Load meta-labeler if available (standalone or from experiment model)
+            meta_path = self.model_dir / "meta_labeler.joblib"
+            if meta_path.is_file():
+                try:
+                    from src.phase_15_strategy.meta_labeler import MetaLabeler
+                    ml = MetaLabeler.load(meta_path)
+                    if ml is not None and ml.is_fitted_:
+                        self.models["meta_labeler"] = ml
+                        logger.info(f"Loaded meta-labeler (AUC={ml.meta_auc_:.3f})")
+                except Exception as ml_err:
+                    logger.warning(f"Failed to load meta-labeler: {ml_err}")
 
         except Exception as e:
             logger.error(f"Failed to load models: {e}")
@@ -360,6 +440,16 @@ class SignalGenerator:
 
         This mirrors the feature engineering in train_robust_model.py
         """
+        # Cache: skip recomputation if same data as last call
+        _cache_key = (
+            len(df_1min),
+            df_1min.index[-1] if len(df_1min) > 0 else None,
+        )
+        if (self._prep_cache_key == _cache_key
+                and self._prep_cache_result is not None
+                and len(self._prep_cache_result) > 0):
+            return self._prep_cache_result.copy()
+
         # Import feature engineering functions
         try:
             from src.train_robust_model import engineer_all_features, add_rolling_features
@@ -425,8 +515,8 @@ class SignalGenerator:
                 logger.error("Feature engineering returned empty dataframe")
                 return np.array([])
 
-            # Add anti-overfit features (MAG10, cross-assets, component streaks)
-            # These are required because the model was trained with them
+            # Add anti-overfit features (all feature types the model was trained with)
+            # Must match the flags used during training to avoid zero-filled features
             try:
                 from src.anti_overfit import integrate_anti_overfit
                 df_daily, _ = integrate_anti_overfit(
@@ -436,6 +526,46 @@ class SignalGenerator:
                     use_cross_assets=True,
                     use_breadth_streaks=True,
                     use_mag_breadth=True,
+                    use_sector_breadth=True,
+                    use_vol_regime=True,
+                    use_economic_features=True,
+                    use_calendar_features=True,
+                    use_sentiment_features=True,
+                    use_fear_greed=True,
+                    use_reddit_sentiment=True,
+                    use_crypto_sentiment=True,
+                    use_gamma_exposure=True,
+                    use_finnhub_social=True,
+                    use_dark_pool=True,
+                    use_options_features=True,
+                    use_event_recency=True,
+                    use_block_structure=True,
+                    use_amihud_features=True,
+                    use_range_vol_features=True,
+                    use_entropy_features=True,
+                    use_hurst_features=True,
+                    use_nmi_features=True,
+                    use_absorption_ratio=True,
+                    use_drift_features=True,
+                    use_changepoint_features=True,
+                    use_hmm_features=True,
+                    use_vpin_features=True,
+                    use_intraday_momentum=True,
+                    use_futures_basis=True,
+                    use_congressional_features=True,
+                    use_insider_aggregate=True,
+                    use_etf_flow=True,
+                    use_wavelet_features=True,
+                    use_sax_features=True,
+                    use_transfer_entropy=True,
+                    use_mfdfa_features=True,
+                    use_rqa_features=True,
+                    use_copula_features=True,
+                    use_network_centrality=True,
+                    use_path_signatures=True,
+                    use_wavelet_scattering=True,
+                    use_wasserstein_regime=True,
+                    validate_ohlc=True,
                 )
             except Exception as e:
                 logger.warning(f"Anti-overfit integration failed: {e}")
@@ -458,31 +588,67 @@ class SignalGenerator:
             # The pipeline handles transformation internally
             # ─────────────────────────────────────────────────────────────────────
             if self.use_leak_proof and self.feature_cols:
-                # Select only the features that were used during training, in the same order
-                available_features = set(all_feature_cols)
-                missing_features = [f for f in self.feature_cols if f not in available_features]
-                if missing_features:
-                    logger.warning(f"Missing {len(missing_features)} features: {missing_features[:5]}...")
-
-                # Build feature array in the correct order, filling missing with 0
+                # Build feature array in training order, using column median
+                # as fallback for NaN values instead of 0.0 (which distorts
+                # feature distributions and degrades model predictions)
                 X_list = []
+                n_missing_cols = 0
+                n_nan_to_median = 0
+                n_nan_to_zero = 0
+
                 for feat in self.feature_cols:
                     if feat in df_daily.columns:
-                        X_list.append(df_daily[feat].iloc[-1])
+                        val = df_daily[feat].iloc[-1]
+                        if pd.isna(val):
+                            # Use column median from available data
+                            col_median = df_daily[feat].dropna().median()
+                            if pd.notna(col_median):
+                                X_list.append(float(col_median))
+                                n_nan_to_median += 1
+                            else:
+                                X_list.append(0.0)
+                                n_nan_to_zero += 1
+                        else:
+                            X_list.append(float(val))
                     else:
-                        X_list.append(0.0)  # Fill missing features with 0
+                        X_list.append(0.0)
+                        n_missing_cols += 1
 
                 X = np.array(X_list).reshape(1, -1)
 
-                # Handle NaN values
+                # Track feature quality score for position sizing
+                n_total = len(self.feature_cols)
+                n_degraded = n_missing_cols + n_nan_to_median + n_nan_to_zero
+                self._last_feature_quality = (
+                    (n_total - n_degraded) / n_total if n_total > 0 else 0.0
+                )
+
+                if n_degraded > 0:
+                    logger.warning(
+                        f"[FEATURE QUALITY] {n_total - n_degraded}/{n_total} "
+                        f"features OK ({n_missing_cols} missing cols, "
+                        f"{n_nan_to_median} NaN->median, "
+                        f"{n_nan_to_zero} NaN->zero), "
+                        f"quality={self._last_feature_quality:.1%}"
+                    )
+                else:
+                    self._last_feature_quality = 1.0
+
+                # Final NaN safety net
                 if np.isnan(X).any():
                     nan_count = np.isnan(X).sum()
-                    nan_indices = np.where(np.isnan(X[0]))[0]
-                    nan_features = [self.feature_cols[i] for i in nan_indices[:5]]
-                    logger.warning(f"Found {nan_count} NaN values in features: {nan_features}")
+                    logger.warning(
+                        f"Residual {nan_count} NaN values after median fill, "
+                        f"zeroing"
+                    )
                     X = np.nan_to_num(X, nan=0.0)
 
-                logger.debug(f"Prepared {X.shape[1]} features for leak-proof model")
+                logger.debug(
+                    f"Prepared {X.shape[1]} features for leak-proof model "
+                    f"(quality={self._last_feature_quality:.1%})"
+                )
+                self._prep_cache_key = _cache_key
+                self._prep_cache_result = X.copy()
                 return X
 
             # ─────────────────────────────────────────────────────────────────────
@@ -491,11 +657,17 @@ class SignalGenerator:
             feature_cols = all_feature_cols
             X = df_daily[feature_cols].iloc[-1:].values
 
-            # Handle NaN values - fill with 0
+            # Fill NaN with column median instead of 0 (preserves distribution)
             if np.isnan(X).any():
-                nan_count = np.isnan(X).sum()
-                logger.warning(f"Found {nan_count} NaN values in features, filling with 0")
-                X = np.nan_to_num(X, nan=0.0)
+                nan_count = int(np.isnan(X).sum())
+                col_medians = df_daily[feature_cols].median().values
+                fill_values = np.where(
+                    np.isnan(col_medians), 0.0, col_medians
+                ).reshape(1, -1)
+                X = np.where(np.isnan(X), fill_values, X)
+                logger.warning(
+                    f"Filled {nan_count} NaN values with column medians"
+                )
 
             # Apply dimensionality reduction (handles scaling internally via pre_transform_scaler)
             if self.dim_state:
@@ -544,6 +716,8 @@ class SignalGenerator:
                 # Fallback: just scale if no dim_state
                 X = self.scaler.transform(X)
 
+            self._prep_cache_key = _cache_key
+            self._prep_cache_result = X.copy()
             return X
 
         except Exception as e:
@@ -571,6 +745,7 @@ class SignalGenerator:
         """
         timestamp = datetime.now()
         symbol = TRADING_CONFIG["symbol"]
+        self._signal_count += 1
 
         # Default hold signal
         default_signal = TradingSignal(
@@ -580,6 +755,10 @@ class SignalGenerator:
             probability=0.5,
             confidence=0.0,
         )
+
+        # Periodic feature source health report (every 100 signals)
+        if self._signal_count % 100 == 0:
+            self._report_source_health()
 
         # ═══════════════════════════════════════════════════════════════════
         # DYNAMIC MODEL SELECTOR PATH (REQUIRED)
@@ -638,6 +817,9 @@ class SignalGenerator:
             if len(X) == 0:
                 return default_signal
 
+            # ── Feature drift check (Wave F6) ──
+            self._check_feature_drift(X)
+
             # ─────────────────────────────────────────────────────────────────────
             # LEAK-PROOF MODEL: Use sklearn Pipeline (handles transformation internally)
             # ─────────────────────────────────────────────────────────────────────
@@ -665,19 +847,29 @@ class SignalGenerator:
                 # Calculate model disagreement
                 disagreement = abs(proba_l2 - proba_gb)
 
-                # Weighted ensemble with disagreement penalty
-                # When models agree strongly, use simple average
-                # When models disagree, weight towards the more confident model
-                if disagreement > 0.2:
-                    # Significant disagreement - use the more extreme (confident) prediction
-                    # but reduce overall confidence
+                # Thompson Sampling weighting (Wave G3) — bandit-based adaptive weights
+                if self.thompson_selector is not None and TRADING_CONFIG.get("use_thompson_selector", False):
+                    tw = self.thompson_selector.get_weights()
+                    w_l2 = tw.get("l2", 0.5)
+                    w_gb = tw.get("gb", 0.5)
+                    swing_proba = w_l2 * proba_l2 + w_gb * proba_gb
+                    confidence_penalty = max(1 - (disagreement * 0.3), 0.5)
+                    logger.debug(f"Thompson swing: L2={proba_l2:.3f}*{w_l2:.3f} + GB={proba_gb:.3f}*{w_gb:.3f} = {swing_proba:.3f}")
+                # BMA weighting (Wave F6.2) — use pre-computed Bayesian posterior weights
+                elif (bma_sw := self.models.get("bma_swing_weights")) and TRADING_CONFIG.get("use_bma", False):
+                    w_l2 = bma_sw.get("l2", 0.5)
+                    w_gb = bma_sw.get("gb", 0.5)
+                    swing_proba = w_l2 * proba_l2 + w_gb * proba_gb
+                    confidence_penalty = max(1 - (disagreement * 0.3), 0.5)
+                    logger.debug(f"BMA swing: L2={proba_l2:.3f}*{w_l2:.3f} + GB={proba_gb:.3f}*{w_gb:.3f} = {swing_proba:.3f}")
+                # Fallback: manual disagreement-based weighting
+                elif disagreement > 0.2:
                     dist_l2 = abs(proba_l2 - 0.5)
                     dist_gb = abs(proba_gb - 0.5)
                     if dist_l2 > dist_gb:
                         swing_proba = 0.6 * proba_l2 + 0.4 * proba_gb
                     else:
                         swing_proba = 0.4 * proba_l2 + 0.6 * proba_gb
-                    # Apply disagreement penalty to confidence later
                     confidence_penalty = 1 - (disagreement * 0.5)
                 else:
                     swing_proba = (proba_l2 + proba_gb) / 2
@@ -701,7 +893,14 @@ class SignalGenerator:
                 proba_gb = self.models["timing_gb"].predict_proba(X)[0, 1]
                 timing_disagreement = abs(proba_l2 - proba_gb)
 
-                if timing_disagreement > 0.2:
+                # BMA weighting for timing (Wave F6.2)
+                bma_tw = self.models.get("bma_timing_weights")
+                if bma_tw and TRADING_CONFIG.get("use_bma", False):
+                    w_l2 = bma_tw.get("l2", 0.5)
+                    w_gb = bma_tw.get("gb", 0.5)
+                    timing_proba = w_l2 * proba_l2 + w_gb * proba_gb
+                    logger.debug(f"BMA timing: L2={proba_l2:.3f}*{w_l2:.3f} + GB={proba_gb:.3f}*{w_gb:.3f} = {timing_proba:.3f}")
+                elif timing_disagreement > 0.2:
                     dist_l2 = abs(proba_l2 - 0.5)
                     dist_gb = abs(proba_gb - 0.5)
                     if dist_l2 > dist_gb:
@@ -777,6 +976,46 @@ class SignalGenerator:
                 position_size = min_position_pct + \
                     (max_position_pct - min_position_pct) * confidence
 
+            # Conformal position sizing (Wave F4.2): scale by prediction certainty
+            if "conformal_sizer" in self.models and self.models["conformal_sizer"] is not None:
+                try:
+                    cs = self.models["conformal_sizer"]
+                    if getattr(cs, '_fitted', False):
+                        sized = cs.size(X, position_size)
+                        conformal_pos = float(sized[0]) if len(sized) > 0 else position_size
+                        if conformal_pos != position_size:
+                            logger.debug(
+                                f"Conformal sizing: {position_size:.4f} -> {conformal_pos:.4f}"
+                            )
+                            position_size = conformal_pos
+                except Exception as cs_err:
+                    logger.debug(f"Conformal sizing skipped: {cs_err}")
+
+            # CVaR position sizing (Wave G2): scale by tail risk
+            if TRADING_CONFIG.get("use_cvar_sizing", False) and df_daily is not None:
+                try:
+                    from src.phase_15_strategy.cvar_position_sizer import CVaRPositionSizer
+                    cvar_sizer = CVaRPositionSizer(
+                        alpha=TRADING_CONFIG.get("cvar_alpha", 0.05),
+                        lookback=TRADING_CONFIG.get("cvar_lookback", 60),
+                        max_position=max_position_pct,
+                        min_position=min_position_pct,
+                        target_cvar=TRADING_CONFIG.get("cvar_target", 0.02),
+                    )
+                    _close = df_daily["close"].values if "close" in df_daily.columns else None
+                    if _close is not None and len(_close) > 60:
+                        _returns = np.diff(_close) / _close[:-1]
+                        cvar_sizer.fit(_returns)
+                        cvar_pos = cvar_sizer.size(position_size, cvar_sizer._current_cvar)
+                        if cvar_pos != position_size:
+                            logger.debug(
+                                f"CVaR sizing: {position_size:.4f} -> {cvar_pos:.4f} "
+                                f"(CVaR={cvar_sizer._current_cvar:.4f})"
+                            )
+                            position_size = cvar_pos
+                except Exception as cvar_err:
+                    logger.debug(f"CVaR sizing skipped: {cvar_err}")
+
             # Calculate stop loss and take profit using dynamic thresholds
             if signal_type == SignalType.BUY:
                 stop_loss = current_price * (1 - stop_loss_pct)
@@ -787,6 +1026,27 @@ class SignalGenerator:
             else:
                 stop_loss = None
                 take_profit = None
+
+            # Meta-labeling: scale position size by signal profitability probability
+            meta_proba = None
+            if "meta_labeler" in self.models and self.models["meta_labeler"] is not None:
+                try:
+                    meta_labeler = self.models["meta_labeler"]
+                    meta_proba_arr = meta_labeler.predict(
+                        X, np.array([swing_proba]), np.array([timing_proba])
+                    )
+                    if meta_proba_arr is not None:
+                        meta_proba = float(meta_proba_arr[0])
+                        # Half Kelly position sizing
+                        from src.phase_15_strategy.meta_labeler import half_kelly_fraction
+                        win_loss_ratio = self._estimate_win_loss_ratio()
+                        kelly_size = half_kelly_fraction(meta_proba, win_loss_ratio)
+                        kelly_pct = max(min_position_pct, min(kelly_size, max_position_pct))
+                        logger.info(f"Meta-label: proba={meta_proba:.3f}, kelly={kelly_size:.4f}, "
+                                    f"position={kelly_pct:.4f}")
+                        position_size = kelly_pct
+                except Exception as meta_err:
+                    logger.warning(f"Meta-label prediction failed: {meta_err}")
 
             # Log dynamic adjustments if any were applied
             if dyn_thresholds.get("adjustments_applied"):
@@ -811,6 +1071,16 @@ class SignalGenerator:
                 except Exception as e:
                     logger.warning(f"Entry/exit model prediction failed: {e}")
 
+            # Scale position by feature quality when degraded
+            if self._last_feature_quality < 0.90:
+                quality_factor = max(0.3, self._last_feature_quality)
+                position_size *= quality_factor
+                logger.info(
+                    f"Position scaled by feature quality: "
+                    f"{quality_factor:.2f} "
+                    f"(quality={self._last_feature_quality:.1%})"
+                )
+
             return TradingSignal(
                 timestamp=timestamp,
                 symbol=symbol,
@@ -824,12 +1094,121 @@ class SignalGenerator:
                 metadata={
                     "timing_proba": timing_proba,
                     "entry_exit_decision": entry_exit_decision,
+                    "feature_quality": self._last_feature_quality,
                 }
             )
 
         except Exception as e:
             logger.error(f"Signal generation failed: {e}")
             return default_signal
+
+    def _check_feature_drift(self, X: np.ndarray) -> None:
+        """Check for feature distribution drift using PSI (Wave F6).
+
+        On first call with enough data, fits the drift monitor baseline.
+        On subsequent calls, checks current features against the baseline
+        and logs warnings if significant drift is detected.
+        """
+        if self.drift_monitor is None:
+            return
+
+        try:
+            if not self._drift_monitor_fitted:
+                # Fit baseline on first call (using X as the "training" distribution)
+                # X may have only 1 row — defer until we see multi-row input
+                if X.shape[0] >= 10:
+                    feature_names = self.feature_cols if self.feature_cols else None
+                    self.drift_monitor.fit(X, feature_names=feature_names)
+                    self._drift_monitor_fitted = True
+                    logger.debug(f"Drift monitor fitted on {X.shape[0]} x {X.shape[1]} baseline")
+                return  # Skip check on the fitting call
+
+            # Check for drift
+            drift_report = self.drift_monitor.check(X)
+            if drift_report.get("has_drift", False):
+                n_drifted = drift_report.get("n_drifted", 0)
+                severity = drift_report.get("severity", "unknown")
+                logger.warning(
+                    f"[DRIFT ALERT] {n_drifted} features drifted "
+                    f"(severity={severity}, "
+                    f"fraction={drift_report.get('drift_fraction', 0):.2f})"
+                )
+            elif self._signal_count % 50 == 0:
+                logger.debug(
+                    f"Drift check OK: {drift_report.get('n_drifted', 0)} drifted features"
+                )
+        except Exception as e:
+            logger.debug(f"Feature drift check skipped: {e}")
+
+    def _report_source_health(self):
+        """Log health status of external data source features.
+
+        Checks which feature prefix groups have non-zero values in the loaded
+        model's feature columns. Runs every 100 signals — logging only, no side effects.
+        """
+        source_prefixes = {
+            "fear_greed": "fg_",
+            "reddit_sentiment": "reddit_",
+            "crypto_sentiment": "crypto_",
+            "gamma_exposure": "gex_",
+            "finnhub_social": "finnhub_social_",
+            "dark_pool": "dp_",
+            "options_iv": "opt_",
+            "economic": "econ_",
+            "calendar": "cal_",
+            "cross_asset": ["TLT_", "QQQ_", "GLD_"],
+            "amihud_liquidity": "liq_",
+            "range_vol": "rvol_",
+            "entropy": "ent_",
+            "hurst": "hurst_",
+            "nmi": "nmi_",
+            "absorption_ratio": "ar_",
+            "drift_detection": "drift_",
+            "changepoint": "cpd_",
+            "hmm_regime": "hmm_",
+            "vpin": "vpin_",
+            "intraday_momentum": "imom_",
+            "futures_basis": "basis_",
+            "congressional": "congress_",
+            "insider_aggregate": "insider_agg_",
+            "etf_flow": "etf_flow_",
+            "wavelet": "wav_",
+            "sax_pattern": "sax_",
+            "transfer_entropy": "te_",
+            "mfdfa": "mfdfa_",
+            "rqa": "rqa_",
+            "copula": "copula_",
+            "network": "netw_",
+            "market_structure": "mstr_",
+            "time_series_model": "tsm_",
+            "har_rv": "harv_",
+            "l_moments": "lmom_",
+            "multiscale_entropy": "mse_",
+            "rv_signature": "rvsp_",
+            "tda_homology": "tda_",
+        }
+        if not self.feature_cols:
+            logger.info(f"[SOURCE HEALTH] Signal #{self._signal_count}: No feature_cols loaded (dynamic mode)")
+            return
+
+        active = []
+        missing = []
+        for source, prefix in source_prefixes.items():
+            prefixes = prefix if isinstance(prefix, list) else [prefix]
+            found = any(
+                any(col.startswith(p) for p in prefixes)
+                for col in self.feature_cols
+            )
+            if found:
+                active.append(source)
+            else:
+                missing.append(source)
+
+        logger.info(
+            f"[SOURCE HEALTH] Signal #{self._signal_count}: "
+            f"{len(active)} active sources ({', '.join(active)})"
+            + (f", {len(missing)} missing ({', '.join(missing)})" if missing else "")
+        )
 
     def _generate_signal_dynamic(
         self,
@@ -869,6 +1248,9 @@ class SignalGenerator:
             if len(X) == 0:
                 return default_signal
 
+            # ── Feature drift check (Wave F6) ──
+            self._check_feature_drift(X)
+
             # Get feature names for the dynamic selector
             feature_names = self.feature_cols if self.feature_cols else []
 
@@ -903,6 +1285,45 @@ class SignalGenerator:
                 f"timing={timing_proba:.3f}, confidence={confidence:.3f}, "
                 f"n_models={prediction.n_models}, agreement={prediction.agreement_ratio:.2f}"
             )
+
+            # Ensemble disagreement features (Wave A3)
+            ens_metrics = {}
+            try:
+                from src.phase_15_strategy.ensemble_disagreement import compute_ensemble_disagreement
+                model_probas = [p.get("swing_proba", 0.5) for p in prediction.model_predictions
+                                if isinstance(p, dict)]
+                if model_probas:
+                    ens_metrics = compute_ensemble_disagreement(model_probas)
+                    logger.info(
+                        f"Ensemble disagreement: std={ens_metrics['ens_std']:.4f}, "
+                        f"agreement={ens_metrics['ens_agreement']:.2f}, "
+                        f"entropy={ens_metrics['ens_entropy']:.4f}"
+                    )
+            except Exception as ens_err:
+                logger.debug(f"Ensemble disagreement computation skipped: {ens_err}")
+
+            # Dynamic ensemble weighting (Wave F2.2): re-weight predictions by recent accuracy
+            if self.dynamic_weighter is not None and prediction.model_predictions:
+                try:
+                    model_ids = []
+                    model_probas_list = []
+                    for mp in prediction.model_predictions:
+                        if isinstance(mp, dict) and "model_id" in mp:
+                            model_ids.append(mp["model_id"])
+                            model_probas_list.append(mp.get("swing_proba", 0.5))
+                    if model_ids:
+                        weights = self.dynamic_weighter.get_weights(model_ids)
+                        if weights:
+                            weighted_swing = sum(
+                                weights.get(mid, 1.0 / len(model_ids)) * p
+                                for mid, p in zip(model_ids, model_probas_list)
+                            )
+                            logger.debug(
+                                f"Dynamic weighting: {swing_proba:.3f} -> {weighted_swing:.3f}"
+                            )
+                            swing_proba = weighted_swing
+                except Exception as dw_err:
+                    logger.debug(f"Dynamic weighting skipped: {dw_err}")
 
             # Temporal cascade integration (dynamic path)
             if self.temporal_cascade is not None:
@@ -946,6 +1367,51 @@ class SignalGenerator:
             )
             position_size = max(position_size, TRADING_CONFIG["min_position_pct"])
 
+            # Meta-labeling: override position size with Half Kelly if meta-model available
+            if "meta_labeler" in self.models and self.models["meta_labeler"] is not None:
+                try:
+                    meta_labeler = self.models["meta_labeler"]
+                    meta_proba_arr = meta_labeler.predict(
+                        X, np.array([swing_proba]), np.array([timing_proba])
+                    )
+                    if meta_proba_arr is not None:
+                        meta_proba = float(meta_proba_arr[0])
+                        from src.phase_15_strategy.meta_labeler import half_kelly_fraction
+                        win_loss_ratio = self._estimate_win_loss_ratio()
+                        kelly_size = half_kelly_fraction(meta_proba, win_loss_ratio)
+                        kelly_pct = max(TRADING_CONFIG["min_position_pct"],
+                                        min(kelly_size, max_position_pct))
+                        logger.info(f"Meta-label (dynamic): proba={meta_proba:.3f}, "
+                                    f"kelly={kelly_size:.4f}, position={kelly_pct:.4f}")
+                        position_size = kelly_pct
+                except Exception as meta_err:
+                    logger.warning(f"Meta-label prediction failed (dynamic): {meta_err}")
+
+            # Scale position by feature quality when degraded
+            if self._last_feature_quality < 0.90:
+                quality_factor = max(0.3, self._last_feature_quality)
+                position_size *= quality_factor
+                logger.info(
+                    f"Position scaled by feature quality (dynamic): "
+                    f"{quality_factor:.2f} "
+                    f"(quality={self._last_feature_quality:.1%})"
+                )
+
+            # Conformal position sizing (Wave F4.2, dynamic path)
+            if "conformal_sizer" in self.models and self.models["conformal_sizer"] is not None:
+                try:
+                    cs = self.models["conformal_sizer"]
+                    if getattr(cs, '_fitted', False):
+                        sized = cs.size(X, position_size)
+                        conformal_pos = float(sized[0]) if len(sized) > 0 else position_size
+                        if conformal_pos != position_size:
+                            logger.debug(
+                                f"Conformal sizing (dynamic): {position_size:.4f} -> {conformal_pos:.4f}"
+                            )
+                            position_size = conformal_pos
+                except Exception as cs_err:
+                    logger.debug(f"Conformal sizing skipped (dynamic): {cs_err}")
+
             # Calculate stop loss and take profit
             if signal_type == SignalType.BUY:
                 stop_loss = current_price * (1 - stop_loss_pct)
@@ -976,6 +1442,8 @@ class SignalGenerator:
                     "exit_window": prediction.exit_window,
                     "model_predictions": prediction.model_predictions[:3],  # Top 3
                     "dynamic_selector": True,
+                    "feature_quality": self._last_feature_quality,
+                    "ensemble_disagreement": ens_metrics,
                 }
             )
 
@@ -983,8 +1451,116 @@ class SignalGenerator:
             logger.error(f"Dynamic signal generation failed: {e}")
             return default_signal
 
+    def _estimate_win_loss_ratio(self) -> float:
+        """Estimate avg_win / avg_loss from recent trades. Fallback to 1.0."""
+        try:
+            recent = getattr(dynamic_thresholds, 'recent_trades', [])
+            if len(recent) < 10:
+                return 1.0
+            wins = [t for t in recent[-20:] if t > 0]
+            losses = [abs(t) for t in recent[-20:] if t < 0]
+            if not wins or not losses:
+                return 1.0
+            avg_win = sum(wins) / len(wins)
+            avg_loss = sum(losses) / len(losses)
+            return avg_win / avg_loss if avg_loss > 0 else 1.0
+        except Exception:
+            return 1.0
+
     def get_selector_status(self) -> Dict:
         """Get status of the dynamic model selector."""
         if self.dynamic_selector:
             return self.dynamic_selector.get_status()
         return {"dynamic_selector": False, "mode": "static"}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# POSITION SIZING UTILITIES (Wave A)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def vol_target_position_size(
+    realized_vol_20d: float,
+    target_vol: float = 0.15,
+    base_size: float = 0.10,
+    min_size: float = 0.02,
+    max_size: float = 0.25,
+) -> float:
+    """
+    Volatility-targeting position sizing.
+
+    Scales position size inversely with realized volatility so that
+    each position contributes roughly the same expected vol to the portfolio.
+
+    Parameters
+    ----------
+    realized_vol_20d : float
+        Annualized 20-day realized volatility (e.g., 0.15 = 15%).
+    target_vol : float
+        Target annualized volatility contribution per position (default 15%).
+    base_size : float
+        Base position size (fraction of portfolio, default 10%).
+    min_size : float
+        Minimum position size (default 2%).
+    max_size : float
+        Maximum position size (default 25%).
+
+    Returns
+    -------
+    float
+        Position size as fraction of portfolio.
+    """
+    if realized_vol_20d <= 0 or not np.isfinite(realized_vol_20d):
+        return base_size
+
+    raw_size = target_vol / realized_vol_20d * base_size
+    return float(np.clip(raw_size, min_size, max_size))
+
+
+def vix_adjusted_kelly(
+    kelly_fraction: float,
+    vix_level: float,
+    min_fraction: float = 0.01,
+    max_fraction: float = 0.25,
+) -> float:
+    """
+    VIX-conditional Kelly position sizing.
+
+    Scales a Kelly fraction by VIX regime to reduce exposure during
+    high-volatility environments and increase it in calm markets.
+
+    Parameters
+    ----------
+    kelly_fraction : float
+        Raw Kelly fraction (half-Kelly recommended, i.e., already halved).
+    vix_level : float
+        Current VIX level (e.g., 15.0, 25.0).
+    min_fraction : float
+        Minimum position fraction (default 1%).
+    max_fraction : float
+        Maximum position fraction (default 25%).
+
+    Returns
+    -------
+    float
+        Adjusted position size as fraction of portfolio.
+
+    VIX Scaling:
+        VIX < 15:  0.50 × Kelly  (calm → moderate exposure)
+        15-25:     0.35 × Kelly  (normal → conservative)
+        25-35:     0.20 × Kelly  (elevated → defensive)
+        VIX > 35:  0.10 × Kelly  (fear → minimal exposure)
+    """
+    if not np.isfinite(vix_level) or vix_level <= 0:
+        scale = 0.35  # Default to normal regime
+
+    elif vix_level < 15:
+        scale = 0.50
+    elif vix_level < 25:
+        scale = 0.35
+    elif vix_level < 35:
+        scale = 0.20
+    else:
+        scale = 0.10
+
+    adjusted = kelly_fraction * scale
+    return float(np.clip(adjusted, min_fraction, max_fraction))

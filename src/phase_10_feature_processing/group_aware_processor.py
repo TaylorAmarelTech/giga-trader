@@ -43,6 +43,38 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
     "volatility": ["vxx_", "vol_", "realized_vol_"],
     "calendar": ["cal_", "fomc_", "opex_", "econ_"],
     "sentiment": ["sent_"],
+    "fear_greed": ["fg_"],
+    "social_sentiment": ["reddit_"],
+    "crypto_sentiment": ["crypto_"],
+    "options_flow": ["gex_"],
+    "finnhub_sentiment": ["finnhub_social_"],
+    "dark_pool": ["dp_"],
+    "options_iv": ["opt_"],
+    "event_recency": ["dts_"],
+    "block_structure": ["blk_"],
+    "liquidity": ["liq_"],
+    "range_vol": ["rvol_"],
+    "information_theory": ["ent_", "hurst_", "nmi_"],
+    "regime": ["ar_", "drift_", "cpd_", "hmm_"],
+    "microstructure": ["vpin_", "imom_"],
+    "congressional": ["congress_"],
+    "insider_aggregate": ["insider_agg_"],
+    "etf_flow": ["etf_flow_"],
+    "futures": ["basis_"],
+    "signal_processing": ["wav_", "sax_", "te_"],
+    "fractal": ["mfdfa_", "rqa_"],
+    "tail_dependence": ["copula_"],
+    "network": ["netw_"],
+    "path_signature": ["psig_"],
+    "wavelet_scattering": ["wscat_"],
+    "wasserstein_regime": ["wreg_"],
+    "market_structure": ["mstr_"],
+    "time_series_model": ["tsm_"],
+    "har_rv": ["harv_"],
+    "l_moments": ["lmom_"],
+    "multiscale_entropy": ["mse_"],
+    "rv_signature": ["rvsp_"],
+    "tda_homology": ["tda_"],
     "intraday": [
         "return_at_", "high_to_", "low_to_", "range_to_",
         "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",
@@ -109,7 +141,7 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         group_mode: str = "flat",
         protected_groups: Optional[List[str]] = None,
         budget_mode: str = "proportional",
-        total_components: int = 40,
+        total_components: int = 45,
         min_components_per_group: int = 2,
         selection_method: str = "mutual_info",
         reduction_method: str = "pca",
@@ -117,7 +149,10 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         n_components: int = 20,
         variance_threshold: float = 0.01,
         correlation_threshold: float = 0.95,
+        neutralize_features: bool = False,
         random_state: int = 42,
+        n_jobs: int = -1,
+        nystroem_threshold: int = 5000,
     ):
         self.feature_names = list(feature_names)
         self.group_mode = group_mode
@@ -131,7 +166,10 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         self.n_components = n_components
         self.variance_threshold = variance_threshold
         self.correlation_threshold = correlation_threshold
+        self.neutralize_features = neutralize_features
         self.random_state = random_state
+        self.n_jobs = n_jobs
+        self.nystroem_threshold = nystroem_threshold
 
         # Fitted state
         self._groups = None
@@ -184,6 +222,10 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
             # Apply scaler
             if pipeline.get("scaler") is not None:
                 X_group = pipeline["scaler"].transform(X_group)
+
+            # Apply neutralizer (Wave E1)
+            if pipeline.get("neutralizer") is not None:
+                X_group = pipeline["neutralizer"].transform(X_group)
 
             # Apply reducer
             if pipeline.get("reducer") is not None:
@@ -421,6 +463,20 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
         X_scaled = scaler.fit(X_group).transform(X_group)
         pipeline["scaler"] = scaler
 
+        # Stage 4b: Feature neutralization (Wave E1) — remove market beta
+        if self.neutralize_features and X_scaled.shape[1] > 1:
+            try:
+                from src.phase_10_feature_processing.feature_neutralizer import (
+                    FeatureNeutralizer,
+                )
+                neutralizer = FeatureNeutralizer(method="demeaning")
+                X_scaled = neutralizer.fit_transform(X_scaled)
+                pipeline["neutralizer"] = neutralizer
+            except Exception:
+                pipeline["neutralizer"] = None
+        else:
+            pipeline["neutralizer"] = None
+
         # Stage 5: Dim reduction
         actual_reduce = min(n_reduce, X_scaled.shape[1] - 1, X_scaled.shape[0] - 1)
         if actual_reduce > 0 and X_scaled.shape[1] > actual_reduce:
@@ -505,7 +561,7 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
     def _create_reducer(self, n_components: int, n_samples: int = 0):
         """Create a dimensionality reducer based on configured method."""
         if self.reduction_method == "kernel_pca":
-            if n_samples > 5000:
+            if n_samples > self.nystroem_threshold:
                 # Use Nystroem approximation to avoid O(n^2) memory
                 from sklearn.kernel_approximation import Nystroem
                 from sklearn.pipeline import Pipeline
@@ -514,7 +570,7 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
                     ("nystroem", Nystroem(
                         kernel="rbf", gamma=0.01,
                         n_components=n_nystroem,
-                        random_state=self.random_state, n_jobs=-1
+                        random_state=self.random_state, n_jobs=self.n_jobs
                     )),
                     ("pca", PCA(n_components=n_components, random_state=self.random_state)),
                 ])
@@ -523,7 +579,7 @@ class GroupAwareFeatureProcessor(BaseEstimator, TransformerMixin):
                 kernel="rbf",
                 gamma=0.01,
                 random_state=self.random_state,
-                n_jobs=-1,
+                n_jobs=self.n_jobs,
             )
         elif self.reduction_method == "ica":
             return FastICA(
