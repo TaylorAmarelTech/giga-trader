@@ -391,6 +391,13 @@ class GridSearchConfigGenerator:
         gen.add_dimension('anti_overfit_config.use_l_moments', [True, False])
         gen.add_dimension('anti_overfit_config.use_multiscale_entropy', [True, False])
 
+        # Wave J: Macro/Vol surface bundle (credit spread + yield curve + vol term structure)
+        gen.add_dimension('feature_config.include_macro_vol_surface', [True, False])
+        # Wave J: Cross-momentum bundle (cross-asset momentum + skew/kurtosis)
+        gen.add_dimension('feature_config.include_cross_momentum', [True, False])
+        # Wave J: Calendar/Flow bundle (seasonality + order flow imbalance)
+        gen.add_dimension('feature_config.include_calendar_flow', [True, False])
+
         # Model types (4)
         gen.add_dimension('model_config.model_type', [
             ModelType.LOGISTIC_L2.value,
@@ -621,6 +628,21 @@ class GridSearchConfigGenerator:
         # I4-I5: Conditional features
         gen.add_dimension('anti_overfit_config.use_rv_signature_plot', [False, True])
         gen.add_dimension('anti_overfit_config.use_tda_homology', [False, True])
+
+        # ===== Wave J Bundles =====
+        # J1: Macro features (credit spread, yield curve, vol term structure, macro surprise)
+        gen.add_dimension('anti_overfit_config.use_credit_spread_features', [True, False])
+        gen.add_dimension('anti_overfit_config.use_yield_curve_features', [True, False])
+        gen.add_dimension('anti_overfit_config.use_vol_term_structure_features', [True, False])
+        gen.add_dimension('anti_overfit_config.use_macro_surprise_features', [True, False])
+        # J2: Statistical features (cross-asset momentum, skew/kurtosis, seasonality, order flow)
+        gen.add_dimension('anti_overfit_config.use_cross_asset_momentum', [True, False])
+        gen.add_dimension('anti_overfit_config.use_skew_kurtosis_features', [True, False])
+        gen.add_dimension('anti_overfit_config.use_seasonality_features', [True, False])
+        gen.add_dimension('anti_overfit_config.use_order_flow_imbalance', [True, False])
+        # J3: Risk management
+        gen.add_dimension('trading_config.use_dynamic_kelly', [False, True])
+        gen.add_dimension('trading_config.use_drawdown_adaptive_sizing', [False, True])
 
         # Add constraint: no dim reduction when feature selection is strong
         gen.add_constraint(

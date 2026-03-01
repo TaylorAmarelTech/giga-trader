@@ -75,6 +75,14 @@ from src.phase_08_features_breadth.l_moments_features import LMomentsFeatures
 from src.phase_08_features_breadth.multiscale_entropy_features import MultiscaleEntropyFeatures
 from src.phase_08_features_breadth.rv_signature_features import RVSignaturePlotFeatures
 from src.phase_08_features_breadth.tda_features import TDAHomologyFeatures
+from src.phase_08_features_breadth.credit_spread_features import CreditSpreadFeatures
+from src.phase_08_features_breadth.yield_curve_features import YieldCurveFeatures
+from src.phase_08_features_breadth.vol_term_structure_features import VolTermStructureFeatures
+from src.phase_08_features_breadth.macro_surprise_features import MacroSurpriseFeatures
+from src.phase_08_features_breadth.cross_asset_momentum_features import CrossAssetMomentumFeatures
+from src.phase_08_features_breadth.skew_kurtosis_features import SkewKurtosisFeatures
+from src.phase_08_features_breadth.seasonality_features import SeasonalityFeatures
+from src.phase_08_features_breadth.order_flow_imbalance_features import OrderFlowImbalanceFeatures
 from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
 from src.core.system_resources import maybe_gc as _maybe_gc
 
@@ -134,6 +142,14 @@ def integrate_anti_overfit(
     use_multiscale_entropy: bool = True,  # Multiscale sample entropy (mse_*)
     use_rv_signature_plot: bool = False,  # RV signature plot features (rvsp_*)
     use_tda_homology: bool = False,  # TDA persistent homology (tda_*)
+    use_credit_spread_features: bool = True,  # Credit spread features (cred_*)
+    use_yield_curve_features: bool = True,  # Yield curve features (yc_*)
+    use_vol_term_structure_features: bool = True,  # Vol term structure features (vts_*)
+    use_macro_surprise_features: bool = True,  # Macro surprise features (msurp_*)
+    use_cross_asset_momentum: bool = True,  # Cross-asset momentum features (xmom_*)
+    use_skew_kurtosis_features: bool = True,  # Skew/kurtosis features (skku_*)
+    use_seasonality_features: bool = True,  # Seasonality features (seas_*)
+    use_order_flow_imbalance: bool = True,  # Order flow imbalance features (ofi_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -1127,6 +1143,120 @@ def integrate_anti_overfit(
             metadata["tda_homology_features"] = False
 
     _maybe_gc(resource_config, "steps 41-50")
+
+    # 51. Credit Spread Features (cred_ prefix)
+    if use_credit_spread_features:
+        try:
+            cs = CreditSpreadFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = cs.create_credit_spread_features(df_daily)
+            n_cs = len(df_daily.columns) - n_before
+            metadata["credit_spread_features"] = True
+            metadata["n_credit_spread_features"] = n_cs
+            print(f"  [CREDIT] Added {n_cs} credit spread features")
+        except Exception as e:
+            print(f"  [CREDIT] Warning: Credit spread features failed: {e}")
+            metadata["credit_spread_features"] = False
+
+    # 52. Yield Curve Features (yc_ prefix)
+    if use_yield_curve_features:
+        try:
+            yc = YieldCurveFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = yc.create_yield_curve_features(df_daily)
+            n_yc = len(df_daily.columns) - n_before
+            metadata["yield_curve_features"] = True
+            metadata["n_yield_curve_features"] = n_yc
+            print(f"  [YIELD] Added {n_yc} yield curve features")
+        except Exception as e:
+            print(f"  [YIELD] Warning: Yield curve features failed: {e}")
+            metadata["yield_curve_features"] = False
+
+    # 53. Volatility Term Structure Features (vts_ prefix)
+    if use_vol_term_structure_features:
+        try:
+            vts = VolTermStructureFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = vts.create_vol_term_structure_features(df_daily)
+            n_vts = len(df_daily.columns) - n_before
+            metadata["vol_term_structure_features"] = True
+            metadata["n_vol_term_structure_features"] = n_vts
+            print(f"  [VTS] Added {n_vts} vol term structure features")
+        except Exception as e:
+            print(f"  [VTS] Warning: Vol term structure features failed: {e}")
+            metadata["vol_term_structure_features"] = False
+
+    # 54. Macro Surprise Features (msurp_ prefix)
+    if use_macro_surprise_features:
+        try:
+            ms = MacroSurpriseFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = ms.create_macro_surprise_features(df_daily)
+            n_ms = len(df_daily.columns) - n_before
+            metadata["macro_surprise_features"] = True
+            metadata["n_macro_surprise_features"] = n_ms
+            print(f"  [MSURP] Added {n_ms} macro surprise features")
+        except Exception as e:
+            print(f"  [MSURP] Warning: Macro surprise features failed: {e}")
+            metadata["macro_surprise_features"] = False
+
+    # 55. Cross-Asset Momentum Features (xmom_ prefix)
+    if use_cross_asset_momentum:
+        try:
+            xmom = CrossAssetMomentumFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = xmom.create_cross_asset_momentum_features(df_daily)
+            n_xmom = len(df_daily.columns) - n_before
+            metadata["cross_asset_momentum_features"] = True
+            metadata["n_cross_asset_momentum_features"] = n_xmom
+            print(f"  [XMOM] Added {n_xmom} cross-asset momentum features")
+        except Exception as e:
+            print(f"  [XMOM] Warning: Cross-asset momentum features failed: {e}")
+            metadata["cross_asset_momentum_features"] = False
+
+    # 56. Skew/Kurtosis Features (skku_ prefix)
+    if use_skew_kurtosis_features:
+        try:
+            skku = SkewKurtosisFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = skku.create_skew_kurtosis_features(df_daily)
+            n_skku = len(df_daily.columns) - n_before
+            metadata["skew_kurtosis_features"] = True
+            metadata["n_skew_kurtosis_features"] = n_skku
+            print(f"  [SKKU] Added {n_skku} skew/kurtosis features")
+        except Exception as e:
+            print(f"  [SKKU] Warning: Skew/kurtosis features failed: {e}")
+            metadata["skew_kurtosis_features"] = False
+
+    # 57. Seasonality Features (seas_ prefix)
+    if use_seasonality_features:
+        try:
+            seas = SeasonalityFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = seas.create_seasonality_features(df_daily)
+            n_seas = len(df_daily.columns) - n_before
+            metadata["seasonality_features"] = True
+            metadata["n_seasonality_features"] = n_seas
+            print(f"  [SEAS] Added {n_seas} seasonality features")
+        except Exception as e:
+            print(f"  [SEAS] Warning: Seasonality features failed: {e}")
+            metadata["seasonality_features"] = False
+
+    # 58. Order Flow Imbalance Features (ofi_ prefix)
+    if use_order_flow_imbalance:
+        try:
+            ofi = OrderFlowImbalanceFeatures()
+            n_before = len(df_daily.columns)
+            df_daily = ofi.create_order_flow_imbalance_features(df_daily)
+            n_ofi = len(df_daily.columns) - n_before
+            metadata["order_flow_imbalance_features"] = True
+            metadata["n_order_flow_imbalance_features"] = n_ofi
+            print(f"  [OFI] Added {n_ofi} order flow imbalance features")
+        except Exception as e:
+            print(f"  [OFI] Warning: Order flow imbalance features failed: {e}")
+            metadata["order_flow_imbalance_features"] = False
+
+    _maybe_gc(resource_config, "steps 51-58")
 
     # 9. Synthetic SPY Universes (do last since it multiplies data)
     _n_universes = 20

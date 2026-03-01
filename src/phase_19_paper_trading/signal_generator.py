@@ -565,6 +565,14 @@ class SignalGenerator:
                     use_path_signatures=True,
                     use_wavelet_scattering=True,
                     use_wasserstein_regime=True,
+                    use_credit_spread_features=True,
+                    use_yield_curve_features=True,
+                    use_vol_term_structure_features=True,
+                    use_macro_surprise_features=True,
+                    use_cross_asset_momentum=True,
+                    use_skew_kurtosis_features=True,
+                    use_seasonality_features=True,
+                    use_order_flow_imbalance=True,
                     validate_ohlc=True,
                 )
             except Exception as e:
@@ -1015,6 +1023,57 @@ class SignalGenerator:
                             position_size = cvar_pos
                 except Exception as cvar_err:
                     logger.debug(f"CVaR sizing skipped: {cvar_err}")
+
+            # Dynamic Kelly sizing (Wave J3.3): VIX-conditioned Kelly criterion
+            if TRADING_CONFIG.get("use_dynamic_kelly", False) and df_daily is not None:
+                try:
+                    from src.phase_15_strategy.dynamic_kelly_sizer import DynamicKellySizer
+                    _close = df_daily["close"].values if "close" in df_daily.columns else None
+                    if _close is not None and len(_close) > 30:
+                        _returns = np.diff(_close) / _close[:-1]
+                        dk_sizer = DynamicKellySizer(
+                            min_position=min_position_pct,
+                            max_position=max_position_pct,
+                        )
+                        dk_sizer.fit(_returns)
+                        # Estimate VIX from realized vol if not available
+                        vix_est = float(np.std(_returns[-20:]) * np.sqrt(252) * 100) if len(_returns) >= 20 else 20.0
+                        dk_pos = dk_sizer.size(
+                            win_probability=swing_proba,
+                            vix_level=vix_est,
+                        )
+                        if dk_pos != position_size:
+                            logger.debug(
+                                f"DynamicKelly sizing: {position_size:.4f} -> {dk_pos:.4f} "
+                                f"(VIX_est={vix_est:.1f})"
+                            )
+                            position_size = dk_pos
+                except Exception as dk_err:
+                    logger.debug(f"DynamicKelly sizing skipped: {dk_err}")
+
+            # Drawdown-adaptive sizing (Wave J3.4): reduce position in drawdown
+            if TRADING_CONFIG.get("use_drawdown_adaptive_sizing", False) and df_daily is not None:
+                try:
+                    from src.phase_15_strategy.drawdown_adaptive_sizer import DrawdownAdaptiveSizer
+                    _close = df_daily["close"].values if "close" in df_daily.columns else None
+                    if _close is not None and len(_close) > 10:
+                        da_sizer = DrawdownAdaptiveSizer(
+                            max_drawdown=TRADING_CONFIG.get("drawdown_max_dd", 0.10),
+                            power=TRADING_CONFIG.get("drawdown_power", 2.0),
+                            min_position=min_position_pct,
+                            max_position=max_position_pct,
+                        )
+                        da_sizer.fit(_close)
+                        if da_sizer.current_drawdown is not None:
+                            da_pos = da_sizer.size(position_size)
+                            if da_pos != position_size:
+                                logger.debug(
+                                    f"Drawdown sizing: {position_size:.4f} -> {da_pos:.4f} "
+                                    f"(dd={da_sizer.current_drawdown:.4f})"
+                                )
+                                position_size = da_pos
+                except Exception as da_err:
+                    logger.debug(f"Drawdown sizing skipped: {da_err}")
 
             # Calculate stop loss and take profit using dynamic thresholds
             if signal_type == SignalType.BUY:

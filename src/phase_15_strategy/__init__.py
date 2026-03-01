@@ -47,6 +47,12 @@ from src.phase_15_strategy.cvar_position_sizer import (
 from src.phase_15_strategy.thompson_selector import (
     ThompsonSamplingSelector,
 )
+from src.phase_15_strategy.dynamic_kelly_sizer import (
+    DynamicKellySizer,
+)
+from src.phase_15_strategy.drawdown_adaptive_sizer import (
+    DrawdownAdaptiveSizer,
+)
 
 __all__ = [
     # Data structures
@@ -84,4 +90,8 @@ __all__ = [
     "CVaRPositionSizer",
     # Thompson Sampling model selection
     "ThompsonSamplingSelector",
+    # Dynamic Kelly sizing
+    "DynamicKellySizer",
+    # Drawdown-adaptive sizing
+    "DrawdownAdaptiveSizer",
 ]

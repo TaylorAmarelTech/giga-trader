@@ -130,6 +130,15 @@ class TradingGatesConfig:
     # SEC EDGAR gate (Wave 37d)
     edgar_enabled: bool = False  # Off by default (quarterly data, too slow)
 
+    # Wave J: Macro calendar gate (FOMC/NFP/CPI event risk)
+    macro_calendar_enabled: bool = True
+    macro_calendar_max_staleness_hours: int = 24
+
+    # Wave J: Volatility regime gate (VIX-based)
+    vol_regime_gate_enabled: bool = True
+    vol_regime_block_vix: float = 35.0
+    vol_regime_reduce_vix: float = 28.0
+
     # Behavior when data is stale
     stale_data_action: str = "PASS"  # "PASS" = ignore gate, "BLOCK" = block trade
 
@@ -310,6 +319,22 @@ class TradingGates:
                 logger.info("Insider gate disabled: FINNHUB_API_KEY not set")
                 self.config.insider_enabled = False
 
+        if self.config.macro_calendar_enabled:
+            try:
+                from src.phase_19_paper_trading.macro_calendar_gate import MacroCalendarDataProvider
+                self._providers["macro_calendar"] = MacroCalendarDataProvider()
+            except Exception as e:
+                logger.warning(f"Macro calendar gate provider unavailable: {e}")
+                self.config.macro_calendar_enabled = False
+
+        if self.config.vol_regime_gate_enabled:
+            try:
+                from src.phase_19_paper_trading.vol_regime_gate import VolRegimeDataProvider
+                self._providers["vol_regime"] = VolRegimeDataProvider()
+            except Exception as e:
+                logger.warning(f"Vol regime gate provider unavailable: {e}")
+                self.config.vol_regime_gate_enabled = False
+
         enabled_gates = [
             name for name, enabled in [
                 ("fear_greed", self.config.fear_greed_enabled),
@@ -318,6 +343,8 @@ class TradingGates:
                 ("gex", self.config.gex_enabled),
                 ("insider", self.config.insider_enabled),
                 ("edgar", self.config.edgar_enabled),
+                ("macro_calendar", self.config.macro_calendar_enabled),
+                ("vol_regime", self.config.vol_regime_gate_enabled),
             ] if enabled
         ]
         logger.info(f"Trading gates enabled: {', '.join(enabled_gates)} ({len(enabled_gates)} active)")
@@ -377,6 +404,8 @@ class TradingGates:
             (self.config.aaii_enabled, self._evaluate_aaii),
             (self.config.gex_enabled, self._evaluate_gex),
             (self.config.insider_enabled, self._evaluate_insider),
+            (self.config.macro_calendar_enabled, self._evaluate_macro_calendar),
+            (self.config.vol_regime_gate_enabled, self._evaluate_vol_regime),
         ]
 
         for enabled, evaluator in gate_evaluators:
@@ -685,6 +714,60 @@ class TradingGates:
         except Exception as e:
             logger.warning(f"Insider gate evaluation failed: {e}")
             return self._pass_decision("insider", f"Evaluation error: {e}")
+
+    def _evaluate_macro_calendar(self, signal_type: str) -> GateDecision:
+        """Evaluate macro calendar gate (FOMC/NFP/CPI event risk)."""
+        provider = self._providers.get("macro_calendar")
+        if not provider:
+            return self._pass_decision("macro_calendar", "Provider not configured")
+
+        data = provider.get_latest()
+        if data is None:
+            return self._pass_decision("macro_calendar", "No calendar data", is_stale=True)
+
+        try:
+            from src.phase_19_paper_trading.macro_calendar_gate import evaluate_macro_calendar_gate
+            result = evaluate_macro_calendar_gate(data, signal_type)
+            return GateDecision(
+                gate_name="macro_calendar",
+                action=result["action"],
+                confidence_multiplier=result["confidence_multiplier"],
+                position_size_multiplier=result["position_size_multiplier"],
+                reason=result["reason"],
+            )
+        except Exception as e:
+            logger.warning(f"Macro calendar gate evaluation failed: {e}")
+            return self._pass_decision("macro_calendar", f"Evaluation error: {e}")
+
+    def _evaluate_vol_regime(self, signal_type: str) -> GateDecision:
+        """Evaluate volatility regime gate (VIX-based)."""
+        provider = self._providers.get("vol_regime")
+        if not provider:
+            return self._pass_decision("vol_regime", "Provider not configured")
+
+        data = provider.get_latest()
+        if data is None:
+            return self._pass_decision("vol_regime", "No VIX data", is_stale=True)
+
+        try:
+            from src.phase_19_paper_trading.vol_regime_gate import evaluate_vol_regime_gate
+            result = evaluate_vol_regime_gate(
+                data, signal_type,
+                block_vix_threshold=self.config.vol_regime_block_vix,
+                reduce_vix_threshold=self.config.vol_regime_reduce_vix,
+            )
+            vix_level = data.get("vix_level")
+            return GateDecision(
+                gate_name="vol_regime",
+                action=result["action"],
+                confidence_multiplier=result["confidence_multiplier"],
+                position_size_multiplier=result["position_size_multiplier"],
+                reason=result["reason"],
+                data_value=vix_level,
+            )
+        except Exception as e:
+            logger.warning(f"Vol regime gate evaluation failed: {e}")
+            return self._pass_decision("vol_regime", f"Evaluation error: {e}")
 
     def _pass_decision(
         self,

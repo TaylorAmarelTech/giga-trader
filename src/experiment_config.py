@@ -457,6 +457,30 @@ class AntiOverfitConfig:
     # TDA persistent homology features (topological crash detection, requires giotto-tda)
     use_tda_homology: bool = False
 
+    # Wave J: Credit spread features (HYG-LQD spread, credit stress)
+    use_credit_spread_features: bool = True
+
+    # Wave J: Yield curve features (2s10s, 3m10y, curvature, inversion)
+    use_yield_curve_features: bool = True
+
+    # Wave J: Volatility term structure features (VIX/VIX3M contango/backwardation)
+    use_vol_term_structure_features: bool = True
+
+    # Wave J: Macro surprise features (deviation from trend proxies)
+    use_macro_surprise_features: bool = True
+
+    # Wave J: Cross-asset momentum features (TLT/GLD/HYG lead-lag signals)
+    use_cross_asset_momentum: bool = True
+
+    # Wave J: Skew/kurtosis features (higher-order moment analysis)
+    use_skew_kurtosis_features: bool = True
+
+    # Wave J: Seasonality features (calendar anomalies: TOM, January, FOMC drift)
+    use_seasonality_features: bool = True
+
+    # Wave J: Order flow imbalance features (BVC buy/sell pressure)
+    use_order_flow_imbalance: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 
@@ -602,6 +626,12 @@ class TradingConfig:
     use_thompson_selector: bool = False
     thompson_decay: float = 0.995
     thompson_min_weight: float = 0.1
+
+    # Wave J: Dynamic Kelly position sizing (VIX-conditioned Kelly criterion)
+    use_dynamic_kelly: bool = False
+
+    # Wave J: Drawdown-adaptive position sizing (power-law decay)
+    use_drawdown_adaptive_sizing: bool = False
 
 
 @dataclass
