@@ -481,6 +481,18 @@ class AntiOverfitConfig:
     # Wave J: Order flow imbalance features (BVC buy/sell pressure)
     use_order_flow_imbalance: bool = True
 
+    # Wave K: Correlation regime features (cross-asset correlation matrix)
+    use_correlation_regime: bool = True
+
+    # Wave K: Fama-French factor exposure features (ETF proxies)
+    use_fama_french: bool = True
+
+    # Wave K: Put-call ratio features (VIX/vol proxy fallback)
+    use_put_call_ratio: bool = True
+
+    # Wave K: Multi-horizon ensemble filter features (1d/3d/5d)
+    use_multi_horizon: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 

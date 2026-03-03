@@ -573,6 +573,10 @@ class SignalGenerator:
                     use_skew_kurtosis_features=True,
                     use_seasonality_features=True,
                     use_order_flow_imbalance=True,
+                    use_correlation_regime=True,
+                    use_fama_french=True,
+                    use_put_call_ratio=True,
+                    use_multi_horizon=True,
                     validate_ohlc=True,
                 )
             except Exception as e:
@@ -1075,16 +1079,51 @@ class SignalGenerator:
                 except Exception as da_err:
                     logger.debug(f"Drawdown sizing skipped: {da_err}")
 
-            # Calculate stop loss and take profit using dynamic thresholds
-            if signal_type == SignalType.BUY:
-                stop_loss = current_price * (1 - stop_loss_pct)
-                take_profit = current_price * (1 + take_profit_pct)
-            elif signal_type == SignalType.SELL:
-                stop_loss = current_price * (1 + stop_loss_pct)
-                take_profit = current_price * (1 - take_profit_pct)
+            # Regime-aware stop loss (Wave K2): ATR/VIX-conditioned levels
+            if TRADING_CONFIG.get("use_regime_stop_loss", False) and df_daily is not None:
+                try:
+                    from src.phase_15_strategy.regime_stop_loss import RegimeAwareStopLoss
+                    rasl = RegimeAwareStopLoss()
+                    rasl.fit(df_daily)
+                    _close = df_daily["close"].values if "close" in df_daily.columns else None
+                    if _close is not None and len(_close) >= 20:
+                        _returns = np.diff(_close) / _close[:-1]
+                        vix_est = float(np.std(_returns[-20:]) * np.sqrt(252) * 100)
+                    else:
+                        vix_est = 20.0
+                    direction = "LONG" if signal_type == SignalType.BUY else "SHORT"
+                    levels = rasl.compute_levels(current_price, direction, vix_est)
+                    stop_loss = levels["stop_loss"]
+                    take_profit = levels["take_profit"]
+                    stop_loss_pct = levels["stop_pct"]
+                    take_profit_pct = levels["tp_pct"]
+                    logger.debug(
+                        f"RegimeStopLoss: regime={levels['regime']} "
+                        f"stop={stop_loss_pct:.4f} tp={take_profit_pct:.4f}"
+                    )
+                except Exception as rasl_err:
+                    logger.debug(f"RegimeStopLoss skipped: {rasl_err}")
+                    # Fall through to static stops below
+                    if signal_type == SignalType.BUY:
+                        stop_loss = current_price * (1 - stop_loss_pct)
+                        take_profit = current_price * (1 + take_profit_pct)
+                    elif signal_type == SignalType.SELL:
+                        stop_loss = current_price * (1 + stop_loss_pct)
+                        take_profit = current_price * (1 - take_profit_pct)
+                    else:
+                        stop_loss = None
+                        take_profit = None
             else:
-                stop_loss = None
-                take_profit = None
+                # Calculate stop loss and take profit using dynamic thresholds
+                if signal_type == SignalType.BUY:
+                    stop_loss = current_price * (1 - stop_loss_pct)
+                    take_profit = current_price * (1 + take_profit_pct)
+                elif signal_type == SignalType.SELL:
+                    stop_loss = current_price * (1 + stop_loss_pct)
+                    take_profit = current_price * (1 - take_profit_pct)
+                else:
+                    stop_loss = None
+                    take_profit = None
 
             # Meta-labeling: scale position size by signal profitability probability
             meta_proba = None

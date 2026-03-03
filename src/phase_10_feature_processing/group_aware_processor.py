@@ -83,6 +83,10 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
     "skew_kurtosis": ["skku_"],
     "seasonality": ["seas_"],
     "order_flow": ["ofi_"],
+    "correlation_regime": ["corr_"],
+    "fama_french": ["ff_"],
+    "put_call_ratio": ["pcr_"],
+    "multi_horizon": ["mh_"],
     "intraday": [
         "return_at_", "high_to_", "low_to_", "range_to_",
         "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",

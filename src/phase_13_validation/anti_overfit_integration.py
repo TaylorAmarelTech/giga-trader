@@ -83,7 +83,11 @@ from src.phase_08_features_breadth.cross_asset_momentum_features import CrossAss
 from src.phase_08_features_breadth.skew_kurtosis_features import SkewKurtosisFeatures
 from src.phase_08_features_breadth.seasonality_features import SeasonalityFeatures
 from src.phase_08_features_breadth.order_flow_imbalance_features import OrderFlowImbalanceFeatures
+from src.phase_08_features_breadth.correlation_regime_features import CorrelationRegimeFeatures
+from src.phase_08_features_breadth.fama_french_features import FamaFrenchFeatures
+from src.phase_08_features_breadth.put_call_ratio_features import PutCallRatioFeatures
 from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
+from src.phase_15_strategy.multi_horizon_filter import MultiHorizonFilter
 from src.core.system_resources import maybe_gc as _maybe_gc
 
 
@@ -150,6 +154,10 @@ def integrate_anti_overfit(
     use_skew_kurtosis_features: bool = True,  # Skew/kurtosis features (skku_*)
     use_seasonality_features: bool = True,  # Seasonality features (seas_*)
     use_order_flow_imbalance: bool = True,  # Order flow imbalance features (ofi_*)
+    use_correlation_regime: bool = True,  # Cross-asset correlation regime features (corr_*)
+    use_fama_french: bool = True,  # Fama-French factor exposure features (ff_*)
+    use_put_call_ratio: bool = True,  # Put-call ratio features (pcr_*)
+    use_multi_horizon: bool = True,  # Multi-horizon ensemble filter features (mh_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -229,80 +237,100 @@ def integrate_anti_overfit(
 
     # 1. Component Streak Breadth Features
     if use_breadth_streaks:
-        streak_features = ComponentStreakFeatures(max_streak=7)
-        component_prices = streak_features.download_component_data(start_date, end_date)
+        try:
+            streak_features = ComponentStreakFeatures(max_streak=7)
+            component_prices = streak_features.download_component_data(start_date, end_date)
 
-        if not component_prices.empty:
-            df_daily = streak_features.compute_streak_features(component_prices, df_daily)
-            metadata["streak_features"] = True
-            metadata["components_tracked"] = len(component_prices.columns)
+            if not component_prices.empty:
+                df_daily = streak_features.compute_streak_features(component_prices, df_daily)
+                metadata["streak_features"] = True
+                metadata["components_tracked"] = len(component_prices.columns)
 
-            # Analyze current breadth
-            signal = streak_features.analyze_breadth_signal(df_daily)
-            if signal:
-                print(f"  Current breadth: {signal.get('interpretation', 'N/A')}")
+                # Analyze current breadth
+                signal = streak_features.analyze_breadth_signal(df_daily)
+                if signal:
+                    print(f"  Current breadth: {signal.get('interpretation', 'N/A')}")
+        except Exception as e:
+            print(f"  [BREADTH_STREAKS] Warning: Breadth streak features failed: {e}")
+            metadata["streak_features"] = False
 
     # 2. Cross-Asset Features
     if use_cross_assets:
-        cross_assets = CrossAssetFeatures()
-        cross_data = cross_assets.download_cross_assets(start_date, end_date)
+        try:
+            cross_assets = CrossAssetFeatures()
+            cross_data = cross_assets.download_cross_assets(start_date, end_date)
 
-        if not cross_data.empty:
-            df_daily = cross_assets.create_cross_asset_features(cross_data, df_daily)
-            metadata["cross_assets"] = list(cross_data.columns)
+            if not cross_data.empty:
+                df_daily = cross_assets.create_cross_asset_features(cross_data, df_daily)
+                metadata["cross_assets"] = list(cross_data.columns)
+        except Exception as e:
+            print(f"  [CROSS_ASSETS] Warning: Cross-asset features failed: {e}")
+            metadata["cross_assets"] = False
 
     # 3. MAG Market Breadth Features (MAG3/5/6/7/10/15)
     if use_mag_breadth:
-        mag_breadth = Mag7BreadthFeatures()
-        mag_data = mag_breadth.download_mag_data(start_date, end_date)
+        try:
+            mag_breadth = Mag7BreadthFeatures()
+            mag_data = mag_breadth.download_mag_data(start_date, end_date)
 
-        if not mag_data.empty:
-            df_daily = mag_breadth.create_mag_features(df_daily)
-            metadata["mag_features"] = True
-            metadata["mag_tickers"] = mag_breadth.ALL_MAG_TICKERS
-            metadata["mag_groups"] = ["MAG3", "MAG5", "MAG6", "MAG7", "MAG10", "MAG15"]
+            if not mag_data.empty:
+                df_daily = mag_breadth.create_mag_features(df_daily)
+                metadata["mag_features"] = True
+                metadata["mag_tickers"] = mag_breadth.ALL_MAG_TICKERS
+                metadata["mag_groups"] = ["MAG3", "MAG5", "MAG6", "MAG7", "MAG10", "MAG15"]
 
-            # Analyze current MAG leadership
-            mag_signal = mag_breadth.analyze_mag_leadership(df_daily)
-            if mag_signal:
-                print(f"  MAG7 Leadership: {mag_signal.get('interpretation', 'N/A')}")
-                print(f"    Bias: {mag_signal.get('bias', 'N/A')}")
-                print(f"    Tech Rotation: {mag_signal.get('rotation', 'N/A')}")
-                if mag_signal.get('breadth_warning') != 'NONE':
-                    print(f"    Breadth Warning: {mag_signal.get('breadth_warning')}")
+                # Analyze current MAG leadership
+                mag_signal = mag_breadth.analyze_mag_leadership(df_daily)
+                if mag_signal:
+                    print(f"  MAG7 Leadership: {mag_signal.get('interpretation', 'N/A')}")
+                    print(f"    Bias: {mag_signal.get('bias', 'N/A')}")
+                    print(f"    Tech Rotation: {mag_signal.get('rotation', 'N/A')}")
+                    if mag_signal.get('breadth_warning') != 'NONE':
+                        print(f"    Breadth Warning: {mag_signal.get('breadth_warning')}")
+        except Exception as e:
+            print(f"  [MAG_BREADTH] Warning: MAG breadth features failed: {e}")
+            metadata["mag_features"] = False
 
     # 4. Sector Breadth Features (S&P 500 Sectors)
     if use_sector_breadth:
-        sector_breadth = SectorBreadthFeatures()
-        sector_data = sector_breadth.download_sector_data(start_date, end_date)
+        try:
+            sector_breadth = SectorBreadthFeatures()
+            sector_data = sector_breadth.download_sector_data(start_date, end_date)
 
-        if not sector_data.empty:
-            df_daily = sector_breadth.create_sector_features(df_daily)
-            metadata["sector_features"] = True
-            metadata["sector_etfs"] = list(sector_breadth.SECTOR_ETFS.keys())
+            if not sector_data.empty:
+                df_daily = sector_breadth.create_sector_features(df_daily)
+                metadata["sector_features"] = True
+                metadata["sector_etfs"] = list(sector_breadth.SECTOR_ETFS.keys())
 
-            # Analyze current sector rotation
-            sector_signal = sector_breadth.analyze_sector_rotation(df_daily)
-            if sector_signal:
-                print(f"  Sector Rotation: {sector_signal.get('rotation', 'N/A')}")
-                print(f"    Market Phase: {sector_signal.get('market_phase', 'N/A')}")
-                print(f"    Risk Sentiment: {sector_signal.get('risk_sentiment', 'N/A')}")
+                # Analyze current sector rotation
+                sector_signal = sector_breadth.analyze_sector_rotation(df_daily)
+                if sector_signal:
+                    print(f"  Sector Rotation: {sector_signal.get('rotation', 'N/A')}")
+                    print(f"    Market Phase: {sector_signal.get('market_phase', 'N/A')}")
+                    print(f"    Risk Sentiment: {sector_signal.get('risk_sentiment', 'N/A')}")
+        except Exception as e:
+            print(f"  [SECTOR_BREADTH] Warning: Sector breadth features failed: {e}")
+            metadata["sector_features"] = False
 
     # 5. Volatility Regime Features (VXX-based)
     if use_vol_regime:
-        vol_regime = VolatilityRegimeFeatures()
-        vol_data = vol_regime.download_vol_data(start_date, end_date)
+        try:
+            vol_regime = VolatilityRegimeFeatures()
+            vol_data = vol_regime.download_vol_data(start_date, end_date)
 
-        if not vol_data.empty:
-            df_daily = vol_regime.create_vol_features(df_daily)
-            metadata["vol_regime_features"] = True
+            if not vol_data.empty:
+                df_daily = vol_regime.create_vol_features(df_daily)
+                metadata["vol_regime_features"] = True
 
-            # Analyze current volatility regime
-            vol_signal = vol_regime.analyze_vol_regime(df_daily)
-            if vol_signal:
-                print(f"  Volatility Regime: {vol_signal.get('regime', 'N/A')}")
-                print(f"    Market Condition: {vol_signal.get('market_condition', 'N/A')}")
-                print(f"    VXX Percentile: {vol_signal.get('vxx_percentile', 0):.1%}")
+                # Analyze current volatility regime
+                vol_signal = vol_regime.analyze_vol_regime(df_daily)
+                if vol_signal:
+                    print(f"  Volatility Regime: {vol_signal.get('regime', 'N/A')}")
+                    print(f"    Market Condition: {vol_signal.get('market_condition', 'N/A')}")
+                    print(f"    VXX Percentile: {vol_signal.get('vxx_percentile', 0):.1%}")
+        except Exception as e:
+            print(f"  [VOL_REGIME] Warning: Volatility regime features failed: {e}")
+            metadata["vol_regime_features"] = False
 
     # 6. Calendar & Event Features (FOMC, opex, NFP, CPI, GDP)
     if use_calendar_features:
@@ -360,25 +388,29 @@ def integrate_anti_overfit(
 
     # 8. Economic Indicator Features (yields, VIX, credit spreads)
     if use_economic_features:
-        econ_features = EconomicFeatures()
-        econ_data = econ_features.download_economic_data(start_date, end_date)
+        try:
+            econ_features = EconomicFeatures()
+            econ_data = econ_features.download_economic_data(start_date, end_date)
 
-        if not econ_data.empty:
-            df_daily = econ_features.create_economic_features(df_daily)
-            metadata["economic_features"] = True
-            metadata["economic_sources"] = list(econ_data.columns)
+            if not econ_data.empty:
+                df_daily = econ_features.create_economic_features(df_daily)
+                metadata["economic_features"] = True
+                metadata["economic_sources"] = list(econ_data.columns)
 
-            # Analyze current conditions
-            econ_signal = econ_features.analyze_current_conditions(df_daily)
-            if econ_signal:
-                if "vix_regime" in econ_signal:
-                    print(f"  VIX Regime: {econ_signal['vix_regime']} "
-                          f"(level={econ_signal.get('vix_level', 0):.1f})")
-                if "yield_curve_signal" in econ_signal:
-                    print(f"  Yield Curve: {econ_signal['yield_curve_signal']} "
-                          f"(10Y-5Y={econ_signal.get('yield_curve_10_5', 0):.2f})")
-                if "credit_signal" in econ_signal:
-                    print(f"  Credit: {econ_signal['credit_signal']}")
+                # Analyze current conditions
+                econ_signal = econ_features.analyze_current_conditions(df_daily)
+                if econ_signal:
+                    if "vix_regime" in econ_signal:
+                        print(f"  VIX Regime: {econ_signal['vix_regime']} "
+                              f"(level={econ_signal.get('vix_level', 0):.1f})")
+                    if "yield_curve_signal" in econ_signal:
+                        print(f"  Yield Curve: {econ_signal['yield_curve_signal']} "
+                              f"(10Y-5Y={econ_signal.get('yield_curve_10_5', 0):.2f})")
+                    if "credit_signal" in econ_signal:
+                        print(f"  Credit: {econ_signal['credit_signal']}")
+        except Exception as e:
+            print(f"  [ECONOMIC] Warning: Economic features failed: {e}")
+            metadata["economic_features"] = False
 
     _maybe_gc(resource_config, "steps 0-8")
 
@@ -1257,6 +1289,82 @@ def integrate_anti_overfit(
             metadata["order_flow_imbalance_features"] = False
 
     _maybe_gc(resource_config, "steps 51-58")
+
+    # 59. Correlation Regime Features (corr_ prefix)
+    if use_correlation_regime:
+        try:
+            corr_regime = CorrelationRegimeFeatures()
+            corr_data = corr_regime.download_correlation_data(str(start_date)[:10], str(end_date)[:10])
+            n_before = len(df_daily.columns)
+            df_daily = corr_regime.create_correlation_features(df_daily)
+            n_corr = len(df_daily.columns) - n_before
+            metadata["correlation_regime_features"] = True
+            metadata["n_correlation_regime_features"] = n_corr
+            print(f"  [CORR_REGIME] Added {n_corr} correlation regime features")
+
+            corr_signal = corr_regime.analyze_current_regime(df_daily)
+            if corr_signal:
+                print(f"    Correlation Regime: {corr_signal.get('regime', 'N/A')} "
+                      f"(SPY-TLT={corr_signal.get('spy_tlt_corr', 0):.3f})")
+        except Exception as e:
+            print(f"  [CORR_REGIME] Warning: Correlation regime features failed: {e}")
+            metadata["correlation_regime_features"] = False
+
+    # 60. Fama-French Factor Exposure Features (ff_ prefix)
+    if use_fama_french:
+        try:
+            ff = FamaFrenchFeatures()
+            ff.download_factor_data(str(start_date)[:10], str(end_date)[:10])
+            n_before = len(df_daily.columns)
+            df_daily = ff.create_fama_french_features(df_daily)
+            n_ff = len(df_daily.columns) - n_before
+            metadata["fama_french_features"] = True
+            metadata["n_fama_french_features"] = n_ff
+            print(f"  [FAMA_FRENCH] Added {n_ff} factor exposure features")
+
+            ff_signal = ff.analyze_current_factors(df_daily)
+            if ff_signal:
+                print(f"    Factor Regime: {ff_signal.get('factor_regime', 'N/A')}")
+        except Exception as e:
+            print(f"  [FAMA_FRENCH] Warning: Fama-French features failed: {e}")
+            metadata["fama_french_features"] = False
+
+    # 61. Put-Call Ratio Features (pcr_ prefix)
+    if use_put_call_ratio:
+        try:
+            pcr = PutCallRatioFeatures()
+            pcr.download_pcr_data(str(start_date)[:10], str(end_date)[:10])
+            n_before = len(df_daily.columns)
+            df_daily = pcr.create_pcr_features(df_daily)
+            n_pcr = len(df_daily.columns) - n_before
+            metadata["put_call_ratio_features"] = True
+            metadata["n_put_call_ratio_features"] = n_pcr
+            print(f"  [PCR] Added {n_pcr} put-call ratio features")
+
+            pcr_signal = pcr.analyze_current_pcr(df_daily)
+            if pcr_signal:
+                print(f"    PCR Regime: {pcr_signal.get('regime', 'N/A')} "
+                      f"(ratio={pcr_signal.get('pcr_ratio', 0):.3f}, "
+                      f"source={pcr_signal.get('data_source', 'N/A')})")
+        except Exception as e:
+            print(f"  [PCR] Warning: Put-call ratio features failed: {e}")
+            metadata["put_call_ratio_features"] = False
+
+    # 62. Multi-Horizon Ensemble Features (mh_ prefix)
+    if use_multi_horizon:
+        try:
+            mh = MultiHorizonFilter()
+            n_before = len(df_daily.columns)
+            df_daily = mh.compute_horizon_signals(df_daily)
+            n_mh = len(df_daily.columns) - n_before
+            metadata["multi_horizon_features"] = True
+            metadata["n_multi_horizon_features"] = n_mh
+            print(f"  [MULTI_HORIZON] Added {n_mh} multi-horizon features")
+        except Exception as e:
+            print(f"  [MULTI_HORIZON] Warning: Multi-horizon features failed: {e}")
+            metadata["multi_horizon_features"] = False
+
+    _maybe_gc(resource_config, "steps 59-62")
 
     # 9. Synthetic SPY Universes (do last since it multiplies data)
     _n_universes = 20
