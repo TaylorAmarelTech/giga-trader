@@ -577,6 +577,16 @@ class SignalGenerator:
                     use_fama_french=True,
                     use_put_call_ratio=True,
                     use_multi_horizon=True,
+                    use_earnings_revision=True,
+                    use_short_interest=False,
+                    use_dollar_index=True,
+                    use_institutional_flow=False,
+                    use_google_trends=False,
+                    use_commodity_signals=True,
+                    use_treasury_auction=False,
+                    use_fed_liquidity=True,
+                    use_earnings_calendar=True,
+                    use_analyst_rating=True,
                     validate_ohlc=True,
                 )
             except Exception as e:

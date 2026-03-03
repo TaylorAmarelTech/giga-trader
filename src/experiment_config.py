@@ -493,6 +493,36 @@ class AntiOverfitConfig:
     # Wave K: Multi-horizon ensemble filter features (1d/3d/5d)
     use_multi_horizon: bool = True
 
+    # Wave L: Earnings revision momentum features (Finnhub estimates)
+    use_earnings_revision: bool = True
+
+    # Wave L: Short interest features (FINRA bi-monthly, sparse)
+    use_short_interest: bool = False  # Default OFF: bi-monthly, sparse signal
+
+    # Wave L: Dollar index features (DX-Y.NYB via yfinance)
+    use_dollar_index: bool = True
+
+    # Wave L: Institutional flow features (SEC EDGAR 13F, quarterly)
+    use_institutional_flow: bool = False  # Default OFF: quarterly, 45-day delay
+
+    # Wave L: Google Trends features (pytrends, rate limited)
+    use_google_trends: bool = False  # Default OFF: rate limits, unreliable
+
+    # Wave L: Commodity signal features (copper/silver/oil futures)
+    use_commodity_signals: bool = True
+
+    # Wave L: Treasury auction features (TreasuryDirect API)
+    use_treasury_auction: bool = False  # Default OFF: hard to parse, limited history
+
+    # Wave L: Fed liquidity features (FRED: WALCL, RRPONTSYD, etc.)
+    use_fed_liquidity: bool = True
+
+    # Wave L: Earnings calendar density features (Finnhub calendar)
+    use_earnings_calendar: bool = True
+
+    # Wave L: Analyst rating consensus features (Finnhub recommendations)
+    use_analyst_rating: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 

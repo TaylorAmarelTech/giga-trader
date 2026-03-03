@@ -88,6 +88,16 @@ from src.phase_08_features_breadth.fama_french_features import FamaFrenchFeature
 from src.phase_08_features_breadth.put_call_ratio_features import PutCallRatioFeatures
 from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
 from src.phase_15_strategy.multi_horizon_filter import MultiHorizonFilter
+from src.phase_08_features_breadth.earnings_revision_features import EarningsRevisionFeatures
+from src.phase_08_features_breadth.short_interest_features import ShortInterestFeatures
+from src.phase_08_features_breadth.dollar_index_features import DollarIndexFeatures
+from src.phase_08_features_breadth.institutional_flow_features import InstitutionalFlowFeatures
+from src.phase_08_features_breadth.google_trends_features import GoogleTrendsFeatures
+from src.phase_08_features_breadth.commodity_signal_features import CommoditySignalFeatures
+from src.phase_08_features_breadth.treasury_auction_features import TreasuryAuctionFeatures
+from src.phase_08_features_breadth.fed_liquidity_features import FedLiquidityFeatures
+from src.phase_08_features_breadth.earnings_calendar_features import EarningsCalendarFeatures
+from src.phase_08_features_breadth.analyst_rating_features import AnalystRatingFeatures
 from src.core.system_resources import maybe_gc as _maybe_gc
 
 
@@ -158,6 +168,16 @@ def integrate_anti_overfit(
     use_fama_french: bool = True,  # Fama-French factor exposure features (ff_*)
     use_put_call_ratio: bool = True,  # Put-call ratio features (pcr_*)
     use_multi_horizon: bool = True,  # Multi-horizon ensemble filter features (mh_*)
+    use_earnings_revision: bool = True,  # Earnings estimate revision features (ern_*)
+    use_short_interest: bool = False,  # Short interest features (si_*) -- sparse
+    use_dollar_index: bool = True,  # Dollar index features (dxy_*)
+    use_institutional_flow: bool = False,  # Institutional flow features (inst_*) -- sparse
+    use_google_trends: bool = False,  # Google Trends features (gtrend_*) -- rate limited
+    use_commodity_signals: bool = True,  # Commodity signal features (cmdty_*)
+    use_treasury_auction: bool = False,  # Treasury auction features (tauct_*) -- limited
+    use_fed_liquidity: bool = True,  # Fed liquidity features (fedliq_*)
+    use_earnings_calendar: bool = True,  # Earnings calendar features (ecal_*)
+    use_analyst_rating: bool = True,  # Analyst rating features (anlst_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -1365,6 +1385,202 @@ def integrate_anti_overfit(
             metadata["multi_horizon_features"] = False
 
     _maybe_gc(resource_config, "steps 59-62")
+
+    # ─────────────────────────────────────────────────────────
+    # 63. Earnings Revision Features (ern_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_earnings_revision:
+        try:
+            ern = EarningsRevisionFeatures()
+            ern.download_earnings_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = ern.create_earnings_revision_features(df_daily)
+            n_ern = len(df_daily.columns) - n_before
+            metadata["earnings_revision_features"] = True
+            metadata["n_earnings_revision_features"] = n_ern
+            print(f"  [ERN] Added {n_ern} earnings revision features")
+
+            ern_signal = ern.analyze_current_earnings_revision(df_daily)
+            if ern_signal:
+                print(f"    Revision Regime: {ern_signal.get('revision_regime', 'N/A')}")
+        except Exception as e:
+            print(f"  [ERN] Warning: Earnings revision features failed: {e}")
+            metadata["earnings_revision_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 64. Short Interest Features (si_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_short_interest:
+        try:
+            si = ShortInterestFeatures()
+            si.download_short_interest_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = si.create_short_interest_features(df_daily)
+            n_si = len(df_daily.columns) - n_before
+            metadata["short_interest_features"] = True
+            metadata["n_short_interest_features"] = n_si
+            print(f"  [SI] Added {n_si} short interest features")
+        except Exception as e:
+            print(f"  [SI] Warning: Short interest features failed: {e}")
+            metadata["short_interest_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 65. Dollar Index Features (dxy_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_dollar_index:
+        try:
+            dxy = DollarIndexFeatures()
+            dxy.download_dollar_data(str(start_date)[:10], str(end_date)[:10])
+            n_before = len(df_daily.columns)
+            df_daily = dxy.create_dollar_index_features(df_daily)
+            n_dxy = len(df_daily.columns) - n_before
+            metadata["dollar_index_features"] = True
+            metadata["n_dollar_index_features"] = n_dxy
+            print(f"  [DXY] Added {n_dxy} dollar index features")
+
+            dxy_signal = dxy.analyze_current_dollar(df_daily)
+            if dxy_signal:
+                print(f"    Dollar Regime: {dxy_signal.get('regime', 'N/A')} "
+                      f"(z={dxy_signal.get('z_score', 0):.3f})")
+        except Exception as e:
+            print(f"  [DXY] Warning: Dollar index features failed: {e}")
+            metadata["dollar_index_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 66. Institutional Flow Features (inst_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_institutional_flow:
+        try:
+            inst = InstitutionalFlowFeatures()
+            inst.download_institutional_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = inst.create_institutional_flow_features(df_daily)
+            n_inst = len(df_daily.columns) - n_before
+            metadata["institutional_flow_features"] = True
+            metadata["n_institutional_flow_features"] = n_inst
+            print(f"  [INST] Added {n_inst} institutional flow features")
+        except Exception as e:
+            print(f"  [INST] Warning: Institutional flow features failed: {e}")
+            metadata["institutional_flow_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 67. Google Trends Features (gtrend_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_google_trends:
+        try:
+            gtrend = GoogleTrendsFeatures()
+            gtrend.download_trends_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = gtrend.create_google_trends_features(df_daily)
+            n_gtrend = len(df_daily.columns) - n_before
+            metadata["google_trends_features"] = True
+            metadata["n_google_trends_features"] = n_gtrend
+            print(f"  [GTREND] Added {n_gtrend} Google Trends features")
+        except Exception as e:
+            print(f"  [GTREND] Warning: Google Trends features failed: {e}")
+            metadata["google_trends_features"] = False
+
+    _maybe_gc(resource_config, "steps 63-67")
+
+    # ─────────────────────────────────────────────────────────
+    # 68. Commodity Signal Features (cmdty_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_commodity_signals:
+        try:
+            cmdty = CommoditySignalFeatures()
+            cmdty.download_commodity_data(str(start_date)[:10], str(end_date)[:10])
+            n_before = len(df_daily.columns)
+            df_daily = cmdty.create_commodity_signal_features(df_daily)
+            n_cmdty = len(df_daily.columns) - n_before
+            metadata["commodity_signal_features"] = True
+            metadata["n_commodity_signal_features"] = n_cmdty
+            print(f"  [CMDTY] Added {n_cmdty} commodity signal features")
+
+            cmdty_signal = cmdty.analyze_current_commodity(df_daily)
+            if cmdty_signal:
+                print(f"    Commodity Regime: {cmdty_signal.get('regime', 'N/A')}")
+        except Exception as e:
+            print(f"  [CMDTY] Warning: Commodity signal features failed: {e}")
+            metadata["commodity_signal_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 69. Treasury Auction Features (tauct_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_treasury_auction:
+        try:
+            tauct = TreasuryAuctionFeatures()
+            tauct.download_auction_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = tauct.create_treasury_auction_features(df_daily)
+            n_tauct = len(df_daily.columns) - n_before
+            metadata["treasury_auction_features"] = True
+            metadata["n_treasury_auction_features"] = n_tauct
+            print(f"  [TAUCT] Added {n_tauct} treasury auction features")
+        except Exception as e:
+            print(f"  [TAUCT] Warning: Treasury auction features failed: {e}")
+            metadata["treasury_auction_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 70. Fed Liquidity Features (fedliq_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_fed_liquidity:
+        try:
+            fedliq = FedLiquidityFeatures()
+            fedliq.download_liquidity_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = fedliq.create_fed_liquidity_features(df_daily)
+            n_fedliq = len(df_daily.columns) - n_before
+            metadata["fed_liquidity_features"] = True
+            metadata["n_fed_liquidity_features"] = n_fedliq
+            print(f"  [FEDLIQ] Added {n_fedliq} Fed liquidity features")
+
+            fedliq_signal = fedliq.analyze_current_liquidity(df_daily)
+            if fedliq_signal:
+                print(f"    Liquidity Regime: {fedliq_signal.get('regime', 'N/A')} "
+                      f"(z={fedliq_signal.get('liquidity_z', 0):.3f})")
+        except Exception as e:
+            print(f"  [FEDLIQ] Warning: Fed liquidity features failed: {e}")
+            metadata["fed_liquidity_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 71. Earnings Calendar Features (ecal_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_earnings_calendar:
+        try:
+            ecal = EarningsCalendarFeatures()
+            ecal.download_calendar_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = ecal.create_earnings_calendar_features(df_daily)
+            n_ecal = len(df_daily.columns) - n_before
+            metadata["earnings_calendar_features"] = True
+            metadata["n_earnings_calendar_features"] = n_ecal
+            print(f"  [ECAL] Added {n_ecal} earnings calendar features")
+        except Exception as e:
+            print(f"  [ECAL] Warning: Earnings calendar features failed: {e}")
+            metadata["earnings_calendar_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 72. Analyst Rating Features (anlst_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_analyst_rating:
+        try:
+            anlst = AnalystRatingFeatures()
+            anlst.download_rating_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = anlst.create_analyst_rating_features(df_daily)
+            n_anlst = len(df_daily.columns) - n_before
+            metadata["analyst_rating_features"] = True
+            metadata["n_analyst_rating_features"] = n_anlst
+            print(f"  [ANLST] Added {n_anlst} analyst rating features")
+
+            anlst_signal = anlst.analyze_current_ratings(df_daily)
+            if anlst_signal:
+                print(f"    Consensus: {anlst_signal.get('consensus', 'N/A')}")
+        except Exception as e:
+            print(f"  [ANLST] Warning: Analyst rating features failed: {e}")
+            metadata["analyst_rating_features"] = False
+
+    _maybe_gc(resource_config, "steps 68-72")
 
     # 9. Synthetic SPY Universes (do last since it multiplies data)
     _n_universes = 20
