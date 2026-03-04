@@ -98,6 +98,14 @@ from src.phase_08_features_breadth.treasury_auction_features import TreasuryAuct
 from src.phase_08_features_breadth.fed_liquidity_features import FedLiquidityFeatures
 from src.phase_08_features_breadth.earnings_calendar_features import EarningsCalendarFeatures
 from src.phase_08_features_breadth.analyst_rating_features import AnalystRatingFeatures
+from src.phase_08_features_breadth.expanded_macro_features import ExpandedMacroFeatures
+from src.phase_08_features_breadth.vvix_features import VVIXFeatures
+from src.phase_08_features_breadth.sector_rotation_features import SectorRotationFeatures
+from src.phase_08_features_breadth.fx_carry_features import FXCarryFeatures
+from src.phase_08_features_breadth.money_market_features import MoneyMarketFeatures
+from src.phase_08_features_breadth.financial_stress_features import FinancialStressFeatures
+from src.phase_08_features_breadth.global_equity_features import GlobalEquityFeatures
+from src.phase_08_features_breadth.retail_sentiment_features import RetailSentimentFeatures
 from src.core.system_resources import maybe_gc as _maybe_gc
 
 
@@ -178,6 +186,14 @@ def integrate_anti_overfit(
     use_fed_liquidity: bool = True,  # Fed liquidity features (fedliq_*)
     use_earnings_calendar: bool = True,  # Earnings calendar features (ecal_*)
     use_analyst_rating: bool = True,  # Analyst rating features (anlst_*)
+    use_expanded_macro: bool = True,  # Expanded FRED macro features (xmacro_*)
+    use_vvix: bool = True,  # VVIX vol-of-vol features (vvix_*)
+    use_sector_rotation: bool = True,  # Sector rotation rank features (secrot_*)
+    use_fx_carry: bool = True,  # FX carry & currency features (fxc_*)
+    use_money_market: bool = True,  # Money market rate features (mmkt_*)
+    use_financial_stress: bool = True,  # Financial stress index features (fstress_*)
+    use_global_equity: bool = True,  # Global equity ETF features (gleq_*)
+    use_retail_sentiment: bool = True,  # Retail sentiment proxy features (rflow_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -1581,6 +1597,146 @@ def integrate_anti_overfit(
             metadata["analyst_rating_features"] = False
 
     _maybe_gc(resource_config, "steps 68-72")
+
+    # ─────────────────────────────────────────────────────────
+    # 73. Expanded Macro Features (xmacro_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_expanded_macro:
+        try:
+            xmacro = ExpandedMacroFeatures()
+            xmacro.download_macro_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = xmacro.create_expanded_macro_features(df_daily)
+            n_xmacro = len(df_daily.columns) - n_before
+            metadata["expanded_macro_features"] = True
+            metadata["n_expanded_macro_features"] = n_xmacro
+            print(f"  [XMACRO] Added {n_xmacro} expanded macro features")
+        except Exception as e:
+            print(f"  [XMACRO] Warning: Expanded macro features failed: {e}")
+            metadata["expanded_macro_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 74. VVIX Features (vvix_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_vvix:
+        try:
+            vvix = VVIXFeatures()
+            vvix.download_vvix_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = vvix.create_vvix_features(df_daily)
+            n_vvix = len(df_daily.columns) - n_before
+            metadata["vvix_features"] = True
+            metadata["n_vvix_features"] = n_vvix
+            print(f"  [VVIX] Added {n_vvix} VVIX features")
+        except Exception as e:
+            print(f"  [VVIX] Warning: VVIX features failed: {e}")
+            metadata["vvix_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 75. Sector Rotation Features (secrot_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_sector_rotation:
+        try:
+            secrot = SectorRotationFeatures()
+            secrot.download_sector_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = secrot.create_sector_rotation_features(df_daily)
+            n_secrot = len(df_daily.columns) - n_before
+            metadata["sector_rotation_features"] = True
+            metadata["n_sector_rotation_features"] = n_secrot
+            print(f"  [SECROT] Added {n_secrot} sector rotation features")
+        except Exception as e:
+            print(f"  [SECROT] Warning: Sector rotation features failed: {e}")
+            metadata["sector_rotation_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 76. FX Carry Features (fxc_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_fx_carry:
+        try:
+            fxc = FXCarryFeatures()
+            fxc.download_fx_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = fxc.create_fx_carry_features(df_daily)
+            n_fxc = len(df_daily.columns) - n_before
+            metadata["fx_carry_features"] = True
+            metadata["n_fx_carry_features"] = n_fxc
+            print(f"  [FXC] Added {n_fxc} FX carry features")
+        except Exception as e:
+            print(f"  [FXC] Warning: FX carry features failed: {e}")
+            metadata["fx_carry_features"] = False
+
+    _maybe_gc(resource_config, "steps 73-76")
+
+    # ─────────────────────────────────────────────────────────
+    # 77. Money Market Features (mmkt_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_money_market:
+        try:
+            mmkt = MoneyMarketFeatures()
+            mmkt.download_money_market_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = mmkt.create_money_market_features(df_daily)
+            n_mmkt = len(df_daily.columns) - n_before
+            metadata["money_market_features"] = True
+            metadata["n_money_market_features"] = n_mmkt
+            print(f"  [MMKT] Added {n_mmkt} money market features")
+        except Exception as e:
+            print(f"  [MMKT] Warning: Money market features failed: {e}")
+            metadata["money_market_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 78. Financial Stress Features (fstress_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_financial_stress:
+        try:
+            fstress = FinancialStressFeatures()
+            fstress.download_stress_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = fstress.create_financial_stress_features(df_daily)
+            n_fstress = len(df_daily.columns) - n_before
+            metadata["financial_stress_features"] = True
+            metadata["n_financial_stress_features"] = n_fstress
+            print(f"  [FSTRESS] Added {n_fstress} financial stress features")
+        except Exception as e:
+            print(f"  [FSTRESS] Warning: Financial stress features failed: {e}")
+            metadata["financial_stress_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 79. Global Equity Features (gleq_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_global_equity:
+        try:
+            gleq = GlobalEquityFeatures()
+            gleq.download_global_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = gleq.create_global_equity_features(df_daily)
+            n_gleq = len(df_daily.columns) - n_before
+            metadata["global_equity_features"] = True
+            metadata["n_global_equity_features"] = n_gleq
+            print(f"  [GLEQ] Added {n_gleq} global equity features")
+        except Exception as e:
+            print(f"  [GLEQ] Warning: Global equity features failed: {e}")
+            metadata["global_equity_features"] = False
+
+    # ─────────────────────────────────────────────────────────
+    # 80. Retail Sentiment Features (rflow_ prefix)
+    # ─────────────────────────────────────────────────────────
+    if use_retail_sentiment:
+        try:
+            rflow = RetailSentimentFeatures()
+            rflow.download_retail_data(start_date, end_date)
+            n_before = len(df_daily.columns)
+            df_daily = rflow.create_retail_sentiment_features(df_daily)
+            n_rflow = len(df_daily.columns) - n_before
+            metadata["retail_sentiment_features"] = True
+            metadata["n_retail_sentiment_features"] = n_rflow
+            print(f"  [RFLOW] Added {n_rflow} retail sentiment features")
+        except Exception as e:
+            print(f"  [RFLOW] Warning: Retail sentiment features failed: {e}")
+            metadata["retail_sentiment_features"] = False
+
+    _maybe_gc(resource_config, "steps 77-80")
 
     # 9. Synthetic SPY Universes (do last since it multiplies data)
     _n_universes = 20

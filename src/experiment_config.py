@@ -523,6 +523,30 @@ class AntiOverfitConfig:
     # Wave L: Analyst rating consensus features (Finnhub recommendations)
     use_analyst_rating: bool = True
 
+    # Wave M: Expanded macro indicators (FRED: PCEPILFE, TCU, PAYEMS, etc.)
+    use_expanded_macro: bool = True
+
+    # Wave M: VVIX (volatility of volatility) features
+    use_vvix: bool = True
+
+    # Wave M: Sector rotation momentum-rank signals
+    use_sector_rotation: bool = True
+
+    # Wave M: FX carry and currency pair signals
+    use_fx_carry: bool = True
+
+    # Wave M: Money market rate features (FRED: SOFR, OBFR, etc.)
+    use_money_market: bool = True
+
+    # Wave M: Financial stress index features (FRED: STLFSI, NFCI, etc.)
+    use_financial_stress: bool = True
+
+    # Wave M: Global equity ETF features (EFA, VWO, FXI, EWJ, EWZ)
+    use_global_equity: bool = True
+
+    # Wave M: Retail sentiment proxy features (TQQQ/SQQQ, ARKK, UVXY)
+    use_retail_sentiment: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 

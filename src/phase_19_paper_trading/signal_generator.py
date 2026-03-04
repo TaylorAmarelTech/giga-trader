@@ -587,6 +587,14 @@ class SignalGenerator:
                     use_fed_liquidity=True,
                     use_earnings_calendar=True,
                     use_analyst_rating=True,
+                    use_expanded_macro=True,
+                    use_vvix=True,
+                    use_sector_rotation=True,
+                    use_fx_carry=True,
+                    use_money_market=True,
+                    use_financial_stress=True,
+                    use_global_equity=True,
+                    use_retail_sentiment=True,
                     validate_ohlc=True,
                 )
             except Exception as e:
