@@ -20,19 +20,22 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("MARKET_STRUCTURE")
 
 
-class MarketStructureFeatures:
+class MarketStructureFeatures(FeatureModuleBase):
     """
     Compute market structure features from OHLCV data.
 
     All features use the mstr_ prefix and are computed from standard
     OHLCV columns already in df_daily.  No external downloads needed.
     """
+    FEATURE_NAMES = ["mstr_atr_ratio_5_40", "mstr_bbw_percentile_120", "mstr_rv_percentile_252", "mstr_range_percentile_60", "mstr_nr_count_21", "mstr_squeeze_on", "mstr_squeeze_duration", "mstr_vwap_deviation", "mstr_poc_deviation", "mstr_ma_ribbon_width", "mstr_hurst_distance_50", "mstr_cusum_buildup", "mstr_iv_rv_spread_z", "mstr_confluence_score", "mstr_close_in_range", "mstr_volume_skew", "mstr_obv_slope_20d", "mstr_compression_energy"]
+
 
     REQUIRED_COLS = {"close"}
 

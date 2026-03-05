@@ -25,12 +25,15 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class FamaFrenchFeatures:
+class FamaFrenchFeatures(FeatureModuleBase):
     """Compute Fama-French factor exposure features from ETF proxies."""
+    FEATURE_NAMES = ["spy_close", "iwm_close", "iwd_close", "iwf_close", "mtum_close", "spy_ret", "smb_proxy", "hml_proxy", "mom_proxy", "size_spread", "vg_spread", "ff_mkt_beta_60d", "ff_smb_beta_60d", "ff_hml_beta_60d", "ff_momentum_beta_60d", "ff_factor_momentum", "ff_value_growth_spread", "ff_size_spread", "ff_factor_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

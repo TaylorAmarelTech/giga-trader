@@ -20,12 +20,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class EntropyFeatures:
+class EntropyFeatures(FeatureModuleBase):
     """Compute information-theoretic entropy features from daily OHLCV data."""
+    FEATURE_NAMES = ["ent_shannon_20d", "ent_permutation_20d", "ent_sample_20d", "ent_shannon_z", "ent_regime_change", "ent_predictability"]
+
 
     REQUIRED_COLS = {"close"}
 

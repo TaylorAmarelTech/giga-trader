@@ -2,30 +2,27 @@
 GIGA TRADER - Anti-Overfit Integration
 ========================================
 Main integration function that combines all anti-overfitting measures:
-  1. Component Streak Breadth Features
-  2. Cross-Asset Features
-  3. MAG Market Breadth Features (MAG3/5/6/7/10/15)
-  4. Sector Breadth Features (S&P 500 Sectors)
-  5. Volatility Regime Features (VXX-based)
-  6. Calendar & Event Features (FOMC, opex, NFP, CPI, GDP)
-  7. Sentiment Features (VIX fear/greed, cross-asset flows, optional news)
-  8. Economic Indicator Features (yields, VIX, credit spreads)
-  9. Event Recency Features (days since last drop, rally, reversal, streak)
-  10. Synthetic SPY Universes
+  0. OHLC Data Validation
+  1-8. Core breadth/cross-asset/macro/calendar/sentiment/economic features
+  10-86. Registry-driven feature modules (77 steps)
+  9. Synthetic SPY Universes (last, multiplies data)
+
+Architecture:
+  Steps 0-8 are "special" (custom download/analyze patterns) and kept inline.
+  Steps 10-86 use a declarative _FEATURE_STEPS registry + generic _run_feature_step().
 """
 
-import os
-import sys
-from datetime import datetime, timedelta
-from pathlib import Path
+import importlib
 import warnings
-
-warnings.filterwarnings("ignore")
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Tuple, Optional
 
+warnings.filterwarnings("ignore")
+
+# --- Imports for inline steps 0-8 and synthetic universes ---
 from src.phase_08_features_breadth.streak_features import ComponentStreakFeatures
 from src.phase_08_features_breadth.cross_asset_features import CrossAssetFeatures
 from src.phase_08_features_breadth.mag7_breadth import Mag7BreadthFeatures
@@ -34,80 +31,357 @@ from src.phase_08_features_breadth.volatility_regime import VolatilityRegimeFeat
 from src.phase_03_synthetic_data.synthetic_universe import SyntheticSPYGenerator
 from src.phase_08_features_breadth.economic_features import EconomicFeatures
 from src.phase_08_features_breadth.sentiment_features import SentimentFeatures
-from src.phase_08_features_breadth.fear_greed_features import FearGreedFeatures
-from src.phase_08_features_breadth.reddit_sentiment_features import RedditSentimentFeatures
-from src.phase_08_features_breadth.crypto_sentiment_features import CryptoSentimentFeatures
-from src.phase_08_features_breadth.gamma_exposure_features import GammaExposureFeatures
-from src.phase_08_features_breadth.finnhub_social_features import FinnhubSocialFeatures
-from src.phase_08_features_breadth.dark_pool_features import DarkPoolFeatures
-from src.phase_08_features_breadth.options_features import OptionsFeatures
-from src.phase_08_features_breadth.event_recency_features import EventRecencyFeatures
-from src.phase_08_features_breadth.block_structure_features import BlockStructureFeatures
-from src.phase_08_features_breadth.amihud_features import AmihudFeatures
-from src.phase_08_features_breadth.range_vol_features import RangeVolFeatures
-from src.phase_08_features_breadth.entropy_features import EntropyFeatures
-from src.phase_08_features_breadth.hurst_features import HurstFeatures
-from src.phase_08_features_breadth.nmi_features import NMIFeatures
-from src.phase_08_features_breadth.absorption_ratio_features import AbsorptionRatioFeatures
-from src.phase_08_features_breadth.drift_features import DriftFeatures
-from src.phase_08_features_breadth.changepoint_features import ChangepointFeatures
-from src.phase_08_features_breadth.hmm_features import HMMFeatures
-from src.phase_08_features_breadth.vpin_features import VPINFeatures
-from src.phase_08_features_breadth.intraday_momentum_features import IntradayMomentumFeatures
-from src.phase_08_features_breadth.futures_basis_features import FuturesBasisFeatures
-from src.phase_08_features_breadth.congressional_features import CongressionalFeatures
-from src.phase_08_features_breadth.insider_aggregate_features import InsiderAggregateFeatures
-from src.phase_08_features_breadth.etf_flow_features import ETFFlowFeatures
-from src.phase_08_features_breadth.wavelet_features import WaveletFeatures
-from src.phase_08_features_breadth.sax_features import SAXFeatures
-from src.phase_08_features_breadth.transfer_entropy_features import TransferEntropyFeatures
-from src.phase_08_features_breadth.mfdfa_features import MFDFAFeatures
-from src.phase_08_features_breadth.rqa_features import RQAFeatures
-from src.phase_08_features_breadth.copula_features import CopulaFeatures
-from src.phase_08_features_breadth.network_features import NetworkFeatures
-from src.phase_08_features_breadth.path_signature_features import PathSignatureFeatures
-from src.phase_08_features_breadth.wavelet_scattering_features import WaveletScatteringFeatures
-from src.phase_14_robustness.wasserstein_regime import WassersteinRegimeDetector
-from src.phase_08_features_breadth.market_structure_features import MarketStructureFeatures
-from src.phase_08_features_breadth.time_series_model_features import TimeSeriesModelFeatures
-from src.phase_08_features_breadth.har_rv_features import HARRVFeatures
-from src.phase_08_features_breadth.l_moments_features import LMomentsFeatures
-from src.phase_08_features_breadth.multiscale_entropy_features import MultiscaleEntropyFeatures
-from src.phase_08_features_breadth.rv_signature_features import RVSignaturePlotFeatures
-from src.phase_08_features_breadth.tda_features import TDAHomologyFeatures
-from src.phase_08_features_breadth.credit_spread_features import CreditSpreadFeatures
-from src.phase_08_features_breadth.yield_curve_features import YieldCurveFeatures
-from src.phase_08_features_breadth.vol_term_structure_features import VolTermStructureFeatures
-from src.phase_08_features_breadth.macro_surprise_features import MacroSurpriseFeatures
-from src.phase_08_features_breadth.cross_asset_momentum_features import CrossAssetMomentumFeatures
-from src.phase_08_features_breadth.skew_kurtosis_features import SkewKurtosisFeatures
-from src.phase_08_features_breadth.seasonality_features import SeasonalityFeatures
-from src.phase_08_features_breadth.order_flow_imbalance_features import OrderFlowImbalanceFeatures
-from src.phase_08_features_breadth.correlation_regime_features import CorrelationRegimeFeatures
-from src.phase_08_features_breadth.fama_french_features import FamaFrenchFeatures
-from src.phase_08_features_breadth.put_call_ratio_features import PutCallRatioFeatures
 from src.phase_09_features_calendar.calendar_features import CalendarFeatureGenerator
-from src.phase_15_strategy.multi_horizon_filter import MultiHorizonFilter
-from src.phase_08_features_breadth.earnings_revision_features import EarningsRevisionFeatures
-from src.phase_08_features_breadth.short_interest_features import ShortInterestFeatures
-from src.phase_08_features_breadth.dollar_index_features import DollarIndexFeatures
-from src.phase_08_features_breadth.institutional_flow_features import InstitutionalFlowFeatures
-from src.phase_08_features_breadth.google_trends_features import GoogleTrendsFeatures
-from src.phase_08_features_breadth.commodity_signal_features import CommoditySignalFeatures
-from src.phase_08_features_breadth.treasury_auction_features import TreasuryAuctionFeatures
-from src.phase_08_features_breadth.fed_liquidity_features import FedLiquidityFeatures
-from src.phase_08_features_breadth.earnings_calendar_features import EarningsCalendarFeatures
-from src.phase_08_features_breadth.analyst_rating_features import AnalystRatingFeatures
-from src.phase_08_features_breadth.expanded_macro_features import ExpandedMacroFeatures
-from src.phase_08_features_breadth.vvix_features import VVIXFeatures
-from src.phase_08_features_breadth.sector_rotation_features import SectorRotationFeatures
-from src.phase_08_features_breadth.fx_carry_features import FXCarryFeatures
-from src.phase_08_features_breadth.money_market_features import MoneyMarketFeatures
-from src.phase_08_features_breadth.financial_stress_features import FinancialStressFeatures
-from src.phase_08_features_breadth.global_equity_features import GlobalEquityFeatures
-from src.phase_08_features_breadth.retail_sentiment_features import RetailSentimentFeatures
 from src.core.system_resources import maybe_gc as _maybe_gc
 
+
+# ---------------------------------------------------------------------------
+# Registry dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _FeatureStep:
+    """Declarative descriptor for a single feature-engineering step."""
+    flag: str              # kwarg name, e.g. "use_amihud_features"
+    label: str             # log label, e.g. "AMIHUD"
+    meta_key: str          # metadata key, e.g. "amihud_features"
+    cls_path: str          # dotted import path e.g. "src.phase_08_features_breadth.amihud_features.AmihudFeatures"
+    create_method: str     # e.g. "create_amihud_features"
+    download_method: Optional[str] = None   # e.g. "download_futures_data" (None = no download)
+    gc_after: Optional[str] = None          # GC checkpoint name (e.g. "steps 19-31")
+    cls_kwargs: Optional[Dict] = None       # extra constructor kwargs (e.g. {"use_chronos": True})
+    date_as_str: bool = False               # pass dates as str(d)[:10] to download method
+
+
+# ---------------------------------------------------------------------------
+# Feature step registry (steps 10-86)
+# ---------------------------------------------------------------------------
+
+_P08 = "src.phase_08_features_breadth"
+
+_FEATURE_STEPS: List[_FeatureStep] = [
+    # --- Steps 10-18 (gc after 18) ---
+    _FeatureStep("use_fear_greed", "FEAR_GREED", "fear_greed_features",
+                 f"{_P08}.fear_greed_features.FearGreedFeatures",
+                 "create_fear_greed_features", "download_fear_greed_data"),
+    _FeatureStep("use_reddit_sentiment", "REDDIT", "reddit_sentiment_features",
+                 f"{_P08}.reddit_sentiment_features.RedditSentimentFeatures",
+                 "create_reddit_features", "download_reddit_data"),
+    _FeatureStep("use_crypto_sentiment", "CRYPTO", "crypto_sentiment_features",
+                 f"{_P08}.crypto_sentiment_features.CryptoSentimentFeatures",
+                 "create_crypto_features", "download_crypto_data"),
+    _FeatureStep("use_gamma_exposure", "GEX", "gex_features",
+                 f"{_P08}.gamma_exposure_features.GammaExposureFeatures",
+                 "create_gex_features", "download_gex_data"),
+    _FeatureStep("use_finnhub_social", "FINNHUB", "finnhub_social_features",
+                 f"{_P08}.finnhub_social_features.FinnhubSocialFeatures",
+                 "create_finnhub_social_features", "download_finnhub_social_data"),
+    _FeatureStep("use_dark_pool", "DARK_POOL", "dark_pool_features",
+                 f"{_P08}.dark_pool_features.DarkPoolFeatures",
+                 "create_dark_pool_features", "download_dark_pool_data"),
+    _FeatureStep("use_options_features", "OPTIONS", "options_features",
+                 f"{_P08}.options_features.OptionsFeatures",
+                 "create_options_features", "download_options_data"),
+    _FeatureStep("use_event_recency", "EVENT_RECENCY", "event_recency_features",
+                 f"{_P08}.event_recency_features.EventRecencyFeatures",
+                 "create_event_recency_features"),
+    _FeatureStep("use_block_structure", "BLOCK_STRUCTURE", "block_structure_features",
+                 f"{_P08}.block_structure_features.BlockStructureFeatures",
+                 "create_block_structure_features", gc_after="steps 10-18"),
+
+    # --- Steps 19-31 (gc after 31) ---
+    _FeatureStep("use_amihud_features", "AMIHUD", "amihud_features",
+                 f"{_P08}.amihud_features.AmihudFeatures",
+                 "create_amihud_features"),
+    _FeatureStep("use_range_vol_features", "RANGE_VOL", "range_vol_features",
+                 f"{_P08}.range_vol_features.RangeVolFeatures",
+                 "create_range_vol_features"),
+    _FeatureStep("use_entropy_features", "ENTROPY", "entropy_features",
+                 f"{_P08}.entropy_features.EntropyFeatures",
+                 "create_entropy_features"),
+    _FeatureStep("use_hurst_features", "HURST", "hurst_features",
+                 f"{_P08}.hurst_features.HurstFeatures",
+                 "create_hurst_features"),
+    _FeatureStep("use_nmi_features", "NMI", "nmi_features",
+                 f"{_P08}.nmi_features.NMIFeatures",
+                 "create_nmi_features"),
+    _FeatureStep("use_absorption_ratio", "ABSORPTION_RATIO", "absorption_ratio_features",
+                 f"{_P08}.absorption_ratio_features.AbsorptionRatioFeatures",
+                 "create_absorption_ratio_features"),
+    _FeatureStep("use_drift_features", "DRIFT", "drift_features",
+                 f"{_P08}.drift_features.DriftFeatures",
+                 "create_drift_features"),
+    _FeatureStep("use_changepoint_features", "CHANGEPOINT", "changepoint_features",
+                 f"{_P08}.changepoint_features.ChangepointFeatures",
+                 "create_changepoint_features"),
+    _FeatureStep("use_hmm_features", "HMM", "hmm_features",
+                 f"{_P08}.hmm_features.HMMFeatures",
+                 "create_hmm_features"),
+    _FeatureStep("use_vpin_features", "VPIN", "vpin_features",
+                 f"{_P08}.vpin_features.VPINFeatures",
+                 "create_vpin_features"),
+    _FeatureStep("use_intraday_momentum", "INTRADAY_MOM", "intraday_momentum_features",
+                 f"{_P08}.intraday_momentum_features.IntradayMomentumFeatures",
+                 "create_intraday_momentum_features"),
+    _FeatureStep("use_futures_basis", "FUTURES_BASIS", "futures_basis_features",
+                 f"{_P08}.futures_basis_features.FuturesBasisFeatures",
+                 "create_futures_basis_features", "download_futures_data"),
+    _FeatureStep("use_congressional_features", "CONGRESSIONAL", "congressional_features",
+                 f"{_P08}.congressional_features.CongressionalFeatures",
+                 "create_congressional_features", gc_after="steps 19-31"),
+
+    # --- Steps 32-40 (gc after 40) ---
+    _FeatureStep("use_insider_aggregate", "INSIDER_AGG", "insider_aggregate_features",
+                 f"{_P08}.insider_aggregate_features.InsiderAggregateFeatures",
+                 "create_insider_aggregate_features"),
+    _FeatureStep("use_etf_flow", "ETF_FLOW", "etf_flow_features",
+                 f"{_P08}.etf_flow_features.ETFFlowFeatures",
+                 "create_etf_flow_features"),
+    _FeatureStep("use_wavelet_features", "WAVELET", "wavelet_features",
+                 f"{_P08}.wavelet_features.WaveletFeatures",
+                 "create_wavelet_features"),
+    _FeatureStep("use_sax_features", "SAX", "sax_features",
+                 f"{_P08}.sax_features.SAXFeatures",
+                 "create_sax_features"),
+    _FeatureStep("use_transfer_entropy", "TRANSFER_ENTROPY", "transfer_entropy_features",
+                 f"{_P08}.transfer_entropy_features.TransferEntropyFeatures",
+                 "create_transfer_entropy_features"),
+    _FeatureStep("use_mfdfa_features", "MFDFA", "mfdfa_features",
+                 f"{_P08}.mfdfa_features.MFDFAFeatures",
+                 "create_mfdfa_features"),
+    _FeatureStep("use_rqa_features", "RQA", "rqa_features",
+                 f"{_P08}.rqa_features.RQAFeatures",
+                 "create_rqa_features"),
+    _FeatureStep("use_copula_features", "COPULA", "copula_features",
+                 f"{_P08}.copula_features.CopulaFeatures",
+                 "create_copula_features"),
+    _FeatureStep("use_network_centrality", "NETWORK", "network_features",
+                 f"{_P08}.network_features.NetworkFeatures",
+                 "create_network_features", gc_after="steps 32-40"),
+
+    # --- Steps 41-50 (gc after 50) ---
+    _FeatureStep("use_path_signatures", "PSIG", "path_signature_features",
+                 f"{_P08}.path_signature_features.PathSignatureFeatures",
+                 "create_path_signature_features"),
+    _FeatureStep("use_wavelet_scattering", "WSCAT", "wavelet_scattering_features",
+                 f"{_P08}.wavelet_scattering_features.WaveletScatteringFeatures",
+                 "create_wavelet_scattering_features"),
+    _FeatureStep("use_wasserstein_regime", "WREG", "wasserstein_regime_features",
+                 "src.phase_14_robustness.wasserstein_regime.WassersteinRegimeDetector",
+                 "create_wasserstein_features"),
+    _FeatureStep("use_market_structure", "MSTR", "market_structure_features",
+                 f"{_P08}.market_structure_features.MarketStructureFeatures",
+                 "create_market_structure_features"),
+    # Step 45: special constructor args — cls_kwargs populated dynamically
+    _FeatureStep("use_time_series_models", "TSM", "time_series_model_features",
+                 f"{_P08}.time_series_model_features.TimeSeriesModelFeatures",
+                 "create_time_series_model_features",
+                 cls_kwargs={"use_chronos": True}),
+    _FeatureStep("use_har_rv", "HARV", "har_rv_features",
+                 f"{_P08}.har_rv_features.HARRVFeatures",
+                 "create_har_rv_features"),
+    _FeatureStep("use_l_moments", "LMOM", "l_moments_features",
+                 f"{_P08}.l_moments_features.LMomentsFeatures",
+                 "create_l_moments_features"),
+    _FeatureStep("use_multiscale_entropy", "MSE", "multiscale_entropy_features",
+                 f"{_P08}.multiscale_entropy_features.MultiscaleEntropyFeatures",
+                 "create_multiscale_entropy_features"),
+    _FeatureStep("use_rv_signature_plot", "RVSP", "rv_signature_features",
+                 f"{_P08}.rv_signature_features.RVSignaturePlotFeatures",
+                 "create_rv_signature_features"),
+    _FeatureStep("use_tda_homology", "TDA", "tda_homology_features",
+                 f"{_P08}.tda_features.TDAHomologyFeatures",
+                 "create_tda_features", gc_after="steps 41-50"),
+
+    # --- Steps 51-58 (gc after 58) ---
+    _FeatureStep("use_credit_spread_features", "CREDIT", "credit_spread_features",
+                 f"{_P08}.credit_spread_features.CreditSpreadFeatures",
+                 "create_credit_spread_features"),
+    _FeatureStep("use_yield_curve_features", "YIELD", "yield_curve_features",
+                 f"{_P08}.yield_curve_features.YieldCurveFeatures",
+                 "create_yield_curve_features"),
+    _FeatureStep("use_vol_term_structure_features", "VTS", "vol_term_structure_features",
+                 f"{_P08}.vol_term_structure_features.VolTermStructureFeatures",
+                 "create_vol_term_structure_features"),
+    _FeatureStep("use_macro_surprise_features", "MSURP", "macro_surprise_features",
+                 f"{_P08}.macro_surprise_features.MacroSurpriseFeatures",
+                 "create_macro_surprise_features"),
+    _FeatureStep("use_cross_asset_momentum", "XMOM", "cross_asset_momentum_features",
+                 f"{_P08}.cross_asset_momentum_features.CrossAssetMomentumFeatures",
+                 "create_cross_asset_momentum_features"),
+    _FeatureStep("use_skew_kurtosis_features", "SKKU", "skew_kurtosis_features",
+                 f"{_P08}.skew_kurtosis_features.SkewKurtosisFeatures",
+                 "create_skew_kurtosis_features"),
+    _FeatureStep("use_seasonality_features", "SEAS", "seasonality_features",
+                 f"{_P08}.seasonality_features.SeasonalityFeatures",
+                 "create_seasonality_features"),
+    _FeatureStep("use_order_flow_imbalance", "OFI", "order_flow_imbalance_features",
+                 f"{_P08}.order_flow_imbalance_features.OrderFlowImbalanceFeatures",
+                 "create_order_flow_imbalance_features", gc_after="steps 51-58"),
+
+    # --- Steps 59-62 (gc after 62) ---
+    _FeatureStep("use_correlation_regime", "CORR_REGIME", "correlation_regime_features",
+                 f"{_P08}.correlation_regime_features.CorrelationRegimeFeatures",
+                 "create_correlation_features", "download_correlation_data",
+                 date_as_str=True),
+    _FeatureStep("use_fama_french", "FAMA_FRENCH", "fama_french_features",
+                 f"{_P08}.fama_french_features.FamaFrenchFeatures",
+                 "create_fama_french_features", "download_factor_data",
+                 date_as_str=True),
+    _FeatureStep("use_put_call_ratio", "PCR", "put_call_ratio_features",
+                 f"{_P08}.put_call_ratio_features.PutCallRatioFeatures",
+                 "create_pcr_features", "download_pcr_data",
+                 date_as_str=True),
+    _FeatureStep("use_multi_horizon", "MULTI_HORIZON", "multi_horizon_features",
+                 "src.phase_15_strategy.multi_horizon_filter.MultiHorizonFilter",
+                 "compute_horizon_signals", gc_after="steps 59-62"),
+
+    # --- Steps 63-67 (gc after 67) ---
+    _FeatureStep("use_earnings_revision", "ERN", "earnings_revision_features",
+                 f"{_P08}.earnings_revision_features.EarningsRevisionFeatures",
+                 "create_earnings_revision_features", "download_earnings_data"),
+    _FeatureStep("use_short_interest", "SI", "short_interest_features",
+                 f"{_P08}.short_interest_features.ShortInterestFeatures",
+                 "create_short_interest_features", "download_short_interest_data"),
+    _FeatureStep("use_dollar_index", "DXY", "dollar_index_features",
+                 f"{_P08}.dollar_index_features.DollarIndexFeatures",
+                 "create_dollar_index_features", "download_dollar_data",
+                 date_as_str=True),
+    _FeatureStep("use_institutional_flow", "INST", "institutional_flow_features",
+                 f"{_P08}.institutional_flow_features.InstitutionalFlowFeatures",
+                 "create_institutional_flow_features", "download_institutional_data"),
+    _FeatureStep("use_google_trends", "GTREND", "google_trends_features",
+                 f"{_P08}.google_trends_features.GoogleTrendsFeatures",
+                 "create_google_trends_features", "download_trends_data",
+                 gc_after="steps 63-67"),
+
+    # --- Steps 68-72 (gc after 72) ---
+    _FeatureStep("use_commodity_signals", "CMDTY", "commodity_signal_features",
+                 f"{_P08}.commodity_signal_features.CommoditySignalFeatures",
+                 "create_commodity_signal_features", "download_commodity_data",
+                 date_as_str=True),
+    _FeatureStep("use_treasury_auction", "TAUCT", "treasury_auction_features",
+                 f"{_P08}.treasury_auction_features.TreasuryAuctionFeatures",
+                 "create_treasury_auction_features", "download_auction_data"),
+    _FeatureStep("use_fed_liquidity", "FEDLIQ", "fed_liquidity_features",
+                 f"{_P08}.fed_liquidity_features.FedLiquidityFeatures",
+                 "create_fed_liquidity_features", "download_liquidity_data"),
+    _FeatureStep("use_earnings_calendar", "ECAL", "earnings_calendar_features",
+                 f"{_P08}.earnings_calendar_features.EarningsCalendarFeatures",
+                 "create_earnings_calendar_features", "download_calendar_data"),
+    _FeatureStep("use_analyst_rating", "ANLST", "analyst_rating_features",
+                 f"{_P08}.analyst_rating_features.AnalystRatingFeatures",
+                 "create_analyst_rating_features", "download_rating_data",
+                 gc_after="steps 68-72"),
+
+    # --- Steps 73-76 (gc after 76) ---
+    _FeatureStep("use_expanded_macro", "XMACRO", "expanded_macro_features",
+                 f"{_P08}.expanded_macro_features.ExpandedMacroFeatures",
+                 "create_expanded_macro_features", "download_macro_data"),
+    _FeatureStep("use_vvix", "VVIX", "vvix_features",
+                 f"{_P08}.vvix_features.VVIXFeatures",
+                 "create_vvix_features", "download_vvix_data"),
+    _FeatureStep("use_sector_rotation", "SECROT", "sector_rotation_features",
+                 f"{_P08}.sector_rotation_features.SectorRotationFeatures",
+                 "create_sector_rotation_features", "download_sector_data"),
+    _FeatureStep("use_fx_carry", "FXC", "fx_carry_features",
+                 f"{_P08}.fx_carry_features.FXCarryFeatures",
+                 "create_fx_carry_features", "download_fx_data",
+                 gc_after="steps 73-76"),
+
+    # --- Steps 77-80 (gc after 80) ---
+    _FeatureStep("use_money_market", "MMKT", "money_market_features",
+                 f"{_P08}.money_market_features.MoneyMarketFeatures",
+                 "create_money_market_features", "download_money_market_data"),
+    _FeatureStep("use_financial_stress", "FSTRESS", "financial_stress_features",
+                 f"{_P08}.financial_stress_features.FinancialStressFeatures",
+                 "create_financial_stress_features", "download_stress_data"),
+    _FeatureStep("use_global_equity", "GLEQ", "global_equity_features",
+                 f"{_P08}.global_equity_features.GlobalEquityFeatures",
+                 "create_global_equity_features", "download_global_data"),
+    _FeatureStep("use_retail_sentiment", "RFLOW", "retail_sentiment_features",
+                 f"{_P08}.retail_sentiment_features.RetailSentimentFeatures",
+                 "create_retail_sentiment_features", "download_retail_data",
+                 gc_after="steps 77-80"),
+
+    # --- Steps 81-86 (gc after 86) ---
+    _FeatureStep("use_cboe_pcr", "CBOE_PCR", "cboe_pcr_features",
+                 f"{_P08}.cboe_pcr_features.CBOEPutCallFeatures",
+                 "create_cboe_pcr_features", "download_cboe_data"),
+    _FeatureStep("use_stocktwits", "STWIT", "stocktwits_features",
+                 f"{_P08}.stocktwits_features.StockTwitsSentimentFeatures",
+                 "create_stocktwits_features", "download_stocktwits_data"),
+    _FeatureStep("use_alpaca_news", "ANEWS", "alpaca_news_features",
+                 f"{_P08}.alpaca_news_features.AlpacaNewsFeatures",
+                 "create_alpaca_news_features", "download_alpaca_news"),
+    _FeatureStep("use_gnews_headlines", "GNEWS", "gnews_headline_features",
+                 f"{_P08}.gnews_headline_features.GNewsHeadlineFeatures",
+                 "create_gnews_features", "download_gnews_data"),
+    _FeatureStep("use_finbert_nlp", "NLP", "finbert_nlp_features",
+                 f"{_P08}.finbert_nlp_features.FinBERTNLPFeatures",
+                 "create_finbert_features", "download_nlp_data"),
+    _FeatureStep("use_wsb_sentiment", "WSB", "wsb_sentiment_features",
+                 f"{_P08}.wsb_sentiment_features.WSBSentimentFeatures",
+                 "create_wsb_features", "download_wsb_data",
+                 gc_after="steps 81-86"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Generic step runner
+# ---------------------------------------------------------------------------
+
+def _run_feature_step(
+    step: _FeatureStep,
+    df_daily: pd.DataFrame,
+    start_date,
+    end_date,
+    metadata: Dict,
+    resource_config,
+    flags: Dict,
+) -> pd.DataFrame:
+    """Run a single registry-based feature step with try/except isolation."""
+    try:
+        # Lazy import via importlib
+        module_path, class_name = step.cls_path.rsplit(".", 1)
+        mod = importlib.import_module(module_path)
+        cls = getattr(mod, class_name)
+
+        # Build constructor kwargs (may be augmented per-step)
+        kwargs = dict(step.cls_kwargs) if step.cls_kwargs else {}
+
+        # Special: step 45 (TSM) needs use_catch22 from outer flags
+        if step.flag == "use_time_series_models":
+            kwargs["use_catch22"] = flags.get("use_catch22", False)
+
+        feat = cls(**kwargs)
+
+        # Optional download phase
+        if step.download_method:
+            dl_method = getattr(feat, step.download_method)
+            if step.date_as_str:
+                dl_method(str(start_date)[:10], str(end_date)[:10])
+            else:
+                dl_method(start_date, end_date)
+
+        # Create features
+        n_before = len(df_daily.columns)
+        df_daily = getattr(feat, step.create_method)(df_daily)
+        n_added = len(df_daily.columns) - n_before
+        metadata[step.meta_key] = True
+        metadata[f"n_{step.meta_key}"] = n_added
+        print(f"  [{step.label}] Added {n_added} features")
+
+    except Exception as e:
+        print(f"  [{step.label}] Warning: {step.meta_key} failed: {e}")
+        metadata[step.meta_key] = False
+
+    return df_daily
+
+
+# ---------------------------------------------------------------------------
+# Main integration function (signature preserved for backward compatibility)
+# ---------------------------------------------------------------------------
 
 def integrate_anti_overfit(
     df_daily: pd.DataFrame,
@@ -194,6 +468,12 @@ def integrate_anti_overfit(
     use_financial_stress: bool = True,  # Financial stress index features (fstress_*)
     use_global_equity: bool = True,  # Global equity ETF features (gleq_*)
     use_retail_sentiment: bool = True,  # Retail sentiment proxy features (rflow_*)
+    use_cboe_pcr: bool = True,  # CBOE direct put/call ratio features (cboe_*)
+    use_stocktwits: bool = True,  # StockTwits social sentiment features (stwit_*)
+    use_alpaca_news: bool = True,  # Alpaca/Benzinga news sentiment features (anews_*)
+    use_gnews_headlines: bool = True,  # Google News headline sentiment features (gnews_*)
+    use_finbert_nlp: bool = False,  # FinBERT local NLP features (nlp_*) -- heavy deps
+    use_wsb_sentiment: bool = False,  # Reddit WSB PRAW sentiment features (wsb_*) -- needs OAuth
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,
@@ -254,6 +534,10 @@ def integrate_anti_overfit(
         # Default to last 5 years if date extraction fails
         end_date = pd.Timestamp.now()
         start_date = end_date - pd.Timedelta(days=365 * 5)
+
+    # ------------------------------------------------------------------
+    # Inline steps 0-8 (special download/analyze patterns)
+    # ------------------------------------------------------------------
 
     # 0. OHLC Data Validation (must run before any feature engineering)
     if validate_ohlc:
@@ -450,1295 +734,103 @@ def integrate_anti_overfit(
 
     _maybe_gc(resource_config, "steps 0-8")
 
-    # 10. CNN Fear & Greed Index Features
-    if use_fear_greed:
-        try:
-            fg_features = FearGreedFeatures()
-            fg_data = fg_features.download_fear_greed_data(start_date, end_date)
-
-            if not fg_data.empty:
-                df_daily = fg_features.create_fear_greed_features(df_daily)
-                metadata["fear_greed_features"] = True
-
-                # Analyze current conditions
-                fg_signal = fg_features.analyze_current_fear_greed(df_daily)
-                if fg_signal:
-                    print(f"  Fear & Greed: {fg_signal.get('fear_greed_regime', 'N/A')} "
-                          f"(score={fg_signal.get('fear_greed_score', 0):.0f})")
-            else:
-                metadata["fear_greed_features"] = False
-        except Exception as e:
-            print(f"  [FEAR_GREED] Warning: Fear & Greed feature generation failed: {e}")
-            metadata["fear_greed_features"] = False
-
-    # 11. Reddit Sentiment Features (ApeWisdom)
-    if use_reddit_sentiment:
-        try:
-            reddit_features = RedditSentimentFeatures()
-            reddit_data = reddit_features.download_reddit_data(start_date, end_date)
-
-            if not reddit_data.empty:
-                df_daily = reddit_features.create_reddit_features(df_daily)
-                metadata["reddit_sentiment_features"] = True
-            else:
-                metadata["reddit_sentiment_features"] = False
-        except Exception as e:
-            print(f"  [REDDIT] Warning: Reddit sentiment failed: {e}")
-            metadata["reddit_sentiment_features"] = False
-
-    # 12. Crypto Fear & Greed Features (Alternative.me)
-    if use_crypto_sentiment:
-        try:
-            crypto_features = CryptoSentimentFeatures()
-            crypto_data = crypto_features.download_crypto_data(start_date, end_date)
-
-            if not crypto_data.empty:
-                df_daily = crypto_features.create_crypto_features(df_daily)
-                metadata["crypto_sentiment_features"] = True
-
-                crypto_signal = crypto_features.analyze_current_crypto(df_daily)
-                if crypto_signal:
-                    print(f"  Crypto Sentiment: {crypto_signal.get('crypto_regime', 'N/A')} "
-                          f"(score={crypto_signal.get('crypto_fg_score', 0):.0f})")
-            else:
-                metadata["crypto_sentiment_features"] = False
-        except Exception as e:
-            print(f"  [CRYPTO] Warning: Crypto sentiment failed: {e}")
-            metadata["crypto_sentiment_features"] = False
-
-    # 13. Gamma Exposure (GEX) Proxy Features
-    if use_gamma_exposure:
-        try:
-            gex_features = GammaExposureFeatures()
-            gex_data = gex_features.download_gex_data(start_date, end_date)
-
-            if not gex_data.empty:
-                df_daily = gex_features.create_gex_features(df_daily)
-                metadata["gex_features"] = True
-
-                gex_signal = gex_features.analyze_current_gex(df_daily)
-                if gex_signal:
-                    print(f"  GEX Proxy: {gex_signal.get('gex_regime', 'N/A')} "
-                          f"({gex_signal.get('market_behavior', 'N/A')})")
-            else:
-                metadata["gex_features"] = False
-        except Exception as e:
-            print(f"  [GEX] Warning: GEX feature generation failed: {e}")
-            metadata["gex_features"] = False
-
-    # 14. Finnhub Social Sentiment Features
-    if use_finnhub_social:
-        try:
-            fh_features = FinnhubSocialFeatures()
-            fh_data = fh_features.download_finnhub_social_data(start_date, end_date)
-
-            if not fh_data.empty:
-                df_daily = fh_features.create_finnhub_social_features(df_daily)
-                metadata["finnhub_social_features"] = True
-
-                fh_signal = fh_features.analyze_current_finnhub_social(df_daily)
-                if fh_signal:
-                    print(f"  Finnhub Social: {fh_signal.get('social_sentiment', 'N/A')} "
-                          f"(score={fh_signal.get('social_score', 0):.2f})")
-            else:
-                metadata["finnhub_social_features"] = False
-        except Exception as e:
-            print(f"  [FINNHUB] Warning: Finnhub social feature generation failed: {e}")
-            metadata["finnhub_social_features"] = False
-
-    # 15. FINRA Dark Pool / Short Sale Volume Features
-    if use_dark_pool:
-        try:
-            dp_features = DarkPoolFeatures()
-            dp_data = dp_features.download_dark_pool_data(start_date, end_date)
-
-            if not dp_data.empty:
-                df_daily = dp_features.create_dark_pool_features(df_daily)
-                metadata["dark_pool_features"] = True
-
-                dp_signal = dp_features.analyze_current_dark_pool(df_daily)
-                if dp_signal:
-                    print(f"  Dark Pool: {dp_signal.get('sentiment', 'N/A')} "
-                          f"(short ratio={dp_signal.get('short_volume_ratio', 0):.2f})")
-            else:
-                metadata["dark_pool_features"] = False
-        except Exception as e:
-            print(f"  [DARK_POOL] Warning: Dark pool feature generation failed: {e}")
-            metadata["dark_pool_features"] = False
-
-    # 16. Options IV/SKEW Features (VIX rank, CBOE SKEW Index, vol-of-vol)
-    if use_options_features:
-        try:
-            opt_features = OptionsFeatures()
-            opt_data = opt_features.download_options_data(start_date, end_date)
-
-            if not opt_data.empty:
-                df_daily = opt_features.create_options_features(df_daily)
-                metadata["options_features"] = True
-
-                opt_signal = opt_features.analyze_current_options(df_daily)
-                if opt_signal:
-                    print(f"  Options IV: rank={opt_signal.get('iv_rank', 0):.0f}% "
-                          f"skew={opt_signal.get('skew_regime', 'N/A')}")
-            else:
-                metadata["options_features"] = False
-        except Exception as e:
-            print(f"  [OPTIONS] Warning: Options feature generation failed: {e}")
-            metadata["options_features"] = False
-
-    # 17. Event Recency Features (days since last drop, rally, reversal, etc.)
-    if use_event_recency:
-        try:
-            recency = EventRecencyFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = recency.create_event_recency_features(df_daily)
-            n_recency = len(df_daily.columns) - n_before
-            metadata["event_recency_features"] = True
-            metadata["n_event_recency_features"] = n_recency
-
-            # Analyze current conditions
-            recency_signal = recency.analyze_current_recency(df_daily)
-            if recency_signal:
-                regime = recency_signal.get("stress_regime", "N/A")
-                trend = recency_signal.get("trend_regime", "N/A")
-                print(f"  Event Recency: stress={regime} trend={trend} "
-                      f"(last -1%: {recency_signal.get('days_since_1pct_drop', '?')}d, "
-                      f"last -2%: {recency_signal.get('days_since_2pct_drop', '?')}d)")
-        except Exception as e:
-            print(f"  [EVENT_RECENCY] Warning: Event recency features failed: {e}")
-            metadata["event_recency_features"] = False
-
-    # 18. Block Structure Features (multi-day 3d/5d blocks, cascades, texture)
-    if use_block_structure:
-        try:
-            blk = BlockStructureFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = blk.create_block_structure_features(df_daily)
-            n_blk = len(df_daily.columns) - n_before
-            metadata["block_structure_features"] = True
-            metadata["n_block_structure_features"] = n_blk
-
-            blk_signal = blk.analyze_current_structure(df_daily)
-            if blk_signal:
-                cascade = blk_signal.get("cascade_regime", "N/A")
-                trend = blk_signal.get("block_trend", "N/A")
-                texture = blk_signal.get("texture_regime", "N/A")
-                print(f"  Block Structure: cascade={cascade} trend={trend} "
-                      f"texture={texture}")
-        except Exception as e:
-            print(f"  [BLOCK_STRUCTURE] Warning: Block structure features failed: {e}")
-            metadata["block_structure_features"] = False
-
-    _maybe_gc(resource_config, "steps 10-18")
-
-    # 19. Amihud Illiquidity Features (liq_ prefix)
-    if use_amihud_features:
-        try:
-            amihud = AmihudFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = amihud.create_amihud_features(df_daily)
-            n_amihud = len(df_daily.columns) - n_before
-            metadata["amihud_features"] = True
-            metadata["n_amihud_features"] = n_amihud
-            print(f"  [AMIHUD] Added {n_amihud} illiquidity features")
-
-            amihud_signal = amihud.analyze_current_liquidity(df_daily)
-            if amihud_signal:
-                print(f"    Liquidity Regime: {amihud_signal.get('liquidity_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [AMIHUD] Warning: Amihud feature generation failed: {e}")
-            metadata["amihud_features"] = False
-
-    # 20. Range-Based Volatility Features (rvol_ prefix)
-    if use_range_vol_features:
-        try:
-            rvol = RangeVolFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = rvol.create_range_vol_features(df_daily)
-            n_rvol = len(df_daily.columns) - n_before
-            metadata["range_vol_features"] = True
-            metadata["n_range_vol_features"] = n_rvol
-            print(f"  [RANGE_VOL] Added {n_rvol} range-based volatility features")
-
-            rvol_signal = rvol.analyze_current_volatility(df_daily)
-            if rvol_signal:
-                print(f"    Vol Regime: {rvol_signal.get('vol_regime', 'N/A')} "
-                      f"(YZ20d={rvol_signal.get('yz_vol_20d', 0):.3f})")
-        except Exception as e:
-            print(f"  [RANGE_VOL] Warning: Range vol feature generation failed: {e}")
-            metadata["range_vol_features"] = False
-
-    # 21. Entropy Features (ent_ prefix)
-    if use_entropy_features:
-        try:
-            entropy = EntropyFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = entropy.create_entropy_features(df_daily)
-            n_ent = len(df_daily.columns) - n_before
-            metadata["entropy_features"] = True
-            metadata["n_entropy_features"] = n_ent
-            print(f"  [ENTROPY] Added {n_ent} entropy features")
-        except Exception as e:
-            print(f"  [ENTROPY] Warning: Entropy feature generation failed: {e}")
-            metadata["entropy_features"] = False
-
-    # 22. Hurst Exponent Features (hurst_ prefix)
-    if use_hurst_features:
-        try:
-            hurst = HurstFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = hurst.create_hurst_features(df_daily)
-            n_hurst = len(df_daily.columns) - n_before
-            metadata["hurst_features"] = True
-            metadata["n_hurst_features"] = n_hurst
-            print(f"  [HURST] Added {n_hurst} Hurst exponent features")
-
-            hurst_signal = hurst.analyze_current_hurst(df_daily)
-            if hurst_signal:
-                print(f"    Hurst Regime: {hurst_signal.get('hurst_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [HURST] Warning: Hurst feature generation failed: {e}")
-            metadata["hurst_features"] = False
-
-    # 23. NMI Market Efficiency Features (nmi_ prefix)
-    if use_nmi_features:
-        try:
-            nmi = NMIFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = nmi.create_nmi_features(df_daily)
-            n_nmi = len(df_daily.columns) - n_before
-            metadata["nmi_features"] = True
-            metadata["n_nmi_features"] = n_nmi
-            print(f"  [NMI] Added {n_nmi} market efficiency features")
-
-            nmi_signal = nmi.analyze_current_efficiency(df_daily)
-            if nmi_signal:
-                print(f"    Efficiency: {nmi_signal.get('efficiency_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [NMI] Warning: NMI feature generation failed: {e}")
-            metadata["nmi_features"] = False
-
-    # 24. Absorption Ratio Features (ar_ prefix)
-    if use_absorption_ratio:
-        try:
-            ar = AbsorptionRatioFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = ar.create_absorption_ratio_features(df_daily)
-            n_ar = len(df_daily.columns) - n_before
-            metadata["absorption_ratio_features"] = True
-            metadata["n_absorption_ratio_features"] = n_ar
-            print(f"  [ABSORPTION_RATIO] Added {n_ar} systemic risk features")
-
-            ar_signal = ar.analyze_current_absorption(df_daily)
-            if ar_signal:
-                print(f"    Systemic Risk: {ar_signal.get('ar_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [ABSORPTION_RATIO] Warning: Absorption ratio features failed: {e}")
-            metadata["absorption_ratio_features"] = False
-
-    # 25. Drift Detection Features (drift_ prefix)
-    if use_drift_features:
-        try:
-            drift = DriftFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = drift.create_drift_features(df_daily)
-            n_drift = len(df_daily.columns) - n_before
-            metadata["drift_features"] = True
-            metadata["n_drift_features"] = n_drift
-            print(f"  [DRIFT] Added {n_drift} drift detection features")
-
-            drift_signal = drift.analyze_current_drift(df_daily)
-            if drift_signal:
-                print(f"    Drift Regime: {drift_signal.get('drift_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [DRIFT] Warning: Drift feature generation failed: {e}")
-            metadata["drift_features"] = False
-
-    # 26. Changepoint Detection Features (cpd_ prefix)
-    if use_changepoint_features:
-        try:
-            cpd = ChangepointFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = cpd.create_changepoint_features(df_daily)
-            n_cpd = len(df_daily.columns) - n_before
-            metadata["changepoint_features"] = True
-            metadata["n_changepoint_features"] = n_cpd
-            print(f"  [CHANGEPOINT] Added {n_cpd} changepoint detection features")
-
-            cpd_signal = cpd.analyze_current_changepoint(df_daily)
-            if cpd_signal:
-                print(f"    Changepoint: run_length={cpd_signal.get('run_length', 'N/A')} "
-                      f"regime={cpd_signal.get('regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [CHANGEPOINT] Warning: Changepoint feature generation failed: {e}")
-            metadata["changepoint_features"] = False
-
-    # 27. HMM Regime Features (hmm_ prefix)
-    if use_hmm_features:
-        try:
-            hmm = HMMFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = hmm.create_hmm_features(df_daily)
-            n_hmm = len(df_daily.columns) - n_before
-            metadata["hmm_features"] = True
-            metadata["n_hmm_features"] = n_hmm
-            print(f"  [HMM] Added {n_hmm} regime features")
-
-            hmm_signal = hmm.analyze_current_regime(df_daily)
-            if hmm_signal:
-                print(f"    HMM Regime: {hmm_signal.get('hmm_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [HMM] Warning: HMM feature generation failed: {e}")
-            metadata["hmm_features"] = False
-
-    # 28. VPIN Order Flow Toxicity Features (vpin_ prefix)
-    if use_vpin_features:
-        try:
-            vpin = VPINFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = vpin.create_vpin_features(df_daily)
-            n_vpin = len(df_daily.columns) - n_before
-            metadata["vpin_features"] = True
-            metadata["n_vpin_features"] = n_vpin
-            print(f"  [VPIN] Added {n_vpin} order flow toxicity features")
-
-            vpin_signal = vpin.analyze_current_vpin(df_daily)
-            if vpin_signal:
-                print(f"    VPIN Regime: {vpin_signal.get('vpin_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [VPIN] Warning: VPIN feature generation failed: {e}")
-            metadata["vpin_features"] = False
-
-    # 29. Intraday Momentum Features (imom_ prefix)
-    if use_intraday_momentum:
-        try:
-            imom = IntradayMomentumFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = imom.create_intraday_momentum_features(df_daily)
-            n_imom = len(df_daily.columns) - n_before
-            metadata["intraday_momentum_features"] = True
-            metadata["n_intraday_momentum_features"] = n_imom
-            print(f"  [INTRADAY_MOM] Added {n_imom} intraday momentum features")
-
-            imom_signal = imom.analyze_current_momentum(df_daily)
-            if imom_signal:
-                print(f"    Momentum: {imom_signal.get('momentum_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [INTRADAY_MOM] Warning: Intraday momentum features failed: {e}")
-            metadata["intraday_momentum_features"] = False
-
-    # 30. Futures-Spot Basis Features (basis_ prefix)
-    if use_futures_basis:
-        try:
-            basis = FuturesBasisFeatures()
-            basis.download_futures_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = basis.create_futures_basis_features(df_daily)
-            n_basis = len(df_daily.columns) - n_before
-            metadata["futures_basis_features"] = True
-            metadata["n_futures_basis_features"] = n_basis
-            print(f"  [FUTURES_BASIS] Added {n_basis} futures basis features")
-
-            basis_signal = basis.analyze_current_basis(df_daily)
-            if basis_signal:
-                print(f"    Basis Regime: {basis_signal.get('basis_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [FUTURES_BASIS] Warning: Futures basis features failed: {e}")
-            metadata["futures_basis_features"] = False
-
-    # 31. Congressional Trading Features (congress_ prefix)
-    if use_congressional_features:
-        try:
-            congress = CongressionalFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = congress.create_congressional_features(df_daily)
-            n_congress = len(df_daily.columns) - n_before
-            metadata["congressional_features"] = True
-            metadata["n_congressional_features"] = n_congress
-            print(f"  [CONGRESSIONAL] Added {n_congress} smart-money proxy features")
-
-            congress_signal = congress.analyze_current_congressional(df_daily)
-            if congress_signal:
-                print(f"    Congressional: {congress_signal.get('congressional_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [CONGRESSIONAL] Warning: Congressional features failed: {e}")
-            metadata["congressional_features"] = False
-
-    _maybe_gc(resource_config, "steps 19-31")
-
-    # 32. Insider Aggregate Features (insider_agg_ prefix)
-    if use_insider_aggregate:
-        try:
-            insider = InsiderAggregateFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = insider.create_insider_aggregate_features(df_daily)
-            n_insider = len(df_daily.columns) - n_before
-            metadata["insider_aggregate_features"] = True
-            metadata["n_insider_aggregate_features"] = n_insider
-            print(f"  [INSIDER_AGG] Added {n_insider} insider aggregate features")
-
-            insider_signal = insider.analyze_current_insider(df_daily)
-            if insider_signal:
-                print(f"    Insider: {insider_signal.get('insider_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [INSIDER_AGG] Warning: Insider aggregate features failed: {e}")
-            metadata["insider_aggregate_features"] = False
-
-    # 33. ETF Fund Flow Features (etf_flow_ prefix)
-    if use_etf_flow:
-        try:
-            etf = ETFFlowFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = etf.create_etf_flow_features(df_daily)
-            n_etf = len(df_daily.columns) - n_before
-            metadata["etf_flow_features"] = True
-            metadata["n_etf_flow_features"] = n_etf
-            print(f"  [ETF_FLOW] Added {n_etf} fund flow proxy features")
-
-            etf_signal = etf.analyze_current_flows(df_daily)
-            if etf_signal:
-                print(f"    ETF Flow: {etf_signal.get('flow_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [ETF_FLOW] Warning: ETF flow features failed: {e}")
-            metadata["etf_flow_features"] = False
-
-    # 34. Wavelet Decomposition Features (wav_ prefix)
-    if use_wavelet_features:
-        try:
-            wav = WaveletFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = wav.create_wavelet_features(df_daily)
-            n_wav = len(df_daily.columns) - n_before
-            metadata["wavelet_features"] = True
-            metadata["n_wavelet_features"] = n_wav
-            print(f"  [WAVELET] Added {n_wav} multi-resolution features")
-
-            wav_signal = wav.analyze_current_wavelet(df_daily)
-            if wav_signal:
-                print(f"    Wavelet Regime: {wav_signal.get('wavelet_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [WAVELET] Warning: Wavelet features failed: {e}")
-            metadata["wavelet_features"] = False
-
-    # 35. SAX Pattern Features (sax_ prefix)
-    if use_sax_features:
-        try:
-            sax = SAXFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = sax.create_sax_features(df_daily)
-            n_sax = len(df_daily.columns) - n_before
-            metadata["sax_features"] = True
-            metadata["n_sax_features"] = n_sax
-            print(f"  [SAX] Added {n_sax} pattern features")
-
-            sax_signal = sax.analyze_current_pattern(df_daily)
-            if sax_signal:
-                print(f"    SAX Pattern: {sax_signal.get('pattern_regime', 'N/A')} "
-                      f"novelty={sax_signal.get('novelty_level', 'N/A')}")
-        except Exception as e:
-            print(f"  [SAX] Warning: SAX features failed: {e}")
-            metadata["sax_features"] = False
-
-    # 36. Transfer Entropy Features (te_ prefix)
-    if use_transfer_entropy:
-        try:
-            te = TransferEntropyFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = te.create_transfer_entropy_features(df_daily)
-            n_te = len(df_daily.columns) - n_before
-            metadata["transfer_entropy_features"] = True
-            metadata["n_transfer_entropy_features"] = n_te
-            print(f"  [TRANSFER_ENTROPY] Added {n_te} information flow features")
-
-            te_signal = te.analyze_current_te(df_daily)
-            if te_signal:
-                print(f"    Dominant Source: {te_signal.get('dominant_source', 'N/A')} "
-                      f"flow={te_signal.get('information_flow', 'N/A')}")
-        except Exception as e:
-            print(f"  [TRANSFER_ENTROPY] Warning: Transfer entropy features failed: {e}")
-            metadata["transfer_entropy_features"] = False
-
-    # 37. MFDFA Features (mfdfa_ prefix)
-    if use_mfdfa_features:
-        try:
-            mfdfa = MFDFAFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = mfdfa.create_mfdfa_features(df_daily)
-            n_mfdfa = len(df_daily.columns) - n_before
-            metadata["mfdfa_features"] = True
-            metadata["n_mfdfa_features"] = n_mfdfa
-            print(f"  [MFDFA] Added {n_mfdfa} fractal features")
-
-            mfdfa_signal = mfdfa.analyze_current_mfdfa(df_daily)
-            if mfdfa_signal:
-                print(f"    Fractal Regime: {mfdfa_signal.get('fractal_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [MFDFA] Warning: MFDFA features failed: {e}")
-            metadata["mfdfa_features"] = False
-
-    # 38. RQA Features (rqa_ prefix)
-    if use_rqa_features:
-        try:
-            rqa = RQAFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = rqa.create_rqa_features(df_daily)
-            n_rqa = len(df_daily.columns) - n_before
-            metadata["rqa_features"] = True
-            metadata["n_rqa_features"] = n_rqa
-            print(f"  [RQA] Added {n_rqa} recurrence analysis features")
-
-            rqa_signal = rqa.analyze_current_rqa(df_daily)
-            if rqa_signal:
-                print(f"    RQA Regime: {rqa_signal.get('rqa_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [RQA] Warning: RQA features failed: {e}")
-            metadata["rqa_features"] = False
-
-    # 39. Copula Tail Dependence Features (copula_ prefix)
-    if use_copula_features:
-        try:
-            copula = CopulaFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = copula.create_copula_features(df_daily)
-            n_copula = len(df_daily.columns) - n_before
-            metadata["copula_features"] = True
-            metadata["n_copula_features"] = n_copula
-            print(f"  [COPULA] Added {n_copula} tail dependence features")
-
-            copula_signal = copula.analyze_current_copula(df_daily)
-            if copula_signal:
-                print(f"    Tail Regime: {copula_signal.get('tail_regime', 'N/A')} "
-                      f"lower={copula_signal.get('copula_lower_tail', 0.0):.3f} "
-                      f"upper={copula_signal.get('copula_upper_tail', 0.0):.3f}")
-        except Exception as e:
-            print(f"  [COPULA] Warning: Copula tail dependence features failed: {e}")
-            metadata["copula_features"] = False
-
-    # 40. Correlation Network Centrality Features (netw_ prefix)
-    if use_network_centrality:
-        try:
-            netw = NetworkFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = netw.create_network_features(df_daily)
-            n_netw = len(df_daily.columns) - n_before
-            metadata["network_features"] = True
-            metadata["n_network_features"] = n_netw
-            print(f"  [NETWORK] Added {n_netw} correlation network features")
-
-            netw_signal = netw.analyze_current_network(df_daily)
-            if netw_signal:
-                print(f"    Network: {netw_signal.get('network_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [NETWORK] Warning: Network features failed: {e}")
-            metadata["network_features"] = False
-
-    _maybe_gc(resource_config, "steps 32-40")
-
-    # 41. Path Signature Features (psig_ prefix)
-    if use_path_signatures:
-        try:
-            psig = PathSignatureFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = psig.create_path_signature_features(df_daily)
-            n_psig = len(df_daily.columns) - n_before
-            metadata["path_signature_features"] = True
-            metadata["n_path_signature_features"] = n_psig
-            print(f"  [PSIG] Added {n_psig} path signature features")
-        except Exception as e:
-            print(f"  [PSIG] Warning: Path signature features failed: {e}")
-            metadata["path_signature_features"] = False
-
-    # 42. Wavelet Scattering Features (wscat_ prefix)
-    if use_wavelet_scattering:
-        try:
-            wscat = WaveletScatteringFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = wscat.create_wavelet_scattering_features(df_daily)
-            n_wscat = len(df_daily.columns) - n_before
-            metadata["wavelet_scattering_features"] = True
-            metadata["n_wavelet_scattering_features"] = n_wscat
-            print(f"  [WSCAT] Added {n_wscat} wavelet scattering features")
-
-            wscat_signal = wscat.analyze_current_scattering(df_daily)
-            if wscat_signal:
-                print(f"    Scattering: regime={wscat_signal.get('regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [WSCAT] Warning: Wavelet scattering features failed: {e}")
-            metadata["wavelet_scattering_features"] = False
-
-    # 43. Wasserstein Regime Detection Features (wreg_ prefix)
-    if use_wasserstein_regime:
-        try:
-            wreg = WassersteinRegimeDetector()
-            n_before = len(df_daily.columns)
-            df_daily = wreg.create_wasserstein_features(df_daily)
-            n_wreg = len(df_daily.columns) - n_before
-            metadata["wasserstein_regime_features"] = True
-            metadata["n_wasserstein_regime_features"] = n_wreg
-            print(f"  [WREG] Added {n_wreg} Wasserstein regime features")
-        except Exception as e:
-            print(f"  [WREG] Warning: Wasserstein regime features failed: {e}")
-            metadata["wasserstein_regime_features"] = False
-
-    # 44. Market Structure Features (mstr_ prefix)
-    if use_market_structure:
-        try:
-            mstr = MarketStructureFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = mstr.create_market_structure_features(df_daily)
-            n_mstr = len(df_daily.columns) - n_before
-            metadata["market_structure_features"] = True
-            metadata["n_market_structure_features"] = n_mstr
-            print(f"  [MSTR] Added {n_mstr} market structure features")
-
-            mstr_signal = mstr.analyze_current_structure(df_daily)
-            if mstr_signal:
-                print(f"    Squeeze: {mstr_signal.get('squeeze_on', False)}, "
-                      f"compression_energy: {mstr_signal.get('compression_energy', 0.0):.3f}")
-        except Exception as e:
-            print(f"  [MSTR] Warning: Market structure features failed: {e}")
-            metadata["market_structure_features"] = False
-
-    # 45. Time Series Model Features (tsm_ prefix)
-    if use_time_series_models:
-        try:
-            tsm = TimeSeriesModelFeatures(
-                use_chronos=True,
-                use_catch22=use_catch22,
-            )
-            n_before = len(df_daily.columns)
-            df_daily = tsm.create_time_series_model_features(df_daily)
-            n_tsm = len(df_daily.columns) - n_before
-            metadata["time_series_model_features"] = True
-            metadata["n_time_series_model_features"] = n_tsm
-            print(f"  [TSM] Added {n_tsm} time series model features")
-
-            tsm_signal = tsm.analyze_current_ts(df_daily)
-            if tsm_signal:
-                print(f"    ARIMA residual: {tsm_signal.get('arima_residual', 0.0):.5f}, "
-                      f"Chronos: {tsm_signal.get('chronos_available', False)}")
-        except Exception as e:
-            print(f"  [TSM] Warning: Time series model features failed: {e}")
-            metadata["time_series_model_features"] = False
-
-    # 46. HAR-RV Features (harv_ prefix)
-    if use_har_rv:
-        try:
-            harv = HARRVFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = harv.create_har_rv_features(df_daily)
-            n_harv = len(df_daily.columns) - n_before
-            metadata["har_rv_features"] = True
-            metadata["n_har_rv_features"] = n_harv
-            print(f"  [HARV] Added {n_harv} HAR-RV features")
-
-            harv_signal = harv.analyze_current_harv(df_daily)
-            if harv_signal:
-                print(f"    Vol regime: {harv_signal.get('vol_regime', 'N/A')}, "
-                      f"residual_z: {harv_signal.get('residual_z', 0.0):.3f}")
-        except Exception as e:
-            print(f"  [HARV] Warning: HAR-RV features failed: {e}")
-            metadata["har_rv_features"] = False
-
-    # 47. L-Moments Features (lmom_ prefix)
-    if use_l_moments:
-        try:
-            lmom = LMomentsFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = lmom.create_l_moments_features(df_daily)
-            n_lmom = len(df_daily.columns) - n_before
-            metadata["l_moments_features"] = True
-            metadata["n_l_moments_features"] = n_lmom
-            print(f"  [LMOM] Added {n_lmom} L-Moments features")
-
-            lmom_signal = lmom.analyze_current_lmoments(df_daily)
-            if lmom_signal:
-                print(f"    Distribution: {lmom_signal.get('distribution_regime', 'N/A')}, "
-                      f"L-skew: {lmom_signal.get('l_skewness', 0.0):.4f}")
-        except Exception as e:
-            print(f"  [LMOM] Warning: L-Moments features failed: {e}")
-            metadata["l_moments_features"] = False
-
-    # 48. Multiscale Sample Entropy Features (mse_ prefix)
-    if use_multiscale_entropy:
-        try:
-            mse = MultiscaleEntropyFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = mse.create_multiscale_entropy_features(df_daily)
-            n_mse = len(df_daily.columns) - n_before
-            metadata["multiscale_entropy_features"] = True
-            metadata["n_multiscale_entropy_features"] = n_mse
-            print(f"  [MSE] Added {n_mse} multiscale entropy features")
-
-            mse_signal = mse.analyze_current_entropy(df_daily)
-            if mse_signal:
-                print(f"    Entropy regime: {mse_signal.get('entropy_regime', 'N/A')}, "
-                      f"complexity: {mse_signal.get('complexity', 0.0):.4f}")
-        except Exception as e:
-            print(f"  [MSE] Warning: Multiscale entropy features failed: {e}")
-            metadata["multiscale_entropy_features"] = False
-
-    # 49. RV Signature Plot Features (rvsp_ prefix)
-    if use_rv_signature_plot:
-        try:
-            rvsp = RVSignaturePlotFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = rvsp.create_rv_signature_features(df_daily)
-            n_rvsp = len(df_daily.columns) - n_before
-            metadata["rv_signature_features"] = True
-            metadata["n_rv_signature_features"] = n_rvsp
-            print(f"  [RVSP] Added {n_rvsp} RV signature plot features")
-        except Exception as e:
-            print(f"  [RVSP] Warning: RV signature plot features failed: {e}")
-            metadata["rv_signature_features"] = False
-
-    # 50. TDA Persistent Homology Features (tda_ prefix)
-    if use_tda_homology:
-        try:
-            tda = TDAHomologyFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = tda.create_tda_features(df_daily)
-            n_tda = len(df_daily.columns) - n_before
-            metadata["tda_homology_features"] = True
-            metadata["n_tda_homology_features"] = n_tda
-            print(f"  [TDA] Added {n_tda} persistent homology features")
-
-            tda_signal = tda.analyze_current_topology(df_daily)
-            if tda_signal:
-                print(f"    Topology: {tda_signal.get('topology', 'N/A')}")
-        except Exception as e:
-            print(f"  [TDA] Warning: TDA features failed: {e}")
-            metadata["tda_homology_features"] = False
-
-    _maybe_gc(resource_config, "steps 41-50")
-
-    # 51. Credit Spread Features (cred_ prefix)
-    if use_credit_spread_features:
-        try:
-            cs = CreditSpreadFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = cs.create_credit_spread_features(df_daily)
-            n_cs = len(df_daily.columns) - n_before
-            metadata["credit_spread_features"] = True
-            metadata["n_credit_spread_features"] = n_cs
-            print(f"  [CREDIT] Added {n_cs} credit spread features")
-        except Exception as e:
-            print(f"  [CREDIT] Warning: Credit spread features failed: {e}")
-            metadata["credit_spread_features"] = False
-
-    # 52. Yield Curve Features (yc_ prefix)
-    if use_yield_curve_features:
-        try:
-            yc = YieldCurveFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = yc.create_yield_curve_features(df_daily)
-            n_yc = len(df_daily.columns) - n_before
-            metadata["yield_curve_features"] = True
-            metadata["n_yield_curve_features"] = n_yc
-            print(f"  [YIELD] Added {n_yc} yield curve features")
-        except Exception as e:
-            print(f"  [YIELD] Warning: Yield curve features failed: {e}")
-            metadata["yield_curve_features"] = False
-
-    # 53. Volatility Term Structure Features (vts_ prefix)
-    if use_vol_term_structure_features:
-        try:
-            vts = VolTermStructureFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = vts.create_vol_term_structure_features(df_daily)
-            n_vts = len(df_daily.columns) - n_before
-            metadata["vol_term_structure_features"] = True
-            metadata["n_vol_term_structure_features"] = n_vts
-            print(f"  [VTS] Added {n_vts} vol term structure features")
-        except Exception as e:
-            print(f"  [VTS] Warning: Vol term structure features failed: {e}")
-            metadata["vol_term_structure_features"] = False
-
-    # 54. Macro Surprise Features (msurp_ prefix)
-    if use_macro_surprise_features:
-        try:
-            ms = MacroSurpriseFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = ms.create_macro_surprise_features(df_daily)
-            n_ms = len(df_daily.columns) - n_before
-            metadata["macro_surprise_features"] = True
-            metadata["n_macro_surprise_features"] = n_ms
-            print(f"  [MSURP] Added {n_ms} macro surprise features")
-        except Exception as e:
-            print(f"  [MSURP] Warning: Macro surprise features failed: {e}")
-            metadata["macro_surprise_features"] = False
-
-    # 55. Cross-Asset Momentum Features (xmom_ prefix)
-    if use_cross_asset_momentum:
-        try:
-            xmom = CrossAssetMomentumFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = xmom.create_cross_asset_momentum_features(df_daily)
-            n_xmom = len(df_daily.columns) - n_before
-            metadata["cross_asset_momentum_features"] = True
-            metadata["n_cross_asset_momentum_features"] = n_xmom
-            print(f"  [XMOM] Added {n_xmom} cross-asset momentum features")
-        except Exception as e:
-            print(f"  [XMOM] Warning: Cross-asset momentum features failed: {e}")
-            metadata["cross_asset_momentum_features"] = False
-
-    # 56. Skew/Kurtosis Features (skku_ prefix)
-    if use_skew_kurtosis_features:
-        try:
-            skku = SkewKurtosisFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = skku.create_skew_kurtosis_features(df_daily)
-            n_skku = len(df_daily.columns) - n_before
-            metadata["skew_kurtosis_features"] = True
-            metadata["n_skew_kurtosis_features"] = n_skku
-            print(f"  [SKKU] Added {n_skku} skew/kurtosis features")
-        except Exception as e:
-            print(f"  [SKKU] Warning: Skew/kurtosis features failed: {e}")
-            metadata["skew_kurtosis_features"] = False
-
-    # 57. Seasonality Features (seas_ prefix)
-    if use_seasonality_features:
-        try:
-            seas = SeasonalityFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = seas.create_seasonality_features(df_daily)
-            n_seas = len(df_daily.columns) - n_before
-            metadata["seasonality_features"] = True
-            metadata["n_seasonality_features"] = n_seas
-            print(f"  [SEAS] Added {n_seas} seasonality features")
-        except Exception as e:
-            print(f"  [SEAS] Warning: Seasonality features failed: {e}")
-            metadata["seasonality_features"] = False
-
-    # 58. Order Flow Imbalance Features (ofi_ prefix)
-    if use_order_flow_imbalance:
-        try:
-            ofi = OrderFlowImbalanceFeatures()
-            n_before = len(df_daily.columns)
-            df_daily = ofi.create_order_flow_imbalance_features(df_daily)
-            n_ofi = len(df_daily.columns) - n_before
-            metadata["order_flow_imbalance_features"] = True
-            metadata["n_order_flow_imbalance_features"] = n_ofi
-            print(f"  [OFI] Added {n_ofi} order flow imbalance features")
-        except Exception as e:
-            print(f"  [OFI] Warning: Order flow imbalance features failed: {e}")
-            metadata["order_flow_imbalance_features"] = False
-
-    _maybe_gc(resource_config, "steps 51-58")
-
-    # 59. Correlation Regime Features (corr_ prefix)
-    if use_correlation_regime:
-        try:
-            corr_regime = CorrelationRegimeFeatures()
-            corr_data = corr_regime.download_correlation_data(str(start_date)[:10], str(end_date)[:10])
-            n_before = len(df_daily.columns)
-            df_daily = corr_regime.create_correlation_features(df_daily)
-            n_corr = len(df_daily.columns) - n_before
-            metadata["correlation_regime_features"] = True
-            metadata["n_correlation_regime_features"] = n_corr
-            print(f"  [CORR_REGIME] Added {n_corr} correlation regime features")
-
-            corr_signal = corr_regime.analyze_current_regime(df_daily)
-            if corr_signal:
-                print(f"    Correlation Regime: {corr_signal.get('regime', 'N/A')} "
-                      f"(SPY-TLT={corr_signal.get('spy_tlt_corr', 0):.3f})")
-        except Exception as e:
-            print(f"  [CORR_REGIME] Warning: Correlation regime features failed: {e}")
-            metadata["correlation_regime_features"] = False
-
-    # 60. Fama-French Factor Exposure Features (ff_ prefix)
-    if use_fama_french:
-        try:
-            ff = FamaFrenchFeatures()
-            ff.download_factor_data(str(start_date)[:10], str(end_date)[:10])
-            n_before = len(df_daily.columns)
-            df_daily = ff.create_fama_french_features(df_daily)
-            n_ff = len(df_daily.columns) - n_before
-            metadata["fama_french_features"] = True
-            metadata["n_fama_french_features"] = n_ff
-            print(f"  [FAMA_FRENCH] Added {n_ff} factor exposure features")
-
-            ff_signal = ff.analyze_current_factors(df_daily)
-            if ff_signal:
-                print(f"    Factor Regime: {ff_signal.get('factor_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [FAMA_FRENCH] Warning: Fama-French features failed: {e}")
-            metadata["fama_french_features"] = False
-
-    # 61. Put-Call Ratio Features (pcr_ prefix)
-    if use_put_call_ratio:
-        try:
-            pcr = PutCallRatioFeatures()
-            pcr.download_pcr_data(str(start_date)[:10], str(end_date)[:10])
-            n_before = len(df_daily.columns)
-            df_daily = pcr.create_pcr_features(df_daily)
-            n_pcr = len(df_daily.columns) - n_before
-            metadata["put_call_ratio_features"] = True
-            metadata["n_put_call_ratio_features"] = n_pcr
-            print(f"  [PCR] Added {n_pcr} put-call ratio features")
-
-            pcr_signal = pcr.analyze_current_pcr(df_daily)
-            if pcr_signal:
-                print(f"    PCR Regime: {pcr_signal.get('regime', 'N/A')} "
-                      f"(ratio={pcr_signal.get('pcr_ratio', 0):.3f}, "
-                      f"source={pcr_signal.get('data_source', 'N/A')})")
-        except Exception as e:
-            print(f"  [PCR] Warning: Put-call ratio features failed: {e}")
-            metadata["put_call_ratio_features"] = False
-
-    # 62. Multi-Horizon Ensemble Features (mh_ prefix)
-    if use_multi_horizon:
-        try:
-            mh = MultiHorizonFilter()
-            n_before = len(df_daily.columns)
-            df_daily = mh.compute_horizon_signals(df_daily)
-            n_mh = len(df_daily.columns) - n_before
-            metadata["multi_horizon_features"] = True
-            metadata["n_multi_horizon_features"] = n_mh
-            print(f"  [MULTI_HORIZON] Added {n_mh} multi-horizon features")
-        except Exception as e:
-            print(f"  [MULTI_HORIZON] Warning: Multi-horizon features failed: {e}")
-            metadata["multi_horizon_features"] = False
-
-    _maybe_gc(resource_config, "steps 59-62")
-
-    # ─────────────────────────────────────────────────────────
-    # 63. Earnings Revision Features (ern_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_earnings_revision:
-        try:
-            ern = EarningsRevisionFeatures()
-            ern.download_earnings_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = ern.create_earnings_revision_features(df_daily)
-            n_ern = len(df_daily.columns) - n_before
-            metadata["earnings_revision_features"] = True
-            metadata["n_earnings_revision_features"] = n_ern
-            print(f"  [ERN] Added {n_ern} earnings revision features")
-
-            ern_signal = ern.analyze_current_earnings_revision(df_daily)
-            if ern_signal:
-                print(f"    Revision Regime: {ern_signal.get('revision_regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [ERN] Warning: Earnings revision features failed: {e}")
-            metadata["earnings_revision_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 64. Short Interest Features (si_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_short_interest:
-        try:
-            si = ShortInterestFeatures()
-            si.download_short_interest_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = si.create_short_interest_features(df_daily)
-            n_si = len(df_daily.columns) - n_before
-            metadata["short_interest_features"] = True
-            metadata["n_short_interest_features"] = n_si
-            print(f"  [SI] Added {n_si} short interest features")
-        except Exception as e:
-            print(f"  [SI] Warning: Short interest features failed: {e}")
-            metadata["short_interest_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 65. Dollar Index Features (dxy_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_dollar_index:
-        try:
-            dxy = DollarIndexFeatures()
-            dxy.download_dollar_data(str(start_date)[:10], str(end_date)[:10])
-            n_before = len(df_daily.columns)
-            df_daily = dxy.create_dollar_index_features(df_daily)
-            n_dxy = len(df_daily.columns) - n_before
-            metadata["dollar_index_features"] = True
-            metadata["n_dollar_index_features"] = n_dxy
-            print(f"  [DXY] Added {n_dxy} dollar index features")
-
-            dxy_signal = dxy.analyze_current_dollar(df_daily)
-            if dxy_signal:
-                print(f"    Dollar Regime: {dxy_signal.get('regime', 'N/A')} "
-                      f"(z={dxy_signal.get('z_score', 0):.3f})")
-        except Exception as e:
-            print(f"  [DXY] Warning: Dollar index features failed: {e}")
-            metadata["dollar_index_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 66. Institutional Flow Features (inst_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_institutional_flow:
-        try:
-            inst = InstitutionalFlowFeatures()
-            inst.download_institutional_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = inst.create_institutional_flow_features(df_daily)
-            n_inst = len(df_daily.columns) - n_before
-            metadata["institutional_flow_features"] = True
-            metadata["n_institutional_flow_features"] = n_inst
-            print(f"  [INST] Added {n_inst} institutional flow features")
-        except Exception as e:
-            print(f"  [INST] Warning: Institutional flow features failed: {e}")
-            metadata["institutional_flow_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 67. Google Trends Features (gtrend_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_google_trends:
-        try:
-            gtrend = GoogleTrendsFeatures()
-            gtrend.download_trends_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = gtrend.create_google_trends_features(df_daily)
-            n_gtrend = len(df_daily.columns) - n_before
-            metadata["google_trends_features"] = True
-            metadata["n_google_trends_features"] = n_gtrend
-            print(f"  [GTREND] Added {n_gtrend} Google Trends features")
-        except Exception as e:
-            print(f"  [GTREND] Warning: Google Trends features failed: {e}")
-            metadata["google_trends_features"] = False
-
-    _maybe_gc(resource_config, "steps 63-67")
-
-    # ─────────────────────────────────────────────────────────
-    # 68. Commodity Signal Features (cmdty_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_commodity_signals:
-        try:
-            cmdty = CommoditySignalFeatures()
-            cmdty.download_commodity_data(str(start_date)[:10], str(end_date)[:10])
-            n_before = len(df_daily.columns)
-            df_daily = cmdty.create_commodity_signal_features(df_daily)
-            n_cmdty = len(df_daily.columns) - n_before
-            metadata["commodity_signal_features"] = True
-            metadata["n_commodity_signal_features"] = n_cmdty
-            print(f"  [CMDTY] Added {n_cmdty} commodity signal features")
-
-            cmdty_signal = cmdty.analyze_current_commodity(df_daily)
-            if cmdty_signal:
-                print(f"    Commodity Regime: {cmdty_signal.get('regime', 'N/A')}")
-        except Exception as e:
-            print(f"  [CMDTY] Warning: Commodity signal features failed: {e}")
-            metadata["commodity_signal_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 69. Treasury Auction Features (tauct_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_treasury_auction:
-        try:
-            tauct = TreasuryAuctionFeatures()
-            tauct.download_auction_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = tauct.create_treasury_auction_features(df_daily)
-            n_tauct = len(df_daily.columns) - n_before
-            metadata["treasury_auction_features"] = True
-            metadata["n_treasury_auction_features"] = n_tauct
-            print(f"  [TAUCT] Added {n_tauct} treasury auction features")
-        except Exception as e:
-            print(f"  [TAUCT] Warning: Treasury auction features failed: {e}")
-            metadata["treasury_auction_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 70. Fed Liquidity Features (fedliq_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_fed_liquidity:
-        try:
-            fedliq = FedLiquidityFeatures()
-            fedliq.download_liquidity_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = fedliq.create_fed_liquidity_features(df_daily)
-            n_fedliq = len(df_daily.columns) - n_before
-            metadata["fed_liquidity_features"] = True
-            metadata["n_fed_liquidity_features"] = n_fedliq
-            print(f"  [FEDLIQ] Added {n_fedliq} Fed liquidity features")
-
-            fedliq_signal = fedliq.analyze_current_liquidity(df_daily)
-            if fedliq_signal:
-                print(f"    Liquidity Regime: {fedliq_signal.get('regime', 'N/A')} "
-                      f"(z={fedliq_signal.get('liquidity_z', 0):.3f})")
-        except Exception as e:
-            print(f"  [FEDLIQ] Warning: Fed liquidity features failed: {e}")
-            metadata["fed_liquidity_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 71. Earnings Calendar Features (ecal_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_earnings_calendar:
-        try:
-            ecal = EarningsCalendarFeatures()
-            ecal.download_calendar_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = ecal.create_earnings_calendar_features(df_daily)
-            n_ecal = len(df_daily.columns) - n_before
-            metadata["earnings_calendar_features"] = True
-            metadata["n_earnings_calendar_features"] = n_ecal
-            print(f"  [ECAL] Added {n_ecal} earnings calendar features")
-        except Exception as e:
-            print(f"  [ECAL] Warning: Earnings calendar features failed: {e}")
-            metadata["earnings_calendar_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 72. Analyst Rating Features (anlst_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_analyst_rating:
-        try:
-            anlst = AnalystRatingFeatures()
-            anlst.download_rating_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = anlst.create_analyst_rating_features(df_daily)
-            n_anlst = len(df_daily.columns) - n_before
-            metadata["analyst_rating_features"] = True
-            metadata["n_analyst_rating_features"] = n_anlst
-            print(f"  [ANLST] Added {n_anlst} analyst rating features")
-
-            anlst_signal = anlst.analyze_current_ratings(df_daily)
-            if anlst_signal:
-                print(f"    Consensus: {anlst_signal.get('consensus', 'N/A')}")
-        except Exception as e:
-            print(f"  [ANLST] Warning: Analyst rating features failed: {e}")
-            metadata["analyst_rating_features"] = False
-
-    _maybe_gc(resource_config, "steps 68-72")
-
-    # ─────────────────────────────────────────────────────────
-    # 73. Expanded Macro Features (xmacro_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_expanded_macro:
-        try:
-            xmacro = ExpandedMacroFeatures()
-            xmacro.download_macro_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = xmacro.create_expanded_macro_features(df_daily)
-            n_xmacro = len(df_daily.columns) - n_before
-            metadata["expanded_macro_features"] = True
-            metadata["n_expanded_macro_features"] = n_xmacro
-            print(f"  [XMACRO] Added {n_xmacro} expanded macro features")
-        except Exception as e:
-            print(f"  [XMACRO] Warning: Expanded macro features failed: {e}")
-            metadata["expanded_macro_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 74. VVIX Features (vvix_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_vvix:
-        try:
-            vvix = VVIXFeatures()
-            vvix.download_vvix_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = vvix.create_vvix_features(df_daily)
-            n_vvix = len(df_daily.columns) - n_before
-            metadata["vvix_features"] = True
-            metadata["n_vvix_features"] = n_vvix
-            print(f"  [VVIX] Added {n_vvix} VVIX features")
-        except Exception as e:
-            print(f"  [VVIX] Warning: VVIX features failed: {e}")
-            metadata["vvix_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 75. Sector Rotation Features (secrot_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_sector_rotation:
-        try:
-            secrot = SectorRotationFeatures()
-            secrot.download_sector_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = secrot.create_sector_rotation_features(df_daily)
-            n_secrot = len(df_daily.columns) - n_before
-            metadata["sector_rotation_features"] = True
-            metadata["n_sector_rotation_features"] = n_secrot
-            print(f"  [SECROT] Added {n_secrot} sector rotation features")
-        except Exception as e:
-            print(f"  [SECROT] Warning: Sector rotation features failed: {e}")
-            metadata["sector_rotation_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 76. FX Carry Features (fxc_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_fx_carry:
-        try:
-            fxc = FXCarryFeatures()
-            fxc.download_fx_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = fxc.create_fx_carry_features(df_daily)
-            n_fxc = len(df_daily.columns) - n_before
-            metadata["fx_carry_features"] = True
-            metadata["n_fx_carry_features"] = n_fxc
-            print(f"  [FXC] Added {n_fxc} FX carry features")
-        except Exception as e:
-            print(f"  [FXC] Warning: FX carry features failed: {e}")
-            metadata["fx_carry_features"] = False
-
-    _maybe_gc(resource_config, "steps 73-76")
-
-    # ─────────────────────────────────────────────────────────
-    # 77. Money Market Features (mmkt_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_money_market:
-        try:
-            mmkt = MoneyMarketFeatures()
-            mmkt.download_money_market_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = mmkt.create_money_market_features(df_daily)
-            n_mmkt = len(df_daily.columns) - n_before
-            metadata["money_market_features"] = True
-            metadata["n_money_market_features"] = n_mmkt
-            print(f"  [MMKT] Added {n_mmkt} money market features")
-        except Exception as e:
-            print(f"  [MMKT] Warning: Money market features failed: {e}")
-            metadata["money_market_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 78. Financial Stress Features (fstress_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_financial_stress:
-        try:
-            fstress = FinancialStressFeatures()
-            fstress.download_stress_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = fstress.create_financial_stress_features(df_daily)
-            n_fstress = len(df_daily.columns) - n_before
-            metadata["financial_stress_features"] = True
-            metadata["n_financial_stress_features"] = n_fstress
-            print(f"  [FSTRESS] Added {n_fstress} financial stress features")
-        except Exception as e:
-            print(f"  [FSTRESS] Warning: Financial stress features failed: {e}")
-            metadata["financial_stress_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 79. Global Equity Features (gleq_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_global_equity:
-        try:
-            gleq = GlobalEquityFeatures()
-            gleq.download_global_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = gleq.create_global_equity_features(df_daily)
-            n_gleq = len(df_daily.columns) - n_before
-            metadata["global_equity_features"] = True
-            metadata["n_global_equity_features"] = n_gleq
-            print(f"  [GLEQ] Added {n_gleq} global equity features")
-        except Exception as e:
-            print(f"  [GLEQ] Warning: Global equity features failed: {e}")
-            metadata["global_equity_features"] = False
-
-    # ─────────────────────────────────────────────────────────
-    # 80. Retail Sentiment Features (rflow_ prefix)
-    # ─────────────────────────────────────────────────────────
-    if use_retail_sentiment:
-        try:
-            rflow = RetailSentimentFeatures()
-            rflow.download_retail_data(start_date, end_date)
-            n_before = len(df_daily.columns)
-            df_daily = rflow.create_retail_sentiment_features(df_daily)
-            n_rflow = len(df_daily.columns) - n_before
-            metadata["retail_sentiment_features"] = True
-            metadata["n_retail_sentiment_features"] = n_rflow
-            print(f"  [RFLOW] Added {n_rflow} retail sentiment features")
-        except Exception as e:
-            print(f"  [RFLOW] Warning: Retail sentiment features failed: {e}")
-            metadata["retail_sentiment_features"] = False
-
-    _maybe_gc(resource_config, "steps 77-80")
-
+    # ------------------------------------------------------------------
+    # Registry-driven steps 10-86
+    # ------------------------------------------------------------------
+    # Collect all use_* kwargs into a flags dict for the generic runner.
+    flags = {
+        "use_fear_greed": use_fear_greed,
+        "use_reddit_sentiment": use_reddit_sentiment,
+        "use_crypto_sentiment": use_crypto_sentiment,
+        "use_gamma_exposure": use_gamma_exposure,
+        "use_finnhub_social": use_finnhub_social,
+        "use_dark_pool": use_dark_pool,
+        "use_options_features": use_options_features,
+        "use_event_recency": use_event_recency,
+        "use_block_structure": use_block_structure,
+        "use_amihud_features": use_amihud_features,
+        "use_range_vol_features": use_range_vol_features,
+        "use_entropy_features": use_entropy_features,
+        "use_hurst_features": use_hurst_features,
+        "use_nmi_features": use_nmi_features,
+        "use_absorption_ratio": use_absorption_ratio,
+        "use_drift_features": use_drift_features,
+        "use_changepoint_features": use_changepoint_features,
+        "use_hmm_features": use_hmm_features,
+        "use_vpin_features": use_vpin_features,
+        "use_intraday_momentum": use_intraday_momentum,
+        "use_futures_basis": use_futures_basis,
+        "use_congressional_features": use_congressional_features,
+        "use_insider_aggregate": use_insider_aggregate,
+        "use_etf_flow": use_etf_flow,
+        "use_wavelet_features": use_wavelet_features,
+        "use_sax_features": use_sax_features,
+        "use_transfer_entropy": use_transfer_entropy,
+        "use_mfdfa_features": use_mfdfa_features,
+        "use_rqa_features": use_rqa_features,
+        "use_copula_features": use_copula_features,
+        "use_network_centrality": use_network_centrality,
+        "use_path_signatures": use_path_signatures,
+        "use_wavelet_scattering": use_wavelet_scattering,
+        "use_wasserstein_regime": use_wasserstein_regime,
+        "use_market_structure": use_market_structure,
+        "use_time_series_models": use_time_series_models,
+        "use_catch22": use_catch22,
+        "use_har_rv": use_har_rv,
+        "use_l_moments": use_l_moments,
+        "use_multiscale_entropy": use_multiscale_entropy,
+        "use_rv_signature_plot": use_rv_signature_plot,
+        "use_tda_homology": use_tda_homology,
+        "use_credit_spread_features": use_credit_spread_features,
+        "use_yield_curve_features": use_yield_curve_features,
+        "use_vol_term_structure_features": use_vol_term_structure_features,
+        "use_macro_surprise_features": use_macro_surprise_features,
+        "use_cross_asset_momentum": use_cross_asset_momentum,
+        "use_skew_kurtosis_features": use_skew_kurtosis_features,
+        "use_seasonality_features": use_seasonality_features,
+        "use_order_flow_imbalance": use_order_flow_imbalance,
+        "use_correlation_regime": use_correlation_regime,
+        "use_fama_french": use_fama_french,
+        "use_put_call_ratio": use_put_call_ratio,
+        "use_multi_horizon": use_multi_horizon,
+        "use_earnings_revision": use_earnings_revision,
+        "use_short_interest": use_short_interest,
+        "use_dollar_index": use_dollar_index,
+        "use_institutional_flow": use_institutional_flow,
+        "use_google_trends": use_google_trends,
+        "use_commodity_signals": use_commodity_signals,
+        "use_treasury_auction": use_treasury_auction,
+        "use_fed_liquidity": use_fed_liquidity,
+        "use_earnings_calendar": use_earnings_calendar,
+        "use_analyst_rating": use_analyst_rating,
+        "use_expanded_macro": use_expanded_macro,
+        "use_vvix": use_vvix,
+        "use_sector_rotation": use_sector_rotation,
+        "use_fx_carry": use_fx_carry,
+        "use_money_market": use_money_market,
+        "use_financial_stress": use_financial_stress,
+        "use_global_equity": use_global_equity,
+        "use_retail_sentiment": use_retail_sentiment,
+        "use_cboe_pcr": use_cboe_pcr,
+        "use_stocktwits": use_stocktwits,
+        "use_alpaca_news": use_alpaca_news,
+        "use_gnews_headlines": use_gnews_headlines,
+        "use_finbert_nlp": use_finbert_nlp,
+        "use_wsb_sentiment": use_wsb_sentiment,
+    }
+
+    for step in _FEATURE_STEPS:
+        if not flags.get(step.flag, True):
+            continue
+        df_daily = _run_feature_step(
+            step, df_daily, start_date, end_date, metadata, resource_config, flags,
+        )
+        if step.gc_after:
+            _maybe_gc(resource_config, step.gc_after)
+
+    # ------------------------------------------------------------------
     # 9. Synthetic SPY Universes (do last since it multiplies data)
+    # ------------------------------------------------------------------
     _n_universes = 20
     if resource_config is not None:
         _n_universes = resource_config.n_synthetic_universes

@@ -15,6 +15,7 @@ Default: ON
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
 GLOBAL_ETFS = {
@@ -26,8 +27,10 @@ GLOBAL_ETFS = {
 }
 
 
-class GlobalEquityFeatures:
+class GlobalEquityFeatures(FeatureModuleBase):
     """International equity ETF signal features."""
+    FEATURE_NAMES = ["gleq_dm_us_spread", "gleq_em_dm_spread", "gleq_china_momentum", "gleq_japan_momentum", "gleq_global_breadth", "gleq_global_us_divergence", "gleq_contagion_risk", "gleq_regime"]
+
 
     def __init__(self):
         self._data: Optional[pd.DataFrame] = None

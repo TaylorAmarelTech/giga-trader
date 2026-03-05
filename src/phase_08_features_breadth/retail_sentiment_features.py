@@ -14,6 +14,7 @@ Default: ON
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
 RETAIL_ETFS = {
@@ -24,8 +25,10 @@ RETAIL_ETFS = {
 }
 
 
-class RetailSentimentFeatures:
+class RetailSentimentFeatures(FeatureModuleBase):
     """Retail sentiment proxy features from leveraged ETF flows."""
+    FEATURE_NAMES = ["rflow_bull_bear_ratio", "rflow_arkk_momentum", "rflow_uvxy_z", "rflow_leveraged_dispersion", "rflow_panic_proxy", "rflow_euphoria_proxy", "rflow_retail_inst_divergence", "rflow_regime"]
+
 
     def __init__(self):
         self._data: Optional[pd.DataFrame] = None

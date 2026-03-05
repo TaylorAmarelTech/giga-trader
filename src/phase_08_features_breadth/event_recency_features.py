@@ -23,6 +23,7 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
@@ -71,7 +72,7 @@ def _find_col(df: pd.DataFrame, candidates: list) -> Optional[str]:
     return None
 
 
-class EventRecencyFeatures:
+class EventRecencyFeatures(FeatureModuleBase):
     """
     Compute 'days since last event' features from OHLCV data and
     cross-asset / breadth / volatility columns already in df_daily.
@@ -79,6 +80,8 @@ class EventRecencyFeatures:
     Pattern: no download needed — works entirely off df_daily columns
     that have been merged by prior integration steps (1-16).
     """
+    FEATURE_NAMES = ["dts_last_drop_1pct", "dts_last_drop_2pct", "dts_last_rally_1pct", "dts_last_rally_2pct", "dts_last_reversal_down", "dts_last_reversal_up", "dts_last_gap_up", "dts_last_gap_down", "dts_last_high_vol_day", "dts_last_vix_spike", "dts_last_52w_high", "dts_last_52w_low", "dts_last_3day_winning", "dts_last_3day_losing", "dts_last_volume_spike", "dts_last_volume_dryup", "dts_last_volume_climax", "dts_last_spy_tlt_diverge", "dts_last_gold_outperform", "dts_last_qqq_spy_diverge", "dts_last_vix_above_30", "dts_last_ma_cross_up", "dts_last_ma_cross_down", "dts_last_close_above_20ma", "dts_last_support_bounce", "dts_last_breadth_thrust", "dts_last_breadth_collapse", "dts_last_breadth_divergence", "dts_last_vix_cross_20", "dts_last_vol_compression", "dts_last_vol_expansion", "dts_last_defensive_takeover", "dts_last_cyclical_breakout", "dts_last_overbought", "dts_last_oversold", "dts_last_momentum_divergence", "dts_last_inside_day", "dts_last_outside_day", "dts_last_doji", "dts_last_hammer", "dts_last_shooting_star", "dts_last_engulfing_bull", "dts_last_engulfing_bear", "dts_last_narrow_range_7", "dts_last_distribution_day", "dts_last_accumulation_day", "dts_last_stalling_day", "dts_last_follow_through_day", "dts_n_distribution_25d", "dts_n_accumulation_25d", "dts_last_up_high_vol", "dts_last_down_high_vol", "dts_last_up_low_vol", "dts_last_down_low_vol", "dts_last_vol_breakout", "dts_last_vol_ma_cross_up", "dts_last_vol_ma_cross_down", "dts_last_gap_fill_up", "dts_last_gap_fill_down", "dts_last_unfilled_gap_up", "dts_last_unfilled_gap_down", "dts_last_island_reversal", "dts_week_return", "dts_week_range_pos", "dts_prev_week_return", "dts_last_weekly_reversal", "dts_month_day", "dts_is_turn_of_month", "dts_last_strong_week", "dts_last_weak_week", "dts_last_3sigma_move", "dts_last_close_at_high", "dts_last_close_at_low", "dts_last_wide_range_bar", "dts_last_return_streak_break", "dts_last_yield_spike", "dts_last_yield_plunge", "dts_last_credit_stress", "dts_last_oil_crash", "dts_last_eem_diverge", "dts_last_iwm_underperform", "dts_last_all_risk_off", "dts_event_count_5d", "dts_event_count_20d", "dts_event_intensity", "dts_avg_recency", "dts_min_recency", "dts_recency_dispersion"]
+
 
     REQUIRED_COLS = {"date", "close"}
 

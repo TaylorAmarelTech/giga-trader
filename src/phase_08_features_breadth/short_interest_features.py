@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class ShortInterestFeatures:
+class ShortInterestFeatures(FeatureModuleBase):
     """Compute short interest features."""
+    FEATURE_NAMES = ["si_ratio", "si_change", "si_days_to_cover", "si_velocity", "si_z_score", "si_pct_float", "si_change_5d", "si_squeeze_signal"]
+
 
     REQUIRED_COLS = {"close", "volume"}
 

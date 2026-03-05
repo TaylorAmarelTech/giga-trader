@@ -31,6 +31,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("WAVELET_FEATURES")
@@ -51,7 +53,7 @@ _DEFAULT_SHORT_WINDOW = 3
 _DEFAULT_LONG_WINDOW = 5
 
 
-class WaveletFeatures:
+class WaveletFeatures(FeatureModuleBase):
     """
     Compute wavelet-like multi-resolution features from daily close prices.
 

@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class InstitutionalFlowFeatures:
+class InstitutionalFlowFeatures(FeatureModuleBase):
     """Compute institutional flow features from ETF volume proxy."""
+    FEATURE_NAMES = ["inst_net_flow", "inst_concentration", "inst_momentum", "inst_breadth", "inst_flow_z", "inst_new_positions", "inst_position_changes", "inst_top10_weight_change"]
+
 
     REQUIRED_COLS = {"close", "volume"}
 

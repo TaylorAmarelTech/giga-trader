@@ -34,17 +34,30 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("FEAR_GREED_FEATURES")
 
 
-class FearGreedFeatures:
+class FearGreedFeatures(FeatureModuleBase):
     """
     Download CNN Fear & Greed Index data and create predictive features.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "fg_index",
+        "fg_index_z",
+        "fg_index_pctile",
+        "fg_chg_1d",
+        "fg_chg_5d",
+        "fg_regime",
+        "fg_extreme_signal",
+        "fg_momentum_5d",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

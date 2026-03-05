@@ -25,12 +25,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class YieldCurveFeatures:
+class YieldCurveFeatures(FeatureModuleBase):
     """Compute yield-curve features from Treasury data or close-price proxy."""
+    FEATURE_NAMES = ["yc_2s10s_slope", "yc_3m10y_slope", "yc_curvature", "yc_slope_momentum_5d", "yc_slope_momentum_20d", "yc_slope_z", "yc_real_yield_proxy", "yc_inversion_flag", "yc_steepening_speed", "yc_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

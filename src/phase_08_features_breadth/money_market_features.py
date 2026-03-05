@@ -15,10 +15,13 @@ import os
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
-class MoneyMarketFeatures:
+class MoneyMarketFeatures(FeatureModuleBase):
     """Short-term funding market feature engineering."""
+    FEATURE_NAMES = ["mmkt_sofr_z", "mmkt_sofr_change", "mmkt_sofr_obfr_spread", "mmkt_obfr_change", "mmkt_prime_change", "mmkt_funding_stress", "mmkt_rate_regime", "mmkt_cp_spread_z"]
+
 
     FRED_SERIES = {
         "SOFR": "sofr",

@@ -21,18 +21,21 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("RV_SIGNATURE")
 
 
-class RVSignaturePlotFeatures:
+class RVSignaturePlotFeatures(FeatureModuleBase):
     """
     Compute RV signature plot features from daily close prices.
 
     All features use the rvsp_ prefix.  Pure numpy implementation.
     """
+    FEATURE_NAMES = ["rvsp_slope", "rvsp_noise_ratio", "rvsp_flatness"]
+
 
     REQUIRED_COLS = {"close"}
     FREQUENCIES = [1, 2, 5, 10, 20]  # Subsampling periods in days

@@ -15,12 +15,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class DriftFeatures:
+class DriftFeatures(FeatureModuleBase):
     """Compute CUSUM-based drift detection features from daily OHLCV data."""
+    FEATURE_NAMES = ["drift_detected", "drift_days_since", "drift_window_size"]
+
 
     REQUIRED_COLS = {"close"}
 

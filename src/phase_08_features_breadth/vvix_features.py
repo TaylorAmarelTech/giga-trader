@@ -15,10 +15,13 @@ Default: ON
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
-class VVIXFeatures:
+class VVIXFeatures(FeatureModuleBase):
     """VVIX (VIX of VIX) feature engineering."""
+    FEATURE_NAMES = ["vvix_level_z", "vvix_vix_ratio", "vvix_momentum_5d", "vvix_momentum_20d", "vvix_percentile", "vvix_vix_divergence", "vvix_acceleration", "vvix_regime"]
+
 
     def __init__(self):
         self._data: Optional[pd.DataFrame] = None

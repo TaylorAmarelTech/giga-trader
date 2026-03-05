@@ -29,6 +29,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("INSIDER_AGG_FEATURES")
@@ -40,7 +42,7 @@ _MA_WINDOW: int = 20               # moving average for price + volume baseline
 _Z_CLIP: float = 3.0               # symmetric clip on z-score
 
 
-class InsiderAggregateFeatures:
+class InsiderAggregateFeatures(FeatureModuleBase):
     """
     Compute insider-aggregate proxy features from close and volume data.
 
@@ -54,6 +56,13 @@ class InsiderAggregateFeatures:
     >>> engine.download_insider_data(start, end)   # no-op, returns empty df
     >>> result = engine.create_insider_aggregate_features(spy_daily_df)
     """
+
+    FEATURE_NAMES = [
+        "insider_agg_buy_ratio",
+        "insider_agg_volume",
+        "insider_agg_cluster",
+        "insider_agg_z",
+    ]
 
     def __init__(self, window: int = 30, z_window: int = 60) -> None:
         """

@@ -16,12 +16,15 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class AmihudFeatures:
+class AmihudFeatures(FeatureModuleBase):
     """Compute Amihud illiquidity ratio features from daily OHLCV data."""
+    FEATURE_NAMES = ["liq_amihud_raw", "liq_amihud_20d", "liq_amihud_z", "liq_amihud_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

@@ -24,12 +24,15 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class PutCallRatioFeatures:
+class PutCallRatioFeatures(FeatureModuleBase):
     """Compute put-call ratio features with multi-level data fallback."""
+    FEATURE_NAMES = ["pcr_raw", "pcr_equity_ratio", "pcr_equity_ratio_5d_ma", "pcr_equity_ratio_20d_ma", "pcr_ratio_zscore", "pcr_extreme_puts", "pcr_extreme_calls", "pcr_trend", "pcr_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

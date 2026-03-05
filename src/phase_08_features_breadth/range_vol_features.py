@@ -21,12 +21,15 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class RangeVolFeatures:
+class RangeVolFeatures(FeatureModuleBase):
     """Compute range-based volatility estimator features from daily OHLCV."""
+    FEATURE_NAMES = ["rvol_gk_5d", "rvol_gk_20d", "rvol_yz_5d", "rvol_yz_20d", "rvol_rs_5d", "rvol_rs_20d", "rvol_ratio_gk_cc", "rvol_vol_surprise"]
+
 
     REQUIRED_COLS = {"close", "open", "high", "low"}
 

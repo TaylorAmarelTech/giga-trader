@@ -19,10 +19,13 @@ import os
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
-class ExpandedMacroFeatures:
+class ExpandedMacroFeatures(FeatureModuleBase):
     """Expanded FRED macro indicators beyond core economic_features."""
+    FEATURE_NAMES = ["xmacro_core_pce_chg", "xmacro_capacity_util_z", "xmacro_payrolls_chg", "xmacro_job_openings_chg", "xmacro_avg_hours_z", "xmacro_home_price_mom", "xmacro_housing_starts_chg", "xmacro_new_orders_mom"]
+
 
     FRED_SERIES = {
         "PCEPILFE": "core_pce",

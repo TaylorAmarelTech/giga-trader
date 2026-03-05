@@ -27,9 +27,10 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 from src.phase_01_data_acquisition.alpaca_data_helper import get_alpaca_helper
+from src.core.feature_base import FeatureModuleBase
 
 
-class Mag7BreadthFeatures:
+class Mag7BreadthFeatures(FeatureModuleBase):
     """
     Market breadth features for various MAG (Magnificent) groupings.
 
@@ -43,6 +44,9 @@ class Mag7BreadthFeatures:
     These mega-caps drive ~35-40% of S&P 500 movement, so tracking them
     specifically provides valuable market leadership signals.
 
+    FEATURE_NAMES is empty because the exact feature set varies dynamically
+    based on which MAG groups have data available.
+
     Features for each group:
       - % advancing (breadth)
       - % at 52-week high/low
@@ -51,6 +55,9 @@ class Mag7BreadthFeatures:
       - Relative strength vs SPY
       - Sector rotation signals
     """
+
+    # Dynamic feature set — varies by available MAG groups at runtime
+    FEATURE_NAMES = []
 
     # MAG groupings (ordered by market cap, largest first)
     MAG3 = ["AAPL", "MSFT", "NVDA"]

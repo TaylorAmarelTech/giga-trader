@@ -595,6 +595,12 @@ class SignalGenerator:
                     use_financial_stress=True,
                     use_global_equity=True,
                     use_retail_sentiment=True,
+                    use_cboe_pcr=True,
+                    use_stocktwits=True,
+                    use_alpaca_news=True,
+                    use_gnews_headlines=True,
+                    use_finbert_nlp=False,
+                    use_wsb_sentiment=False,
                     validate_ohlc=True,
                 )
             except Exception as e:

@@ -22,6 +22,7 @@ from typing import Dict, List, Optional, Set
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +52,10 @@ def _third_friday(year: int, month: int) -> date:
     return first_friday + timedelta(weeks=2)  # Third Friday
 
 
-class SeasonalityFeatures:
+class SeasonalityFeatures(FeatureModuleBase):
     """Compute equity calendar anomaly features from dates."""
+    FEATURE_NAMES = ["seas_turn_of_month", "seas_january_effect", "seas_pre_fomc_drift", "seas_holiday_drift", "seas_santa_claus", "seas_quad_witching", "seas_sell_in_may", "seas_day_of_week"]
+
 
     REQUIRED_COLS = {"close"}  # Need close for df validation; date used if available
 

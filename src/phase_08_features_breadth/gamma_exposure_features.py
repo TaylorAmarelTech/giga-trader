@@ -30,17 +30,28 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("GEX_FEATURES")
 
 
-class GammaExposureFeatures:
+class GammaExposureFeatures(FeatureModuleBase):
     """
     Estimate gamma exposure from VIX term structure and options flow proxies.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "gex_proxy",
+        "gex_proxy_zscore",
+        "gex_regime",
+        "gex_flip_signal",
+        "gex_magnitude",
+        "gex_chg_5d",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

@@ -30,6 +30,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 logger = logging.getLogger(__name__)
 
 
@@ -164,7 +166,7 @@ def _rolling_te(
     return result
 
 
-class TransferEntropyFeatures:
+class TransferEntropyFeatures(FeatureModuleBase):
     """
     Compute directional information flow (Transfer Entropy) from cross-asset
     returns into SPY returns.

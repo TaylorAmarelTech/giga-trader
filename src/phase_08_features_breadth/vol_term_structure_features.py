@@ -22,12 +22,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class VolTermStructureFeatures:
+class VolTermStructureFeatures(FeatureModuleBase):
     """Compute VIX term structure features from VIX/VIX3M data or proxy."""
+    FEATURE_NAMES = ["vts_vix_vix3m_ratio", "vts_contango", "vts_backwardation", "vts_term_slope", "vts_term_slope_z", "vts_roll_yield_proxy", "vts_ratio_momentum_5d", "vts_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

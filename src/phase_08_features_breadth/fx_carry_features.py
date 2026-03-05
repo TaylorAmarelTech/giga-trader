@@ -16,6 +16,7 @@ Default: ON
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
 FX_TICKERS = {
@@ -26,8 +27,10 @@ FX_TICKERS = {
 }
 
 
-class FXCarryFeatures:
+class FXCarryFeatures(FeatureModuleBase):
     """FX carry & currency signal feature engineering."""
+    FEATURE_NAMES = ["fxc_eur_momentum", "fxc_jpy_carry_signal", "fxc_gbp_momentum", "fxc_aud_risk_signal", "fxc_dispersion", "fxc_equity_corr", "fxc_dollar_composite", "fxc_regime"]
+
 
     def __init__(self):
         self._data: Optional[pd.DataFrame] = None

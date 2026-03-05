@@ -39,12 +39,14 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("ETF_FLOW_FEATURES")
 
 
-class ETFFlowFeatures:
+class ETFFlowFeatures(FeatureModuleBase):
     """
     Engineer ETF fund-flow proxy features from SPY close and volume data.
 
@@ -53,6 +55,13 @@ class ETFFlowFeatures:
 
     Pattern: construct → create_etf_flow_features → merge (same as DarkPoolFeatures).
     """
+
+    FEATURE_NAMES = [
+        "etf_flow_spy_20d",
+        "etf_flow_spy_z",
+        "etf_flow_creation_redemption",
+        "etf_flow_short_interest_ratio",
+    ]
 
     def __init__(
         self,

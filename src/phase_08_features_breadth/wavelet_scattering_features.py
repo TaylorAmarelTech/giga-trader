@@ -31,6 +31,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from scipy.signal import fftconvolve
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ _ZSCORE_WINDOW = 60
 _ENERGY_TREND_WINDOW = 10
 
 
-class WaveletScatteringFeatures:
+class WaveletScatteringFeatures(FeatureModuleBase):
     """Compute wavelet scattering transform features from daily OHLCV data.
 
     Uses the Ricker (Mexican hat) wavelet as the mother wavelet.  The
@@ -90,6 +91,8 @@ class WaveletScatteringFeatures:
         Rolling window for low-pass averaging of scattering coefficients.
         Default ``20``.
     """
+    FEATURE_NAMES = ["wscat_s0_20d", "wscat_s1_scale2_20d", "wscat_s1_scale4_20d", "wscat_s1_scale8_20d", "wscat_s2_2x4_20d", "wscat_s2_2x8_20d", "wscat_s2_4x8_20d", "wscat_energy_ratio", "wscat_intermittency", "wscat_s0_z", "wscat_energy_trend", "wscat_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

@@ -37,6 +37,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 logger = logging.getLogger(__name__)
 
 # Breakpoints for standard normal equal-probability bins (alphabet_size = 4)
@@ -51,7 +53,7 @@ _BREAKPOINTS = {
 }
 
 
-class SAXFeatures:
+class SAXFeatures(FeatureModuleBase):
     """
     Compute SAX (Symbolic Aggregate approXimation) pattern features.
 
@@ -71,6 +73,11 @@ class SAXFeatures:
     """
 
     REQUIRED_COLS = {"close"}
+    FEATURE_NAMES = [
+        "sax_pattern_20d",
+        "sax_pattern_match",
+        "sax_novelty",
+    ]
 
     def __init__(
         self,

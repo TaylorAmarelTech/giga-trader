@@ -18,12 +18,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class HMMFeatures:
+class HMMFeatures(FeatureModuleBase):
     """Compute HMM-style regime detection features from daily OHLCV data."""
+    FEATURE_NAMES = ["hmm_state", "hmm_bull_prob", "hmm_bear_prob", "hmm_transition_prob", "hmm_regime_duration"]
+
 
     REQUIRED_COLS = {"close"}
 

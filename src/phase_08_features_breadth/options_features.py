@@ -40,17 +40,37 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("OPTIONS_FEATURES")
 
 
-class OptionsFeatures:
+class OptionsFeatures(FeatureModuleBase):
     """
     Download CBOE VIX/SKEW data and create options-derived features.
 
     Pattern: download -> compute -> merge (same as other feature classes).
     """
+
+    FEATURE_NAMES = [
+        "opt_iv_rank",
+        "opt_iv_percentile",
+        "opt_iv_zscore",
+        "opt_iv_chg_1d",
+        "opt_iv_chg_5d",
+        "opt_iv_mean_revert",
+        "opt_skew_raw",
+        "opt_skew_zscore",
+        "opt_skew_chg_5d",
+        "opt_skew_regime",
+        "opt_fear_composite",
+        "opt_complacency",
+        "opt_tail_risk",
+        "opt_vol_of_vol",
+        "opt_vix_rv_spread",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

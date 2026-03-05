@@ -28,12 +28,14 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("FUTURES_BASIS")
 
 
-class FuturesBasisFeatures:
+class FuturesBasisFeatures(FeatureModuleBase):
     """
     Download ES futures data and create futures-spot basis features.
 
@@ -43,6 +45,13 @@ class FuturesBasisFeatures:
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "basis_spread",
+        "basis_spread_z",
+        "basis_change_5d",
+        "basis_regime",
+    ]
 
     #: yfinance ticker for E-mini S&P 500 continuous futures
     FUTURES_TICKER = "ES=F"

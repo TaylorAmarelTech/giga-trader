@@ -21,12 +21,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class TreasuryAuctionFeatures:
+class TreasuryAuctionFeatures(FeatureModuleBase):
     """Compute treasury auction demand features."""
+    FEATURE_NAMES = ["tauct_bid_cover_10y", "tauct_indirect_pct", "tauct_tail_bps", "tauct_demand_z", "tauct_bid_cover_change", "tauct_auction_quality"]
+
 
     REQUIRED_COLS = {"close"}
 

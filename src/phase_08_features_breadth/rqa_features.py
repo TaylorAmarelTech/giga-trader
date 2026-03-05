@@ -24,6 +24,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def _run_lengths(arr: np.ndarray) -> List[int]:
 # ─── Main class ──────────────────────────────────────────────────────────────
 
 
-class RQAFeatures:
+class RQAFeatures(FeatureModuleBase):
     """
     Compute Recurrence Quantification Analysis features from daily OHLCV data.
 
@@ -229,6 +230,8 @@ class RQAFeatures:
     min_line : int
         Minimum diagonal/vertical line length for DET/LAM/TT (default 2).
     """
+    FEATURE_NAMES = ["rqa_recurrence_rate", "rqa_determinism", "rqa_laminarity", "rqa_entropy", "rqa_trapping_time"]
+
 
     REQUIRED_COLS = {"close"}
 

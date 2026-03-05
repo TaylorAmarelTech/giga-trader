@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class GoogleTrendsFeatures:
+class GoogleTrendsFeatures(FeatureModuleBase):
     """Compute Google Trends sentiment features."""
+    FEATURE_NAMES = ["gtrend_crash_interest", "gtrend_buy_interest", "gtrend_recession_interest", "gtrend_bull_interest", "gtrend_panic_idx", "gtrend_euphoria_idx", "gtrend_momentum", "gtrend_contrarian"]
+
 
     REQUIRED_COLS = {"close", "volume"}
 

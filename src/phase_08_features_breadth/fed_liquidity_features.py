@@ -24,12 +24,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class FedLiquidityFeatures:
+class FedLiquidityFeatures(FeatureModuleBase):
     """Compute Federal Reserve liquidity features."""
+    FEATURE_NAMES = ["fedliq_balance_sheet_chg", "fedliq_rrp_level", "fedliq_rrp_change", "fedliq_net_liquidity", "fedliq_liquidity_z", "fedliq_tga_change", "fedliq_reserves_chg", "fedliq_liquidity_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

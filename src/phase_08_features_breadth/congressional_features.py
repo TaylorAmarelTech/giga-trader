@@ -32,6 +32,8 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
+
 
 warnings.filterwarnings("ignore")
 
@@ -41,7 +43,7 @@ logger = logging.getLogger("CONGRESSIONAL_FEATURES")
 REQUIRED_COLUMNS = {"close", "volume"}
 
 
-class CongressionalFeatures:
+class CongressionalFeatures(FeatureModuleBase):
     """
     Proxy "smart money" features based on volume-filtered up/down days.
 
@@ -57,6 +59,13 @@ class CongressionalFeatures:
         Multiplier over the 20-day volume MA that defines a "high-volume" day.
         Default 1.2 (i.e. >120% of the 20-day average volume).
     """
+
+    FEATURE_NAMES = [
+        "congress_net_buys_30d",
+        "congress_volume_z",
+        "congress_buy_ratio",
+        "congress_sentiment",
+    ]
 
     FEATURE_COLS = [
         "congress_net_buys_30d",

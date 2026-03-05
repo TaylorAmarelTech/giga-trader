@@ -23,9 +23,10 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 from src.phase_01_data_acquisition.alpaca_data_helper import get_alpaca_helper
+from src.core.feature_base import FeatureModuleBase
 
 
-class ComponentStreakFeatures:
+class ComponentStreakFeatures(FeatureModuleBase):
     """
     Track % of SPY components and market-cap weighted % that have been green
     for consecutive days (2, 3, 4, 5+ days in a row).
@@ -35,6 +36,8 @@ class ComponentStreakFeatures:
       - Breadth divergences (SPY up but fewer stocks participating)
       - Potential reversal signals
     """
+    FEATURE_NAMES = ["pct_green_3d", "pct_red_3d", "wtd_net_green_3d"]
+
 
     # Approximate market cap weights for top SPY components (as of 2024)
     COMPONENT_WEIGHTS = {

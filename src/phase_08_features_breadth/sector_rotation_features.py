@@ -12,6 +12,7 @@ Default: ON
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
 SECTOR_ETFS = [
@@ -23,8 +24,10 @@ CYCLICAL = {"XLK", "XLF", "XLE", "XLI", "XLY", "XLB", "XLC"}
 DEFENSIVE = {"XLV", "XLU", "XLP", "XLRE"}
 
 
-class SectorRotationFeatures:
+class SectorRotationFeatures(FeatureModuleBase):
     """Sector ETF rotation & momentum-rank signals."""
+    FEATURE_NAMES = ["secrot_rotation_speed", "secrot_leader_momentum", "secrot_laggard_momentum", "secrot_leader_laggard_spread", "secrot_momentum_dispersion", "secrot_top3_concentration", "secrot_cyclical_vs_defensive", "secrot_regime"]
+
 
     def __init__(self):
         self._data: Optional[pd.DataFrame] = None

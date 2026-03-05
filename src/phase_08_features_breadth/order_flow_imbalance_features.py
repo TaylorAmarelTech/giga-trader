@@ -24,12 +24,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class OrderFlowImbalanceFeatures:
+class OrderFlowImbalanceFeatures(FeatureModuleBase):
     """Compute order flow imbalance features from OHLCV data."""
+    FEATURE_NAMES = ["ofi_buy_volume_proxy", "ofi_sell_volume_proxy", "ofi_imbalance", "ofi_cumulative_5d", "ofi_cumulative_20d", "ofi_normalized_20d", "ofi_imbalance_z", "ofi_regime"]
+
 
     REQUIRED_COLS = {"open", "high", "low", "close", "volume"}
 

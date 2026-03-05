@@ -26,12 +26,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class CorrelationRegimeFeatures:
+class CorrelationRegimeFeatures(FeatureModuleBase):
     """Compute rolling cross-asset correlation regime features."""
+    FEATURE_NAMES = ["spy_close", "tlt_close", "gld_close", "spy_ret", "tlt_ret", "gld_ret", "rvol_proxy"]
+
 
     REQUIRED_COLS = {"close"}
 

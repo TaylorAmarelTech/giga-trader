@@ -38,13 +38,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
+
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("COPULA_FEATURES")
 
 
-class CopulaFeatures:
+class CopulaFeatures(FeatureModuleBase):
     """
     Compute empirical copula tail dependence features from SPY daily data.
 
@@ -63,6 +65,13 @@ class CopulaFeatures:
         (top) ``quantile`` fraction of the empirical CDF.  Must be in
         (0, 0.5).  Default 0.10.
     """
+
+    FEATURE_NAMES = [
+        "copula_upper_tail",
+        "copula_lower_tail",
+        "copula_tail_asymmetry",
+        "copula_tail_z",
+    ]
 
     # Cross-asset columns preferred as the benchmark, in priority order.
     # The first column found in the input dataframe is used.

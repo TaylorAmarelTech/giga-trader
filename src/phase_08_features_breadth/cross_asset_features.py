@@ -22,10 +22,11 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
+from src.core.feature_base import FeatureModuleBase
 from src.phase_01_data_acquisition.alpaca_data_helper import get_alpaca_helper
 
 
-class CrossAssetFeatures:
+class CrossAssetFeatures(FeatureModuleBase):
     """
     Add features from correlated assets: TLT, QQQ, GLD, VIX, etc.
 
@@ -35,6 +36,8 @@ class CrossAssetFeatures:
       - Sector rotation hints
       - Volatility regime context
     """
+
+    FEATURE_NAMES = []  # Dynamic: features created per asset at runtime
 
     ASSETS = {
         "TLT": "Treasury bonds (20+ year)",

@@ -42,6 +42,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +199,7 @@ def _compute_mfdfa_triplet(
 # ---------------------------------------------------------------------------
 
 
-class MFDFAFeatures:
+class MFDFAFeatures(FeatureModuleBase):
     """
     Compute Multifractal Detrended Fluctuation Analysis (MFDFA) features
     from daily close prices.
@@ -212,6 +213,8 @@ class MFDFAFeatures:
     scales : list of int, optional
         DFA segment sizes. Defaults to [8, 16, 32].
     """
+    FEATURE_NAMES = ["mfdfa_alpha", "mfdfa_width", "mfdfa_asymmetry", "mfdfa_z"]
+
 
     REQUIRED_COLS = {"close"}
 

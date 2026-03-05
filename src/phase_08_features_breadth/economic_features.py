@@ -40,16 +40,19 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 
-class EconomicFeatures:
+class EconomicFeatures(FeatureModuleBase):
     """
     Download economic data via yfinance and create predictive features.
 
     Follows the same pattern as CrossAssetFeatures: download → feature engineer → merge.
     """
+    FEATURE_NAMES = ["econ_{prefix}_zscore", "econ_{prefix}_chg_5d", "econ_{prefix}_chg_20d"]
+
 
     # Sources to download via yfinance
     SOURCES = {

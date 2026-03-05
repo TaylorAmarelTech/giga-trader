@@ -15,10 +15,13 @@ import os
 import numpy as np
 import pandas as pd
 from typing import Dict, List, Optional
+from src.core.feature_base import FeatureModuleBase
 
 
-class FinancialStressFeatures:
+class FinancialStressFeatures(FeatureModuleBase):
     """Financial stress and conditions index features."""
+    FEATURE_NAMES = ["fstress_stlfsi_level", "fstress_stlfsi_momentum", "fstress_nfci_level", "fstress_nfci_momentum", "fstress_index_divergence", "fstress_dollar_tw_chg", "fstress_composite", "fstress_regime"]
+
 
     FRED_SERIES = {
         "STLFSI4": "stlfsi",

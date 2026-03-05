@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +34,10 @@ _Z_WINDOW = 100
 _Z_MIN_PERIODS = 40
 
 
-class AbsorptionRatioFeatures:
+class AbsorptionRatioFeatures(FeatureModuleBase):
     """Compute absorption ratio features from cross-asset or single-asset data."""
+    FEATURE_NAMES = ["ar_ratio", "ar_change_20d", "ar_z"]
+
 
     REQUIRED_COLS = {"close"}
 

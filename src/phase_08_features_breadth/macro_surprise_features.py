@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class MacroSurpriseFeatures:
+class MacroSurpriseFeatures(FeatureModuleBase):
     """Compute macro surprise features from FRED or ETF proxies."""
+    FEATURE_NAMES = ["msurp_citi_surprise_proxy", "msurp_nfp_surprise_proxy", "msurp_cpi_surprise_proxy", "msurp_ism_surprise_proxy", "msurp_composite_z", "msurp_positive_surprise_streak", "msurp_surprise_momentum_5d", "msurp_surprise_momentum_20d", "msurp_surprise_vol", "msurp_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

@@ -105,6 +105,12 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
     "financial_stress": ["fstress_"],
     "global_equity": ["gleq_"],
     "retail_sentiment": ["rflow_"],
+    "cboe_pcr": ["cboe_"],
+    "stocktwits": ["stwit_"],
+    "alpaca_news": ["anews_"],
+    "gnews_headlines": ["gnews_"],
+    "finbert_nlp": ["nlp_"],
+    "wsb_sentiment": ["wsb_"],
     "intraday": [
         "return_at_", "high_to_", "low_to_", "range_to_",
         "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",

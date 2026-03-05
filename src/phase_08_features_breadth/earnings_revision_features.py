@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class EarningsRevisionFeatures:
+class EarningsRevisionFeatures(FeatureModuleBase):
     """Compute earnings revision momentum features."""
+    FEATURE_NAMES = ["ern_revision_momentum", "ern_surprise_history", "ern_revision_breadth", "ern_estimate_dispersion", "ern_surprise_z", "ern_revision_accel", "ern_consensus_drift", "ern_revision_std"]
+
 
     REQUIRED_COLS = {"close", "volume"}
 

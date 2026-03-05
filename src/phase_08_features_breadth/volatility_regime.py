@@ -25,9 +25,10 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 from src.phase_01_data_acquisition.alpaca_data_helper import get_alpaca_helper
+from src.core.feature_base import FeatureModuleBase
 
 
-class VolatilityRegimeFeatures:
+class VolatilityRegimeFeatures(FeatureModuleBase):
     """
     Volatility regime features using VIX and related indicators.
 
@@ -38,7 +39,13 @@ class VolatilityRegimeFeatures:
     - Extreme vol (VIX > 35): Crisis conditions
 
     Features include VIX levels, term structure, and regime transitions.
+
+    FEATURE_NAMES is empty because the exact feature set varies dynamically
+    based on which VIX-related instruments have data available.
     """
+
+    # Dynamic feature set — varies by available vol instruments at runtime
+    FEATURE_NAMES = []
 
     # VIX-related ETFs/indicators
     VOL_TICKERS = ["VXX", "UVXY", "SVXY", "VIXY"]

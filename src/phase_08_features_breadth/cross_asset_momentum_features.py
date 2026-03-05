@@ -26,12 +26,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class CrossAssetMomentumFeatures:
+class CrossAssetMomentumFeatures(FeatureModuleBase):
     """Compute cross-asset leading-momentum features from daily OHLCV data."""
+    FEATURE_NAMES = ["xmom_tlt_lead_5d", "xmom_gld_lead_5d", "xmom_hyg_lead_5d", "xmom_tlt_lead_tstat", "xmom_gld_lead_tstat", "xmom_hyg_lead_tstat", "xmom_cross_momentum_composite", "xmom_cross_divergence", "xmom_tlt_spy_corr_20d", "xmom_gld_spy_corr_20d", "xmom_corr_regime_change", "xmom_momentum_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

@@ -23,19 +23,22 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("HAR_RV")
 
 
-class HARRVFeatures:
+class HARRVFeatures(FeatureModuleBase):
     """
     Generate HAR-RV model features from daily close prices.
 
     All features use the harv_ prefix.  Pure numpy implementation,
     no external dependencies beyond numpy/pandas.
     """
+    FEATURE_NAMES = ["harv_predicted", "harv_residual", "harv_residual_z", "harv_component_ratio"]
+
 
     REQUIRED_COLS = {"close"}
 

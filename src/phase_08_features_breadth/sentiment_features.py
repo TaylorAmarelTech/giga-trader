@@ -41,19 +41,22 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("SENTIMENT_FEATURES")
 
 
-class SentimentFeatures:
+class SentimentFeatures(FeatureModuleBase):
     """
     Derive market sentiment features from VIX, cross-asset flows,
     and optional news APIs.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+    FEATURE_NAMES = ["sent_news_score", "sent_news_volume", "sent_news_dispersion"]
+
 
     # yfinance symbols needed for sentiment computation
     # (many are already downloaded by EconomicFeatures — we reuse if available)

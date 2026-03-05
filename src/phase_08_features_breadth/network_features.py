@@ -38,6 +38,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 logger = logging.getLogger(__name__)
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -109,7 +111,7 @@ def _count_connected_components(adj: np.ndarray) -> int:
 # NetworkFeatures
 # ──────────────────────────────────────────────────────────────────────────────
 
-class NetworkFeatures:
+class NetworkFeatures(FeatureModuleBase):
     """
     Compute correlation-network centrality features from daily return data.
 
@@ -123,6 +125,13 @@ class NetworkFeatures:
     """
 
     REQUIRED_COLS = {"close"}
+    FEATURE_NAMES = [
+        "netw_density",
+        "netw_avg_centrality",
+        "netw_centrality_z",
+        "netw_modularity",
+        "netw_hub_disconnect",
+    ]
 
     def __init__(
         self,

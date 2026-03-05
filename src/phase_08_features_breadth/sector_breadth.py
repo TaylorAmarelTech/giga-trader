@@ -33,9 +33,10 @@ import pandas as pd
 from typing import Dict, List, Tuple, Optional
 
 from src.phase_01_data_acquisition.alpaca_data_helper import get_alpaca_helper
+from src.core.feature_base import FeatureModuleBase
 
 
-class SectorBreadthFeatures:
+class SectorBreadthFeatures(FeatureModuleBase):
     """
     Market breadth features by S&P 500 sector for validation.
 
@@ -54,7 +55,13 @@ class SectorBreadthFeatures:
       XLB - Materials
       XLRE - Real Estate
       XLC - Communication Services
+
+    FEATURE_NAMES is empty because the exact feature set varies dynamically
+    based on which sectors have data available.
     """
+
+    # Dynamic feature set — varies by available sector ETFs at runtime
+    FEATURE_NAMES = []
 
     SECTOR_ETFS = {
         "XLK": "Technology",

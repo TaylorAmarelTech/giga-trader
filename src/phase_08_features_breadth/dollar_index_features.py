@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class DollarIndexFeatures:
+class DollarIndexFeatures(FeatureModuleBase):
     """Compute US Dollar index features for equity prediction."""
+    FEATURE_NAMES = ["dxy_level", "dxy_return", "dxy_momentum_20d", "dxy_vol_20d", "dxy_z_score", "dxy_spy_corr", "dxy_roc_5d", "dxy_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

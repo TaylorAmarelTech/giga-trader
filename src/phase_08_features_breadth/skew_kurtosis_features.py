@@ -22,12 +22,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class SkewKurtosisFeatures:
+class SkewKurtosisFeatures(FeatureModuleBase):
     """Compute higher-order moment features from daily close prices."""
+    FEATURE_NAMES = ["skku_skew_5d", "skku_skew_20d", "skku_skew_60d", "skku_kurtosis_20d", "skku_tail_asymmetry", "skku_skew_z"]
+
 
     REQUIRED_COLS = {"close"}
 

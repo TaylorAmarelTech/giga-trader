@@ -26,12 +26,14 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("DARK_POOL")
 
 
-class DarkPoolFeatures:
+class DarkPoolFeatures(FeatureModuleBase):
     """
     Download FINRA short sale volume data and create predictive features.
 
@@ -40,6 +42,13 @@ class DarkPoolFeatures:
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "dp_short_volume_ratio",
+        "dp_short_ratio_zscore",
+        "dp_short_ratio_chg_5d",
+        "dp_short_ratio_extreme",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

@@ -42,6 +42,8 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("INTRADAY_MOMENTUM")
@@ -58,7 +60,7 @@ IMOM_FEATURES: List[str] = [
 REQUIRED_COLUMNS = {"close", "open", "high", "low"}
 
 
-class IntradayMomentumFeatures:
+class IntradayMomentumFeatures(FeatureModuleBase):
     """
     Create intraday momentum features from daily OHLC data.
 
@@ -67,6 +69,13 @@ class IntradayMomentumFeatures:
 
     Pattern: download (no-op) → compute → merge  (same as other phase_08 modules).
     """
+
+    FEATURE_NAMES = [
+        "imom_first_30min",
+        "imom_last_60min",
+        "imom_midday_reversal",
+        "imom_overnight_gap_impact",
+    ]
 
     def __init__(self, correlation_window: int = 20):
         """

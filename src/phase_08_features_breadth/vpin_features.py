@@ -26,6 +26,8 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
+from src.core.feature_base import FeatureModuleBase
+
 logger = logging.getLogger(__name__)
 
 # Default parameters
@@ -38,7 +40,7 @@ _Z_CLIP = 4.0
 _REGIME_THRESHOLD = 1.5      # z-score boundary for regime classification
 
 
-class VPINFeatures:
+class VPINFeatures(FeatureModuleBase):
     """
     Compute VPIN (Bulk Volume Classification) features from daily OHLCV data.
 
@@ -52,6 +54,12 @@ class VPINFeatures:
     """
 
     REQUIRED_COLS = {"close", "volume"}
+    FEATURE_NAMES = [
+        "vpin_value",
+        "vpin_z",
+        "vpin_regime",
+        "vpin_change_5d",
+    ]
 
     def __init__(self, window: int = 50, n_buckets: int = 50) -> None:
         self.window = window

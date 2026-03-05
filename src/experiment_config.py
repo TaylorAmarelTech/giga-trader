@@ -547,6 +547,24 @@ class AntiOverfitConfig:
     # Wave M: Retail sentiment proxy features (TQQQ/SQQQ, ARKK, UVXY)
     use_retail_sentiment: bool = True
 
+    # Wave N: CBOE direct put/call ratio features (free CSV, no key)
+    use_cboe_pcr: bool = True
+
+    # Wave N: StockTwits social sentiment features (free API, no key)
+    use_stocktwits: bool = True
+
+    # Wave N: Alpaca News Benzinga headline sentiment features (existing key)
+    use_alpaca_news: bool = True
+
+    # Wave N: Google News headline sentiment features (gnews package)
+    use_gnews_headlines: bool = True
+
+    # Wave N: FinBERT local NLP features (requires transformers + torch, ~2GB)
+    use_finbert_nlp: bool = False  # Default OFF: heavy dependency
+
+    # Wave N: Reddit WSB sentiment features (requires praw + Reddit OAuth)
+    use_wsb_sentiment: bool = False  # Default OFF: requires Reddit credentials
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 

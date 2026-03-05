@@ -26,6 +26,8 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("REDDIT_SENTIMENT")
@@ -37,12 +39,21 @@ SPY_TOP_COMPONENTS = [
 ]
 
 
-class RedditSentimentFeatures:
+class RedditSentimentFeatures(FeatureModuleBase):
     """
     Download Reddit sentiment data via ApeWisdom and create predictive features.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "reddit_spy_mentions",
+        "reddit_spy_rank",
+        "reddit_spy_upvotes",
+        "reddit_breadth_bullish",
+        "reddit_momentum_3d",
+        "reddit_buzz_zscore",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

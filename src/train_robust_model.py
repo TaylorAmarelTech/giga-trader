@@ -50,6 +50,9 @@ class _SafeWriter:
 sys.stdout = _SafeWriter(sys.stdout)
 sys.stderr = _SafeWriter(sys.stderr)
 
+import logging
+logger = logging.getLogger("train_robust_model")
+
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -62,10 +65,11 @@ load_dotenv(project_root / ".env")
 
 # System resource detection
 from src.core.system_resources import get_system_resources, create_resource_config
+from src.core.logging_config import setup_logging
 
 _sys_resources = get_system_resources()
 _resource_config = create_resource_config()
-print(f"\n{_sys_resources.summary()}\n")
+logger.info(f"\n{_sys_resources.summary()}\n")
 
 # Import anti-overfitting module
 from src.anti_overfit import (
@@ -264,9 +268,9 @@ def download_data() -> pd.DataFrame:
       - Sparse premarket/afterhours in earlier years
       - Data quality validation
     """
-    print("\n" + "=" * 70)
-    print("STEP 1: DOWNLOAD HISTORICAL DATA")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 1: DOWNLOAD HISTORICAL DATA")
+    logger.info("=" * 70)
 
     from alpaca.data.historical import StockHistoricalDataClient
     from alpaca.data.requests import StockBarsRequest
@@ -284,8 +288,8 @@ def download_data() -> pd.DataFrame:
     days_downloaded = 0
     chunk_count = 0
 
-    print(f"[INFO] Downloading {years} years ({total_days} days) of 1-min data...")
-    print(f"[INFO] This may take several minutes for large date ranges...")
+    logger.info(f"[INFO] Downloading {years} years ({total_days} days) of 1-min data...")
+    logger.info(f"[INFO] This may take several minutes for large date ranges...")
 
     while days_downloaded < total_days:
         chunk_start = current_end - timedelta(days=CONFIG["chunk_days"])
@@ -305,13 +309,13 @@ def download_data() -> pd.DataFrame:
                 all_data.append(df_chunk)
                 # Print progress every 6 chunks (~6 months)
                 if chunk_count % 6 == 0 or chunk_count <= 3:
-                    print(f"       {chunk_start.date()} to {current_end.date()}: {len(df_chunk):,} bars")
+                    logger.info(f"       {chunk_start.date()} to {current_end.date()}: {len(df_chunk):,} bars")
 
             current_end = chunk_start
             days_downloaded += CONFIG["chunk_days"]
 
         except Exception as e:
-            print(f"[WARN] Error at {chunk_start.date()}: {e}")
+            logger.warning(f"[WARN] Error at {chunk_start.date()}: {e}")
             # Continue downloading even if one chunk fails
             current_end = chunk_start
             days_downloaded += CONFIG["chunk_days"]
@@ -342,8 +346,8 @@ def download_data() -> pd.DataFrame:
 
     df["session"] = df.apply(get_session, axis=1)
 
-    print(f"\n[INFO] Raw download: {len(df):,} bars, {df['date'].nunique()} trading days")
-    print(f"[INFO] Date range: {df['date'].min()} to {df['date'].max()}")
+    logger.info(f"\n[INFO] Raw download: {len(df):,} bars, {df['date'].nunique()} trading days")
+    logger.info(f"[INFO] Date range: {df['date'].min()} to {df['date'].max()}")
 
     # ─────────────────────────────────────────────────────────────────────────
     # MISSING BAR DETECTION AND HANDLING
@@ -364,7 +368,7 @@ def detect_and_handle_missing_bars(df: pd.DataFrame) -> pd.DataFrame:
       3. Optionally forward-fills small gaps
       4. Creates quality flags for feature engineering
     """
-    print("\n[MISSING DATA ANALYSIS]")
+    logger.info("\n[MISSING DATA ANALYSIS]")
 
     df = df.copy()
 
@@ -397,7 +401,7 @@ def detect_and_handle_missing_bars(df: pd.DataFrame) -> pd.DataFrame:
         pm_flag = "OK" if pm_bars_per_day >= 50 else ("SPARSE" if pm_bars_per_day >= 10 else "MISSING")
         ah_flag = "OK" if ah_bars_per_day >= 30 else ("SPARSE" if ah_bars_per_day >= 5 else "MISSING")
 
-        print(f"  {year}: {n_days} days | PM: {pm_bars_per_day:.0f}/day ({pm_flag}) | "
+        logger.info(f"  {year}: {n_days} days | PM: {pm_bars_per_day:.0f}/day ({pm_flag}) | "
               f"AH: {ah_bars_per_day:.0f}/day ({ah_flag}) | Reg: {reg_bars_per_day:.0f}/day")
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -449,10 +453,10 @@ def detect_and_handle_missing_bars(df: pd.DataFrame) -> pd.DataFrame:
     sparse_days = ((quality_df["quality_score"] >= 0.5) & (quality_df["quality_score"] < 0.75)).sum()
     poor_days = (quality_df["quality_score"] < 0.5).sum()
 
-    print(f"\n  Data Quality Summary:")
-    print(f"    Good quality (>=75%): {good_days} days")
-    print(f"    Sparse data (50-75%): {sparse_days} days")
-    print(f"    Poor quality (<50%):  {poor_days} days")
+    logger.info(f"\n  Data Quality Summary:")
+    logger.info(f"    Good quality (>=75%): {good_days} days")
+    logger.info(f"    Sparse data (50-75%): {sparse_days} days")
+    logger.info(f"    Poor quality (<50%):  {poor_days} days")
 
     # ─────────────────────────────────────────────────────────────────────────
     # OPTIONAL: FILL SMALL GAPS
@@ -466,7 +470,7 @@ def detect_and_handle_missing_bars(df: pd.DataFrame) -> pd.DataFrame:
         df["low"] = df["low"].ffill(limit=CONFIG["max_gap_minutes"])
         df["volume"] = df["volume"].fillna(0)
 
-    print(f"\n[PASS] Processed {len(df):,} bars, {df['date'].nunique()} trading days")
+    logger.info(f"\n[PASS] Processed {len(df):,} bars, {df['date'].nunique()} trading days")
 
     return df
 
@@ -490,9 +494,9 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
     Note: Calendar/event features (FOMC, opex, NFP/CPI/GDP) are added
     in integrate_anti_overfit() step 6, not here (date-based, no bars needed).
     """
-    print("\n" + "=" * 70)
-    print("STEP 2: COMPREHENSIVE FEATURE ENGINEERING")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 2: COMPREHENSIVE FEATURE ENGINEERING")
+    logger.info("=" * 70)
 
     # First compute 1-min technicals
     df = df.copy()
@@ -544,7 +548,7 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
     trading_days = sorted(df["date"].unique())
     daily_records = []
 
-    print(f"[INFO] Processing {len(trading_days)} trading days...")
+    logger.info(f"[INFO] Processing {len(trading_days)} trading days...")
 
     for i, day in enumerate(trading_days):
         day_data = df[df["date"] == day].sort_values("timestamp")
@@ -784,7 +788,7 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
     result_df = pd.DataFrame(daily_records)
     result_df["date"] = pd.to_datetime(result_df["date"])
 
-    print(f"[PASS] Engineered {len(result_df.columns)} features for {len(result_df)} days")
+    logger.info(f"[PASS] Engineered {len(result_df.columns)} features for {len(result_df)} days")
 
     return result_df
 
@@ -794,9 +798,9 @@ def engineer_all_features(df: pd.DataFrame, swing_threshold: float = 0.003) -> p
 # ═══════════════════════════════════════════════════════════════════════════════
 def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add rolling window statistics."""
-    print("\n" + "=" * 70)
-    print("STEP 3: ADD ROLLING WINDOW FEATURES")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 3: ADD ROLLING WINDOW FEATURES")
+    logger.info("=" * 70)
 
     df = df.sort_values("date").copy()
 
@@ -823,7 +827,7 @@ def add_rolling_features(df: pd.DataFrame) -> pd.DataFrame:
     # Mean reversion indicator
     df["return_zscore_20"] = (df["day_return"].shift(1) - df["return_ma20"]) / (df["return_std20"] + 1e-10)
 
-    print(f"[PASS] Added rolling features. Total features: {len(df.columns)}")
+    logger.info(f"[PASS] Added rolling features. Total features: {len(df.columns)}")
 
     return df
 
@@ -860,10 +864,10 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
     method = CONFIG["dim_reduction_method"]
 
     if fit:
-        print("\n" + "=" * 70)
-        print("STEP 4: ADVANCED DIMENSIONALITY REDUCTION")
-        print("=" * 70)
-        print(f"[INFO] Method: {method.upper()}")
+        logger.info("\n" + "=" * 70)
+        logger.info("STEP 4: ADVANCED DIMENSIONALITY REDUCTION")
+        logger.info("=" * 70)
+        logger.info(f"[INFO] Method: {method.upper()}")
         original_features = X.shape[1]
 
         # ─────────────────────────────────────────────────────────────────────
@@ -873,7 +877,7 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
         X = var_selector.fit_transform(X)
         kept_mask = var_selector.get_support()
         feature_names = [f for f, k in zip(feature_names, kept_mask) if k]
-        print(f"  [Stage 1] Variance threshold: {X.shape[1]} features (removed {original_features - X.shape[1]})")
+        logger.info(f"  [Stage 1] Variance threshold: {X.shape[1]} features (removed {original_features - X.shape[1]})")
 
         state["var_selector"] = var_selector
         state["var_kept_mask"] = kept_mask
@@ -892,7 +896,7 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
         keep_idx = [i for i in range(X.shape[1]) if i not in to_drop]
         X = X[:, keep_idx]
         feature_names = [feature_names[i] for i in keep_idx]
-        print(f"  [Stage 2] Correlation filter: {X.shape[1]} features (removed {len(to_drop)})")
+        logger.info(f"  [Stage 2] Correlation filter: {X.shape[1]} features (removed {len(to_drop)})")
 
         state["corr_keep_idx"] = keep_idx
         state["feature_names_pre_transform"] = feature_names.copy()
@@ -907,7 +911,7 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
         # ─────────────────────────────────────────────────────────────────────
         # STAGE 4: Advanced Dimensionality Reduction
         # ─────────────────────────────────────────────────────────────────────
-        print(f"\n  [Stage 3] Applying {method.upper()} transformation...")
+        logger.info(f"\n  [Stage 3] Applying {method.upper()} transformation...")
 
         if method == "umap":
             X_transformed, feature_names, state = _apply_umap(X_scaled, feature_names, state)
@@ -920,7 +924,7 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
 
         elif method == "mutual_info":
             if y is None:
-                print("  [WARN] mutual_info requires target y, falling back to correlation filter only")
+                logger.warning("  [WARN] mutual_info requires target y, falling back to correlation filter only")
                 X_transformed = X_scaled
             else:
                 X_transformed, feature_names, state = _apply_mutual_info(X_scaled, y, feature_names, state)
@@ -940,11 +944,11 @@ def reduce_dimensions(X: np.ndarray, feature_names: list, y: np.ndarray = None,
             X_transformed, feature_names, state = _apply_ensemble_plus(X_scaled, y, feature_names, state)
 
         else:
-            print(f"  [WARN] Unknown method '{method}', using raw filtered features")
+            logger.warning(f"  [WARN] Unknown method '{method}', using raw filtered features")
             X_transformed = X_scaled
             state["transform_method"] = "none"
 
-        print(f"  [FINAL] Output dimensions: {X_transformed.shape[1]}")
+        logger.info(f"  [FINAL] Output dimensions: {X_transformed.shape[1]}")
         state["feature_names"] = feature_names
         state["method"] = method
 
@@ -1029,7 +1033,7 @@ def _apply_umap(X: np.ndarray, feature_names: list, state: dict):
     try:
         import umap
     except ImportError:
-        print("  [ERROR] umap-learn not installed. Run: pip install umap-learn")
+        logger.error("  [ERROR] umap-learn not installed. Run: pip install umap-learn")
         state["transform_method"] = "none"
         return X, feature_names, state
 
@@ -1049,8 +1053,8 @@ def _apply_umap(X: np.ndarray, feature_names: list, state: dict):
     state["transform_method"] = "umap"
 
     new_feature_names = [f"umap_{i}" for i in range(X_transformed.shape[1])]
-    print(f"    UMAP: {X.shape[1]} -> {X_transformed.shape[1]} components")
-    print(f"    (n_neighbors={CONFIG['umap_n_neighbors']}, min_dist={CONFIG['umap_min_dist']})")
+    logger.info(f"    UMAP: {X.shape[1]} -> {X_transformed.shape[1]} components")
+    logger.info(f"    (n_neighbors={CONFIG['umap_n_neighbors']}, min_dist={CONFIG['umap_min_dist']})")
 
     return X_transformed, new_feature_names, state
 
@@ -1077,7 +1081,7 @@ def _apply_kernel_pca(X: np.ndarray, feature_names: list, state: dict):
     MAX_SAMPLES_FOR_EXACT = 5000
 
     if n_samples > MAX_SAMPLES_FOR_EXACT:
-        print(f"    Using Nystroem approximation ({n_samples} samples > {MAX_SAMPLES_FOR_EXACT})")
+        logger.info(f"    Using Nystroem approximation ({n_samples} samples > {MAX_SAMPLES_FOR_EXACT})")
         try:
             # Use Nystroem to approximate the kernel map, then PCA
             n_nystroem_components = min(1000, n_samples // 5, X.shape[1] * 3)
@@ -1100,12 +1104,12 @@ def _apply_kernel_pca(X: np.ndarray, feature_names: list, state: dict):
             state["transform_method"] = "kernel_pca"
 
             new_feature_names = [f"kpca_{i}" for i in range(X_transformed.shape[1])]
-            print(f"    Nystroem + PCA: {X.shape[1]} -> {n_nystroem_components} -> {X_transformed.shape[1]} components")
+            logger.info(f"    Nystroem + PCA: {X.shape[1]} -> {n_nystroem_components} -> {X_transformed.shape[1]} components")
 
             return X_transformed, new_feature_names, state
 
         except Exception as nystroem_error:
-            print(f"    Nystroem failed: {nystroem_error}, falling back to PCA")
+            logger.info(f"    Nystroem failed: {nystroem_error}, falling back to PCA")
             pca = PCA(n_components=n_components, random_state=42)
             X_transformed = pca.fit_transform(X)
             state["kpca_transformer"] = pca
@@ -1131,8 +1135,8 @@ def _apply_kernel_pca(X: np.ndarray, feature_names: list, state: dict):
         state["transform_method"] = "kernel_pca"
 
         new_feature_names = [f"kpca_{i}" for i in range(X_transformed.shape[1])]
-        print(f"    Kernel PCA ({CONFIG['kpca_kernel']}): {X.shape[1]} -> {X_transformed.shape[1]} components")
-        print(f"    (gamma={CONFIG['kpca_gamma']})")
+        logger.info(f"    Kernel PCA ({CONFIG['kpca_kernel']}): {X.shape[1]} -> {X_transformed.shape[1]} components")
+        logger.info(f"    (gamma={CONFIG['kpca_gamma']})")
 
         return X_transformed, new_feature_names, state
 
@@ -1163,9 +1167,9 @@ def _apply_ica(X: np.ndarray, feature_names: list, state: dict):
         state["ica_transformer"] = ica
         state["transform_method"] = "ica"
         new_feature_names = [f"ica_{i}" for i in range(X_transformed.shape[1])]
-        print(f"    ICA: {X.shape[1]} -> {X_transformed.shape[1]} independent components")
+        logger.info(f"    ICA: {X.shape[1]} -> {X_transformed.shape[1]} independent components")
     except Exception as e:
-        print(f"    [WARN] ICA failed ({e}), using original features")
+        logger.warning(f"    [WARN] ICA failed ({e}), using original features")
         X_transformed = X
         new_feature_names = feature_names
         state["transform_method"] = "ica_failed"
@@ -1203,8 +1207,8 @@ def _apply_mutual_info(X: np.ndarray, y: np.ndarray, feature_names: list, state:
     state["mi_selected_idx"] = top_idx
     state["transform_method"] = "mutual_info"
 
-    print(f"    Mutual Info: {X.shape[1]} -> {X_transformed.shape[1]} features")
-    print(f"    Top 5 by MI: {selected_features[:5]}")
+    logger.info(f"    Mutual Info: {X.shape[1]} -> {X_transformed.shape[1]} features")
+    logger.info(f"    Top 5 by MI: {selected_features[:5]}")
 
     return X_transformed, selected_features, state
 
@@ -1233,13 +1237,13 @@ def _apply_agglomeration(X: np.ndarray, feature_names: list, state: dict):
     state["transform_method"] = "agglomeration"
 
     new_feature_names = [f"cluster_{i}" for i in range(X_transformed.shape[1])]
-    print(f"    Feature Agglomeration: {X.shape[1]} -> {X_transformed.shape[1]} clusters")
+    logger.info(f"    Feature Agglomeration: {X.shape[1]} -> {X_transformed.shape[1]} clusters")
 
     # Show which features went into which cluster
     labels = agglom.labels_
     for c in range(min(5, n_clusters)):
         cluster_features = [f for f, l in zip(feature_names, labels) if l == c]
-        print(f"      Cluster {c}: {cluster_features[:3]}...")
+        logger.info(f"      Cluster {c}: {cluster_features[:3]}...")
 
     return X_transformed, new_feature_names, state
 
@@ -1259,7 +1263,7 @@ def _apply_ensemble(X: np.ndarray, y: np.ndarray, feature_names: list, state: di
       - More robust than single method
       - MI ensures relevance, KernelPCA/ICA capture structure
     """
-    print("    [ENSEMBLE] Combining multiple methods for robustness...")
+    logger.info("    [ENSEMBLE] Combining multiple methods for robustness...")
 
     state["ensemble_components"] = {}
 
@@ -1281,7 +1285,7 @@ def _apply_ensemble(X: np.ndarray, y: np.ndarray, feature_names: list, state: di
         ensemble_names.extend([f"mi_{feature_names[i]}" for i in mi_top_idx])
         state["ensemble_components"]["mi_idx"] = mi_top_idx
         state["ensemble_components"]["mi_scores"] = dict(zip(feature_names, mi_scores))
-        print(f"      Part 1: MI selection -> {X_mi.shape[1]} features")
+        logger.info(f"      Part 1: MI selection -> {X_mi.shape[1]} features")
 
     # Part 2: Kernel PCA components (with Nystroem for large datasets)
     if X.shape[1] >= kpca_components and X.shape[0] > kpca_components:
@@ -1305,7 +1309,7 @@ def _apply_ensemble(X: np.ndarray, y: np.ndarray, feature_names: list, state: di
                 state["ensemble_components"]["kpca_nystroem"] = nystroem
                 state["ensemble_components"]["kpca_pca"] = pca
                 state["ensemble_components"]["kpca_use_nystroem"] = True
-                print(f"      Part 2: Nystroem+PCA -> {X_kpca.shape[1]} components (approx)")
+                logger.info(f"      Part 2: Nystroem+PCA -> {X_kpca.shape[1]} components (approx)")
             else:
                 # Standard Kernel PCA for smaller datasets
                 from sklearn.decomposition import KernelPCA
@@ -1315,9 +1319,9 @@ def _apply_ensemble(X: np.ndarray, y: np.ndarray, feature_names: list, state: di
                 ensemble_names.extend([f"kpca_{i}" for i in range(X_kpca.shape[1])])
                 state["ensemble_components"]["kpca"] = kpca
                 state["ensemble_components"]["kpca_use_nystroem"] = False
-                print(f"      Part 2: Kernel PCA -> {X_kpca.shape[1]} components")
+                logger.info(f"      Part 2: Kernel PCA -> {X_kpca.shape[1]} components")
         except Exception as e:
-            print(f"      Part 2: Kernel PCA failed ({e})")
+            logger.info(f"      Part 2: Kernel PCA failed ({e})")
 
     # Part 3: ICA components
     if X.shape[1] >= ica_components:
@@ -1328,17 +1332,17 @@ def _apply_ensemble(X: np.ndarray, y: np.ndarray, feature_names: list, state: di
             ensemble_parts.append(X_ica)
             ensemble_names.extend([f"ica_{i}" for i in range(X_ica.shape[1])])
             state["ensemble_components"]["ica"] = ica
-            print(f"      Part 3: ICA -> {X_ica.shape[1]} components")
+            logger.info(f"      Part 3: ICA -> {X_ica.shape[1]} components")
         except Exception as e:
-            print(f"      Part 3: ICA failed ({e})")
+            logger.info(f"      Part 3: ICA failed ({e})")
 
     if len(ensemble_parts) == 0:
-        print("      [WARN] No ensemble components created, using original")
+        logger.warning("      [WARN] No ensemble components created, using original")
         X_transformed = X
         ensemble_names = feature_names
     else:
         X_transformed = np.hstack(ensemble_parts)
-        print(f"    [ENSEMBLE] Combined: {X_transformed.shape[1]} total dimensions")
+        logger.info(f"    [ENSEMBLE] Combined: {X_transformed.shape[1]} total dimensions")
 
     state["transform_method"] = "ensemble"
     return X_transformed, ensemble_names, state
@@ -1359,19 +1363,19 @@ def _apply_ensemble_transform(X: np.ndarray, state: dict) -> np.ndarray:
             X_approx = components["kpca_nystroem"].transform(X)
             parts.append(components["kpca_pca"].transform(X_approx))
         except (ValueError, RuntimeError) as e:
-            print(f"  [WARN] Nystroem KPCA transform failed: {e}")
+            logger.warning(f"  [WARN] Nystroem KPCA transform failed: {e}")
     elif "kpca" in components:
         try:
             parts.append(components["kpca"].transform(X))
         except (ValueError, RuntimeError) as e:
-            print(f"  [WARN] KPCA transform failed: {e}")
+            logger.warning(f"  [WARN] KPCA transform failed: {e}")
 
     # Part 3: ICA
     if "ica" in components:
         try:
             parts.append(components["ica"].transform(X))
         except (ValueError, RuntimeError) as e:
-            print(f"  [WARN] ICA transform failed: {e}")
+            logger.warning(f"  [WARN] ICA transform failed: {e}")
 
     # Part 4: K-Medoids (if present in ensemble_plus)
     if "kmedoids_labels" in components:
@@ -1399,7 +1403,7 @@ def _apply_kmedoids(X: np.ndarray, feature_names: list, state: dict):
     try:
         from sklearn_extra.cluster import KMedoids
     except ImportError:
-        print("  [ERROR] scikit-learn-extra not installed. Run: pip install scikit-learn-extra")
+        logger.error("  [ERROR] scikit-learn-extra not installed. Run: pip install scikit-learn-extra")
         state["transform_method"] = "none"
         return X, feature_names, state
 
@@ -1426,8 +1430,8 @@ def _apply_kmedoids(X: np.ndarray, feature_names: list, state: dict):
     state["transform_method"] = "kmedoids"
 
     new_feature_names = [f"medoid_dist_{i}" for i in range(n_clusters)]
-    print(f"    K-Medoids: {X.shape[1]} features -> {n_clusters} medoid distances")
-    print(f"    (metric={CONFIG['kmedoids_metric']}, iterations={CONFIG['kmedoids_max_iter']})")
+    logger.info(f"    K-Medoids: {X.shape[1]} features -> {n_clusters} medoid distances")
+    logger.info(f"    (metric={CONFIG['kmedoids_metric']}, iterations={CONFIG['kmedoids_max_iter']})")
 
     return X_transformed, new_feature_names, state
 
@@ -1441,7 +1445,7 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
       2. More components for richer representation
       3. Quality-weighted combination
     """
-    print("    [ENSEMBLE+] Advanced multi-method combination...")
+    logger.info("    [ENSEMBLE+] Advanced multi-method combination...")
 
     state["ensemble_components"] = {}
 
@@ -1464,7 +1468,7 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
         ensemble_names.extend([f"mi_{feature_names[i]}" for i in mi_top_idx])
         state["ensemble_components"]["mi_idx"] = mi_top_idx
         state["ensemble_components"]["mi_scores"] = dict(zip(feature_names, mi_scores))
-        print(f"      Part 1: MI selection -> {X_mi.shape[1]} features")
+        logger.info(f"      Part 1: MI selection -> {X_mi.shape[1]} features")
 
     # Part 2: Kernel PCA components (with Nystroem for large datasets)
     if X.shape[1] >= kpca_components and X.shape[0] > kpca_components:
@@ -1488,7 +1492,7 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
                 state["ensemble_components"]["kpca_nystroem"] = nystroem
                 state["ensemble_components"]["kpca_pca"] = pca
                 state["ensemble_components"]["kpca_use_nystroem"] = True
-                print(f"      Part 2: Nystroem+PCA -> {X_kpca.shape[1]} components (approx)")
+                logger.info(f"      Part 2: Nystroem+PCA -> {X_kpca.shape[1]} components (approx)")
             else:
                 # Standard Kernel PCA for smaller datasets
                 from sklearn.decomposition import KernelPCA
@@ -1498,9 +1502,9 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
                 ensemble_names.extend([f"kpca_{i}" for i in range(X_kpca.shape[1])])
                 state["ensemble_components"]["kpca"] = kpca
                 state["ensemble_components"]["kpca_use_nystroem"] = False
-                print(f"      Part 2: Kernel PCA -> {X_kpca.shape[1]} components")
+                logger.info(f"      Part 2: Kernel PCA -> {X_kpca.shape[1]} components")
         except Exception as e:
-            print(f"      Part 2: Kernel PCA failed ({e})")
+            logger.info(f"      Part 2: Kernel PCA failed ({e})")
 
     # Part 3: ICA components
     if X.shape[1] >= ica_components:
@@ -1511,9 +1515,9 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
             ensemble_parts.append(X_ica)
             ensemble_names.extend([f"ica_{i}" for i in range(X_ica.shape[1])])
             state["ensemble_components"]["ica"] = ica
-            print(f"      Part 3: ICA -> {X_ica.shape[1]} components")
+            logger.info(f"      Part 3: ICA -> {X_ica.shape[1]} components")
         except Exception as e:
-            print(f"      Part 3: ICA failed ({e})")
+            logger.info(f"      Part 3: ICA failed ({e})")
 
     # Part 4: K-Medoids distances (NEW)
     if X.shape[0] >= kmedoids_clusters * 5:
@@ -1528,17 +1532,17 @@ def _apply_ensemble_plus(X: np.ndarray, y: np.ndarray, feature_names: list, stat
             ensemble_names.extend([f"medoid_{i}" for i in range(kmedoids_clusters)])
             state["ensemble_components"]["kmedoids_medoids"] = medoids
             state["ensemble_components"]["kmedoids_labels"] = kmedoids.labels_
-            print(f"      Part 4: K-Medoids -> {kmedoids_clusters} medoid distances")
+            logger.info(f"      Part 4: K-Medoids -> {kmedoids_clusters} medoid distances")
         except Exception as e:
-            print(f"      Part 4: K-Medoids failed ({e})")
+            logger.info(f"      Part 4: K-Medoids failed ({e})")
 
     if len(ensemble_parts) == 0:
-        print("      [WARN] No ensemble components created, using original")
+        logger.warning("      [WARN] No ensemble components created, using original")
         X_transformed = X
         ensemble_names = feature_names
     else:
         X_transformed = np.hstack(ensemble_parts)
-        print(f"    [ENSEMBLE+] Combined: {X_transformed.shape[1]} total dimensions")
+        logger.info(f"    [ENSEMBLE+] Combined: {X_transformed.shape[1]} total dimensions")
 
     state["transform_method"] = "ensemble_plus"
     return X_transformed, ensemble_names, state
@@ -1556,9 +1560,9 @@ def create_soft_targets(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
       2. Label smoothing
       3. Confidence weighting
     """
-    print("\n" + "=" * 70)
-    print("STEP 5: CREATE SOFT TARGETS (EDGE 4)")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 5: CREATE SOFT TARGETS (EDGE 4)")
+    logger.info("=" * 70)
 
     df = df.copy()
 
@@ -1582,9 +1586,9 @@ def create_soft_targets(df: pd.DataFrame, threshold: float) -> pd.DataFrame:
     time_diff = np.abs(df["high_minutes"] - df["low_minutes"])
     df["timing_weight"] = np.clip(time_diff / 200, 0.3, 1.0)  # More confident when high/low far apart
 
-    print(f"[PASS] Created soft targets")
-    print(f"       Soft target range: [{df['soft_target_up'].min():.3f}, {df['soft_target_up'].max():.3f}]")
-    print(f"       Avg sample weight: {df['sample_weight'].mean():.3f}")
+    logger.info(f"[PASS] Created soft targets")
+    logger.info(f"       Soft target range: [{df['soft_target_up'].min():.3f}, {df['soft_target_up'].max():.3f}]")
+    logger.info(f"       Avg sample weight: {df['sample_weight'].mean():.3f}")
 
     return df
 
@@ -1639,9 +1643,9 @@ def compute_feature_robustness(X, y, feature_names):
       - Has consistent sign across different C values
       - Has stable magnitude
     """
-    print("\n" + "=" * 70)
-    print("STEP 7: FEATURE ROBUSTNESS SCORING (EDGE 1)")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 7: FEATURE ROBUSTNESS SCORING (EDGE 1)")
+    logger.info("=" * 70)
 
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -1693,13 +1697,13 @@ def compute_feature_robustness(X, y, feature_names):
 
     robustness_df = pd.DataFrame(robustness_scores).sort_values("robustness", ascending=False)
 
-    print(f"\n  Top 15 robust features:")
+    logger.info(f"\n  Top 15 robust features:")
     for i, row in robustness_df.head(15).iterrows():
-        print(f"    {row['feature']}: {row['robustness']:.3f} (surv={row['survival_rate']:.2f}, sign={row['sign_consistency']:.2f})")
+        logger.info(f"    {row['feature']}: {row['robustness']:.3f} (surv={row['survival_rate']:.2f}, sign={row['sign_consistency']:.2f})")
 
     # Filter to robust features only
     robust_features = robustness_df[robustness_df["robustness"] >= 0.3]["feature"].tolist()
-    print(f"\n  Robust features (score >= 0.3): {len(robust_features)}")
+    logger.info(f"\n  Robust features (score >= 0.3): {len(robust_features)}")
 
     return robustness_df, robust_features
 
@@ -1709,9 +1713,9 @@ def compute_feature_robustness(X, y, feature_names):
 # ═══════════════════════════════════════════════════════════════════════════════
 def train_with_cv(X, y, weights, feature_names, model_name="swing"):
     """Train models using purged CV and multiple regularization methods."""
-    print(f"\n" + "=" * 70)
-    print(f"TRAINING {model_name.upper()} MODEL WITH PURGED CV")
-    print("=" * 70)
+    logger.info(f"\n" + "=" * 70)
+    logger.info(f"TRAINING {model_name.upper()} MODEL WITH PURGED CV")
+    logger.info("=" * 70)
 
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression, ElasticNet
@@ -1724,7 +1728,7 @@ def train_with_cv(X, y, weights, feature_names, model_name="swing"):
                             purge_days=CONFIG["purge_days"],
                             embargo_days=CONFIG["embargo_days"])
 
-    print(f"[INFO] {len(folds)} CV folds with purge={CONFIG['purge_days']}, embargo={CONFIG['embargo_days']}")
+    logger.info(f"[INFO] {len(folds)} CV folds with purge={CONFIG['purge_days']}, embargo={CONFIG['embargo_days']}")
 
     results = {"l1": [], "l2": [], "elastic": [], "gb": []}
 
@@ -1769,17 +1773,17 @@ def train_with_cv(X, y, weights, feature_names, model_name="swing"):
         results["gb"].append(auc_gb)
 
     # Print CV results
-    print(f"\n  Cross-validation AUC (mean +/- std):")
+    logger.info(f"\n  Cross-validation AUC (mean +/- std):")
     for method, aucs in results.items():
-        print(f"    {method.upper():10s}: {np.mean(aucs):.3f} +/- {np.std(aucs):.3f}")
+        logger.info(f"    {method.upper():10s}: {np.mean(aucs):.3f} +/- {np.std(aucs):.3f}")
 
     # Select best method
     if not results:
-        print("  [WARN] No CV results available, defaulting to L2")
+        logger.warning("  [WARN] No CV results available, defaulting to L2")
         return {"l2": [0.5], "gb": [0.5]}, "l2"
 
     best_method = max(results.keys(), key=lambda k: np.mean(results[k]))
-    print(f"\n  Best method: {best_method.upper()} (AUC = {np.mean(results[best_method]):.3f})")
+    logger.info(f"\n  Best method: {best_method.upper()} (AUC = {np.mean(results[best_method]):.3f})")
 
     return results, best_method
 
@@ -1798,18 +1802,18 @@ def optimize_hyperparameters_optuna(X, y, weights, feature_names):
       - Handles continuous and categorical params
     """
     if not CONFIG["use_optuna"]:
-        print("\n[INFO] Optuna disabled in config, using default hyperparameters")
+        logger.info("\n[INFO] Optuna disabled in config, using default hyperparameters")
         return get_default_hyperparameters()
 
-    print("\n" + "=" * 70)
-    print("STEP 8B: INTELLIGENT HYPERPARAMETER OPTIMIZATION (OPTUNA)")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 8B: INTELLIGENT HYPERPARAMETER OPTIMIZATION (OPTUNA)")
+    logger.info("=" * 70)
 
     try:
         import optuna
         from optuna.samplers import TPESampler, CmaEsSampler, RandomSampler
     except ImportError:
-        print("[WARN] Optuna not installed, using default hyperparameters")
+        logger.warning("[WARN] Optuna not installed, using default hyperparameters")
         return get_default_hyperparameters()
 
     # Suppress Optuna logging
@@ -1907,8 +1911,8 @@ def optimize_hyperparameters_optuna(X, y, weights, feature_names):
     n_trials = CONFIG["optuna_n_trials"]
     timeout = CONFIG.get("optuna_timeout", 300)
 
-    print(f"[INFO] Running {n_trials} Optuna trials (timeout: {timeout}s)...")
-    print(f"[INFO] Sampler: {sampler_name.upper()}")
+    logger.info(f"[INFO] Running {n_trials} Optuna trials (timeout: {timeout}s)...")
+    logger.info(f"[INFO] Sampler: {sampler_name.upper()}")
 
     study.optimize(
         objective,
@@ -1922,20 +1926,20 @@ def optimize_hyperparameters_optuna(X, y, weights, feature_names):
     best_params = study.best_params
     best_value = study.best_value
 
-    print(f"\n[OPTUNA RESULTS]")
-    print(f"  Best AUC: {best_value:.4f}")
-    print(f"  Best parameters:")
+    logger.info(f"\n[OPTUNA RESULTS]")
+    logger.info(f"  Best AUC: {best_value:.4f}")
+    logger.info(f"  Best parameters:")
     for param, value in best_params.items():
-        print(f"    {param}: {value:.4f}" if isinstance(value, float) else f"    {param}: {value}")
+        logger.info(f"    {param}: {value:.4f}" if isinstance(value, float) else f"    {param}: {value}")
 
     # Show optimization history
     completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
     if len(completed_trials) > 0:
         trial_aucs = [t.value for t in completed_trials]
-        print(f"\n  Trial statistics:")
-        print(f"    Completed: {len(completed_trials)}/{n_trials}")
-        print(f"    AUC range: [{min(trial_aucs):.4f}, {max(trial_aucs):.4f}]")
-        print(f"    Improvement: {max(trial_aucs) - min(trial_aucs):.4f}")
+        logger.info(f"\n  Trial statistics:")
+        logger.info(f"    Completed: {len(completed_trials)}/{n_trials}")
+        logger.info(f"    AUC range: [{min(trial_aucs):.4f}, {max(trial_aucs):.4f}]")
+        logger.info(f"    Improvement: {max(trial_aucs) - min(trial_aucs):.4f}")
 
     return best_params
 
@@ -1969,9 +1973,9 @@ def train_final_models_from_arrays(
 
     Uses Optuna-optimized hyperparameters if provided.
     """
-    print("\n" + "=" * 70)
-    print("STEP 9: TRAIN FINAL PRODUCTION MODELS")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 9: TRAIN FINAL PRODUCTION MODELS")
+    logger.info("=" * 70)
 
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -1982,15 +1986,15 @@ def train_final_models_from_arrays(
     if best_params is None:
         best_params = get_default_hyperparameters()
 
-    print(f"[INFO] Using hyperparameters:")
-    print(f"       L2 C: {best_params.get('l2_C', 0.5):.4f}")
-    print(f"       GB n_estimators: {best_params.get('gb_n_estimators', 50)}")
-    print(f"       GB max_depth: {best_params.get('gb_max_depth', 3)}")
-    print(f"       GB learning_rate: {best_params.get('gb_learning_rate', 0.1):.4f}")
+    logger.info(f"[INFO] Using hyperparameters:")
+    logger.info(f"       L2 C: {best_params.get('l2_C', 0.5):.4f}")
+    logger.info(f"       GB n_estimators: {best_params.get('gb_n_estimators', 50)}")
+    logger.info(f"       GB max_depth: {best_params.get('gb_max_depth', 3)}")
+    logger.info(f"       GB learning_rate: {best_params.get('gb_learning_rate', 0.1):.4f}")
 
     n_samples = len(X)
-    print(f"[INFO] Total samples: {n_samples}")
-    print(f"[INFO] Features: {X.shape[1]} (transformed)")
+    logger.info(f"[INFO] Total samples: {n_samples}")
+    logger.info(f"[INFO] Features: {X.shape[1]} (transformed)")
 
     # Time-series split with purge
     split_idx = int(n_samples * 0.8)
@@ -2005,7 +2009,7 @@ def train_final_models_from_arrays(
     w_swing_train = swing_weights[train_idx]
     w_timing_train = timing_weights[train_idx]
 
-    print(f"[INFO] Train: {len(train_idx)}, Test: {len(test_idx)}")
+    logger.info(f"[INFO] Train: {len(train_idx)}, Test: {len(test_idx)}")
 
     # Standardize
     scaler = StandardScaler()
@@ -2018,7 +2022,7 @@ def train_final_models_from_arrays(
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 1: SWING DIRECTION (using optimized hyperparameters)
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[MODEL 1: SWING DIRECTION]")
+    logger.info("\n[MODEL 1: SWING DIRECTION]")
 
     # Ensemble of L2 + GB with optimized params
     model_l2 = LogisticRegression(
@@ -2048,8 +2052,8 @@ def train_final_models_from_arrays(
     auc_swing = roc_auc_score(y_swing_test, proba_swing) if len(np.unique(y_swing_test)) > 1 else 0.5
     acc_swing = accuracy_score(y_swing_test, pred_swing)
 
-    print(f"  AUC: {auc_swing:.3f}, Accuracy: {acc_swing:.3f}")
-    print(classification_report(y_swing_test, pred_swing, target_names=["Down/Flat", "Up"]))
+    logger.info(f"  AUC: {auc_swing:.3f}, Accuracy: {acc_swing:.3f}")
+    logger.info(classification_report(y_swing_test, pred_swing, target_names=["Down/Flat", "Up"]))
 
     models["swing"] = {"l2": model_l2, "gb": model_gb}
     results["swing"] = {"auc": auc_swing, "accuracy": acc_swing}
@@ -2066,17 +2070,17 @@ def train_final_models_from_arrays(
             )
             if bma_swing._fitted:
                 bma_weights = bma_swing.get_weights()
-                print(f"  [BMA] Swing weights: L2={bma_weights.get('l2', 0):.3f}, GB={bma_weights.get('gb', 0):.3f}")
+                logger.info(f"  [BMA] Swing weights: L2={bma_weights.get('l2', 0):.3f}, GB={bma_weights.get('gb', 0):.3f}")
             else:
                 bma_swing = None
         except Exception as bma_err:
-            print(f"  [BMA] Swing BMA skipped: {bma_err}")
+            logger.info(f"  [BMA] Swing BMA skipped: {bma_err}")
             bma_swing = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 2: TIMING
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[MODEL 2: ENTRY/EXIT TIMING]")
+    logger.info("\n[MODEL 2: ENTRY/EXIT TIMING]")
 
     model_timing_l2 = LogisticRegression(penalty="l2", C=0.5, max_iter=2000, random_state=42)
     model_timing_l2.fit(X_train_scaled, y_timing_train, sample_weight=w_timing_train)
@@ -2095,8 +2099,8 @@ def train_final_models_from_arrays(
     auc_timing = roc_auc_score(y_timing_test, proba_timing) if len(np.unique(y_timing_test)) > 1 else 0.5
     acc_timing = accuracy_score(y_timing_test, pred_timing)
 
-    print(f"  AUC: {auc_timing:.3f}, Accuracy: {acc_timing:.3f}")
-    print(classification_report(y_timing_test, pred_timing, target_names=["High First", "Low First"]))
+    logger.info(f"  AUC: {auc_timing:.3f}, Accuracy: {acc_timing:.3f}")
+    logger.info(classification_report(y_timing_test, pred_timing, target_names=["High First", "Low First"]))
 
     models["timing"] = {"l2": model_timing_l2, "gb": model_timing_gb}
     results["timing"] = {"auc": auc_timing, "accuracy": acc_timing}
@@ -2113,11 +2117,11 @@ def train_final_models_from_arrays(
             )
             if bma_timing._fitted:
                 tw = bma_timing.get_weights()
-                print(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
+                logger.info(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
             else:
                 bma_timing = None
         except Exception as bma_err:
-            print(f"  [BMA] Timing BMA skipped: {bma_err}")
+            logger.info(f"  [BMA] Timing BMA skipped: {bma_err}")
             bma_timing = None
 
     # Save BMA weights in models dict (serialise weights only, not model refs)
@@ -2129,7 +2133,7 @@ def train_final_models_from_arrays(
     # ─────────────────────────────────────────────────────────────────────────
     # COMBINED SIGNALS
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[COMBINED SIGNAL ANALYSIS]")
+    logger.info("\n[COMBINED SIGNAL ANALYSIS]")
 
     buy_signals = (pred_swing == 1) & (pred_timing == 1)
     sell_signals = (pred_swing == 0) & (pred_timing == 0)
@@ -2138,24 +2142,24 @@ def train_final_models_from_arrays(
     test_df = df_clean.iloc[test_idx]
     test_returns = test_df["day_return"].values
 
-    print(f"  Test days: {len(test_idx)}")
-    print(f"  Buy signals:  {buy_signals.sum()} ({100*buy_signals.mean():.1f}%)")
-    print(f"  Sell signals: {sell_signals.sum()} ({100*sell_signals.mean():.1f}%)")
+    logger.info(f"  Test days: {len(test_idx)}")
+    logger.info(f"  Buy signals:  {buy_signals.sum()} ({100*buy_signals.mean():.1f}%)")
+    logger.info(f"  Sell signals: {sell_signals.sum()} ({100*sell_signals.mean():.1f}%)")
 
     if buy_signals.sum() > 0:
         buy_returns = test_returns[buy_signals]
-        print(f"\n  BUY PERFORMANCE:")
-        print(f"    Win rate: {100*(buy_returns > 0).mean():.1f}%")
-        print(f"    Avg return: {100*buy_returns.mean():.3f}%")
-        print(f"    Total return: {100*buy_returns.sum():.2f}%")
+        logger.info(f"\n  BUY PERFORMANCE:")
+        logger.info(f"    Win rate: {100*(buy_returns > 0).mean():.1f}%")
+        logger.info(f"    Avg return: {100*buy_returns.mean():.3f}%")
+        logger.info(f"    Total return: {100*buy_returns.sum():.2f}%")
         results["buy_win_rate"] = (buy_returns > 0).mean()
         results["buy_avg_return"] = buy_returns.mean()
 
     if sell_signals.sum() > 0:
         sell_returns = test_returns[sell_signals]
-        print(f"\n  SELL PERFORMANCE:")
-        print(f"    Win rate (for shorts): {100*(sell_returns < 0).mean():.1f}%")
-        print(f"    Avg return: {100*sell_returns.mean():.3f}%")
+        logger.info(f"\n  SELL PERFORMANCE:")
+        logger.info(f"    Win rate (for shorts): {100*(sell_returns < 0).mean():.1f}%")
+        logger.info(f"    Avg return: {100*sell_returns.mean():.3f}%")
         results["sell_win_rate"] = (sell_returns < 0).mean()
 
     return models, results, scaler, test_idx, proba_swing, proba_timing
@@ -2164,9 +2168,9 @@ def train_final_models_from_arrays(
 # Legacy function for backward compatibility
 def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     """Train final production models."""
-    print("\n" + "=" * 70)
-    print("STEP 9: TRAIN FINAL PRODUCTION MODELS")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 9: TRAIN FINAL PRODUCTION MODELS")
+    logger.info("=" * 70)
 
     from sklearn.preprocessing import StandardScaler
     from sklearn.linear_model import LogisticRegression
@@ -2174,14 +2178,14 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     from sklearn.metrics import roc_auc_score, accuracy_score, classification_report
 
     df_clean = df.dropna(subset=feature_cols + ["target_up", "target_timing"]).copy()
-    print(f"[INFO] Clean samples: {len(df_clean)}")
+    logger.info(f"[INFO] Clean samples: {len(df_clean)}")
 
     # Time-series split
     split_idx = int(len(df_clean) * 0.8)
     train_df = df_clean.iloc[:split_idx - CONFIG["purge_days"]]
     test_df = df_clean.iloc[split_idx:]
 
-    print(f"[INFO] Train: {len(train_df)}, Test: {len(test_df)}")
+    logger.info(f"[INFO] Train: {len(train_df)}, Test: {len(test_df)}")
 
     X_train = train_df[feature_cols].values
     X_test = test_df[feature_cols].values
@@ -2196,7 +2200,7 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 1: SWING DIRECTION
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[MODEL 1: SWING DIRECTION]")
+    logger.info("\n[MODEL 1: SWING DIRECTION]")
 
     y_train = train_df["target_up"].astype(int).values
     y_test = test_df["target_up"].astype(int).values
@@ -2221,8 +2225,8 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     auc_swing = roc_auc_score(y_test, proba_swing) if len(np.unique(y_test)) > 1 else 0.5
     acc_swing = accuracy_score(y_test, pred_swing)
 
-    print(f"  AUC: {auc_swing:.3f}, Accuracy: {acc_swing:.3f}")
-    print(classification_report(y_test, pred_swing, target_names=["Down/Flat", "Up"]))
+    logger.info(f"  AUC: {auc_swing:.3f}, Accuracy: {acc_swing:.3f}")
+    logger.info(classification_report(y_test, pred_swing, target_names=["Down/Flat", "Up"]))
 
     models["swing"] = {"l2": model_l2, "gb": model_gb}
     results["swing"] = {"auc": auc_swing, "accuracy": acc_swing}
@@ -2236,17 +2240,17 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
             bma_swing.fit({"l2": model_l2, "gb": model_gb}, X_test_scaled, y_test)
             if bma_swing._fitted:
                 sw = bma_swing.get_weights()
-                print(f"  [BMA] Swing weights: L2={sw.get('l2', 0):.3f}, GB={sw.get('gb', 0):.3f}")
+                logger.info(f"  [BMA] Swing weights: L2={sw.get('l2', 0):.3f}, GB={sw.get('gb', 0):.3f}")
             else:
                 bma_swing = None
         except Exception as bma_err:
-            print(f"  [BMA] Swing BMA skipped: {bma_err}")
+            logger.info(f"  [BMA] Swing BMA skipped: {bma_err}")
             bma_swing = None
 
     # ─────────────────────────────────────────────────────────────────────────
     # MODEL 2: TIMING
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[MODEL 2: ENTRY/EXIT TIMING]")
+    logger.info("\n[MODEL 2: ENTRY/EXIT TIMING]")
 
     y_train = train_df["target_timing"].astype(int).values
     y_test = test_df["target_timing"].astype(int).values
@@ -2269,8 +2273,8 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     auc_timing = roc_auc_score(y_test, proba_timing) if len(np.unique(y_test)) > 1 else 0.5
     acc_timing = accuracy_score(y_test, pred_timing)
 
-    print(f"  AUC: {auc_timing:.3f}, Accuracy: {acc_timing:.3f}")
-    print(classification_report(y_test, pred_timing, target_names=["High First", "Low First"]))
+    logger.info(f"  AUC: {auc_timing:.3f}, Accuracy: {acc_timing:.3f}")
+    logger.info(classification_report(y_test, pred_timing, target_names=["High First", "Low First"]))
 
     models["timing"] = {"l2": model_timing_l2, "gb": model_timing_gb}
     results["timing"] = {"auc": auc_timing, "accuracy": acc_timing}
@@ -2284,11 +2288,11 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
             bma_timing.fit({"l2": model_timing_l2, "gb": model_timing_gb}, X_test_scaled, y_test)
             if bma_timing._fitted:
                 tw = bma_timing.get_weights()
-                print(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
+                logger.info(f"  [BMA] Timing weights: L2={tw.get('l2', 0):.3f}, GB={tw.get('gb', 0):.3f}")
             else:
                 bma_timing = None
         except Exception as bma_err:
-            print(f"  [BMA] Timing BMA skipped: {bma_err}")
+            logger.info(f"  [BMA] Timing BMA skipped: {bma_err}")
             bma_timing = None
 
     # Save BMA weights in models dict (serialise weights only, not model refs)
@@ -2300,31 +2304,31 @@ def train_final_models(df: pd.DataFrame, feature_cols: list, threshold: float):
     # ─────────────────────────────────────────────────────────────────────────
     # COMBINED SIGNALS
     # ─────────────────────────────────────────────────────────────────────────
-    print("\n[COMBINED SIGNAL ANALYSIS]")
+    logger.info("\n[COMBINED SIGNAL ANALYSIS]")
 
     buy_signals = (pred_swing == 1) & (pred_timing == 1)
     sell_signals = (pred_swing == 0) & (pred_timing == 0)
 
     test_returns = test_df["day_return"].values
 
-    print(f"  Test days: {len(test_df)}")
-    print(f"  Buy signals:  {buy_signals.sum()} ({100*buy_signals.mean():.1f}%)")
-    print(f"  Sell signals: {sell_signals.sum()} ({100*sell_signals.mean():.1f}%)")
+    logger.info(f"  Test days: {len(test_df)}")
+    logger.info(f"  Buy signals:  {buy_signals.sum()} ({100*buy_signals.mean():.1f}%)")
+    logger.info(f"  Sell signals: {sell_signals.sum()} ({100*sell_signals.mean():.1f}%)")
 
     if buy_signals.sum() > 0:
         buy_returns = test_returns[buy_signals]
-        print(f"\n  BUY PERFORMANCE:")
-        print(f"    Win rate: {100*(buy_returns > 0).mean():.1f}%")
-        print(f"    Avg return: {100*buy_returns.mean():.3f}%")
-        print(f"    Total return: {100*buy_returns.sum():.2f}%")
+        logger.info(f"\n  BUY PERFORMANCE:")
+        logger.info(f"    Win rate: {100*(buy_returns > 0).mean():.1f}%")
+        logger.info(f"    Avg return: {100*buy_returns.mean():.3f}%")
+        logger.info(f"    Total return: {100*buy_returns.sum():.2f}%")
         results["buy_win_rate"] = (buy_returns > 0).mean()
         results["buy_avg_return"] = buy_returns.mean()
 
     if sell_signals.sum() > 0:
         sell_returns = test_returns[sell_signals]
-        print(f"\n  SELL PERFORMANCE:")
-        print(f"    Win rate (for shorts): {100*(sell_returns < 0).mean():.1f}%")
-        print(f"    Avg return: {100*sell_returns.mean():.3f}%")
+        logger.info(f"\n  SELL PERFORMANCE:")
+        logger.info(f"    Win rate (for shorts): {100*(sell_returns < 0).mean():.1f}%")
+        logger.info(f"    Avg return: {100*sell_returns.mean():.3f}%")
         results["sell_win_rate"] = (sell_returns < 0).mean()
 
     return models, results, scaler, test_df, proba_swing, proba_timing
@@ -2341,7 +2345,7 @@ def _save_versioned_model(models_dir: Path, base_name: str, save_dict: dict, max
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     versioned_path = models_dir / f"{base_name}_{timestamp}.joblib"
     _jl.dump(save_dict, versioned_path)
-    print(f"  [VERSION] Backup saved: {versioned_path.name}")
+    logger.info(f"  [VERSION] Backup saved: {versioned_path.name}")
 
     # Prune old versions
     versions = sorted(models_dir.glob(f"{base_name}_*.joblib"))
@@ -2349,7 +2353,7 @@ def _save_versioned_model(models_dir: Path, base_name: str, save_dict: dict, max
         oldest = versions.pop(0)
         try:
             oldest.unlink()
-            print(f"  [VERSION] Pruned old backup: {oldest.name}")
+            logger.info(f"  [VERSION] Pruned old backup: {oldest.name}")
         except OSError:
             pass
 
@@ -2359,9 +2363,9 @@ def _save_versioned_model(models_dir: Path, base_name: str, save_dict: dict, max
 # ═══════════════════════════════════════════════════════════════════════════════
 def save_models(models, results, scaler, feature_cols, best_threshold, robustness_df, dim_state, entry_exit_model=None):
     """Save all models and metadata."""
-    print("\n" + "=" * 70)
-    print("STEP 10: SAVE MODELS")
-    print("=" * 70)
+    logger.info("\n" + "=" * 70)
+    logger.info("STEP 10: SAVE MODELS")
+    logger.info("=" * 70)
 
     import joblib
 
@@ -2389,13 +2393,13 @@ def save_models(models, results, scaler, feature_cols, best_threshold, robustnes
 
     # Save main model bundle (canonical path for loading)
     joblib.dump(save_dict, model_path)
-    print(f"[PASS] Main models saved to {model_path}")
+    logger.info(f"[PASS] Main models saved to {model_path}")
 
     # Save entry/exit timing model separately (it's more complex)
     if entry_exit_model is not None:
         entry_exit_path = models_dir / "entry_exit_timing_model.joblib"
         entry_exit_model.save(str(entry_exit_path))
-        print(f"[PASS] Entry/Exit Timing Model saved to {entry_exit_path}")
+        logger.info(f"[PASS] Entry/Exit Timing Model saved to {entry_exit_path}")
 
     return model_path
 
@@ -2404,28 +2408,28 @@ def save_models(models, results, scaler, feature_cols, best_threshold, robustnes
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════════
 def main():
-    print("\n" + "=" * 70)
-    print("GIGA TRADER - ROBUST MODEL TRAINING v2.0")
-    print("=" * 70)
-    print(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    print("Configuration:")
-    print(f"  Data: {CONFIG['years_to_download']} years of 1-minute data")
-    print(f"  Dim Reduction: {CONFIG['dim_reduction_method'].upper()}")
-    print(f"  Optuna HP Optimization: {'ENABLED' if CONFIG['use_optuna'] else 'DISABLED'}")
-    print()
-    print("Edge Strategies Implemented:")
-    print("  EDGE 1: Regularization-first + feature robustness scoring")
-    print("  EDGE 2: Comprehensive extended hours features")
-    print("  EDGE 3: Grid-searched intraday opportunities")
-    print("  EDGE 4: Soft targets + confidence weighting")
-    print("  EDGE 5: Combined signals for batch scaling")
-    print()
-    print("Advanced Methods:")
-    print("  - K-Medoids clustering (outlier-robust)")
-    print("  - Optuna Bayesian hyperparameter optimization")
-    print("  - Missing bar detection and handling")
-    print("  - Multi-year extended hours analysis")
+    logger.info("\n" + "=" * 70)
+    logger.info("GIGA TRADER - ROBUST MODEL TRAINING v2.0")
+    logger.info("=" * 70)
+    logger.info(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info()
+    logger.info("Configuration:")
+    logger.info(f"  Data: {CONFIG['years_to_download']} years of 1-minute data")
+    logger.info(f"  Dim Reduction: {CONFIG['dim_reduction_method'].upper()}")
+    logger.info(f"  Optuna HP Optimization: {'ENABLED' if CONFIG['use_optuna'] else 'DISABLED'}")
+    logger.info()
+    logger.info("Edge Strategies Implemented:")
+    logger.info("  EDGE 1: Regularization-first + feature robustness scoring")
+    logger.info("  EDGE 2: Comprehensive extended hours features")
+    logger.info("  EDGE 3: Grid-searched intraday opportunities")
+    logger.info("  EDGE 4: Soft targets + confidence weighting")
+    logger.info("  EDGE 5: Combined signals for batch scaling")
+    logger.info()
+    logger.info("Advanced Methods:")
+    logger.info("  - K-Medoids clustering (outlier-robust)")
+    logger.info("  - Optuna Bayesian hyperparameter optimization")
+    logger.info("  - Missing bar detection and handling")
+    logger.info("  - Multi-year extended hours analysis")
 
     # Step 1: Download data (5-10 years)
     df_1min = download_data()
@@ -2442,9 +2446,9 @@ def main():
 
     # Step 4B: Anti-Overfitting Feature Augmentation
     if CONFIG.get("use_anti_overfit", False):
-        print("\n" + "=" * 70)
-        print("ANTI-OVERFITTING FEATURE AUGMENTATION")
-        print("=" * 70)
+        logger.info("\n" + "=" * 70)
+        logger.info("ANTI-OVERFITTING FEATURE AUGMENTATION")
+        logger.info("=" * 70)
         df_daily, anti_overfit_metadata = integrate_anti_overfit(
             df_daily,
             spy_1min=df_1min,
@@ -2529,11 +2533,17 @@ def main():
             use_financial_stress=CONFIG.get("use_financial_stress", True),
             use_global_equity=CONFIG.get("use_global_equity", True),
             use_retail_sentiment=CONFIG.get("use_retail_sentiment", True),
+            use_cboe_pcr=CONFIG.get("use_cboe_pcr", True),
+            use_stocktwits=CONFIG.get("use_stocktwits", True),
+            use_alpaca_news=CONFIG.get("use_alpaca_news", True),
+            use_gnews_headlines=CONFIG.get("use_gnews_headlines", True),
+            use_finbert_nlp=CONFIG.get("use_finbert_nlp", False),
+            use_wsb_sentiment=CONFIG.get("use_wsb_sentiment", False),
             validate_ohlc=CONFIG.get("validate_ohlc", True),
             synthetic_weight=CONFIG.get("synthetic_weight", 0.3),
             resource_config=_resource_config,
         )
-        print(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")
+        logger.info(f"[INFO] Anti-overfit features added: {anti_overfit_metadata}")
     else:
         anti_overfit_metadata = {}
 
@@ -2550,12 +2560,12 @@ def main():
                     "synthetic_return", "real_return"]
     feature_cols = [c for c in df_daily.columns if c not in exclude_cols]
 
-    print(f"\n[INFO] Initial features: {len(feature_cols)}")
+    logger.info(f"\n[INFO] Initial features: {len(feature_cols)}")
 
     # Clean data — replace inf with NaN, then drop NaN rows
     df_daily[feature_cols] = df_daily[feature_cols].replace([np.inf, -np.inf], np.nan)
     df_clean = df_daily.dropna(subset=feature_cols + ["target_up"]).copy()
-    print(f"[INFO] Clean samples: {len(df_clean)}")
+    logger.info(f"[INFO] Clean samples: {len(df_clean)}")
 
     X = df_clean[feature_cols].astype(np.float64).values.copy()
     y = df_clean["target_up"].astype(int).values.copy()
@@ -2573,18 +2583,18 @@ def main():
             weights[is_synthetic] = np.clip(
                 weights[is_synthetic] * penalty, floor, ceiling
             )
-            print(f"  [WEIGHT PENALTY] Applied {penalty:.0%} penalty to {n_synth} synthetic samples "
+            logger.info(f"  [WEIGHT PENALTY] Applied {penalty:.0%} penalty to {n_synth} synthetic samples "
                   f"(bounds=[{floor:.2f}, {ceiling:.2f}])")
 
     # ─────────────────────────────────────────────────────────────────────────
     # LEAK-PROOF TRAINING PATH (recommended - fixes data leakage issues)
     # ─────────────────────────────────────────────────────────────────────────
     if CONFIG.get("use_leak_proof_cv", True):
-        print("\n" + "=" * 70)
-        print("LEAK-PROOF CROSS-VALIDATION (prevents data leakage)")
-        print("=" * 70)
-        print("[INFO] This approach fits all transformations INSIDE each CV fold")
-        print("[INFO] Expected: More realistic (lower) AUC, but more reliable for production")
+        logger.info("\n" + "=" * 70)
+        logger.info("LEAK-PROOF CROSS-VALIDATION (prevents data leakage)")
+        logger.info("=" * 70)
+        logger.info("[INFO] This approach fits all transformations INSIDE each CV fold")
+        logger.info("[INFO] Expected: More realistic (lower) AUC, but more reliable for production")
 
         # Configure leak-proof pipeline
         leak_proof_config = {
@@ -2607,11 +2617,11 @@ def main():
             leak_proof_config["budget_mode"] = CONFIG.get("feature_group_budget_mode", "proportional")
             leak_proof_config["total_components"] = CONFIG.get("feature_group_total_components", 40)
             leak_proof_config["min_components_per_group"] = CONFIG.get("feature_group_min_components", 2)
-            print(f"[INFO] Feature group protection: mode={leak_proof_config['group_mode']}, "
+            logger.info(f"[INFO] Feature group protection: mode={leak_proof_config['group_mode']}, "
                   f"protected={leak_proof_config['protected_groups']}")
 
         # Train swing model with leak-proof CV
-        print("\n[SWING MODEL - Leak-Proof Training]")
+        logger.info("\n[SWING MODEL - Leak-Proof Training]")
         swing_pipeline, swing_cv_results = train_with_leak_proof_cv(
             X, y,
             sample_weights=weights,
@@ -2632,7 +2642,7 @@ def main():
         y_timing = df_clean["target_timing"].astype(int).values
         timing_weights = df_clean["timing_weight"].values
 
-        print("\n[TIMING MODEL - Leak-Proof Training]")
+        logger.info("\n[TIMING MODEL - Leak-Proof Training]")
         timing_pipeline, timing_cv_results = train_with_leak_proof_cv(
             X, y_timing,
             sample_weights=timing_weights,
@@ -2647,22 +2657,22 @@ def main():
         }
 
         # Summary
-        print("\n" + "=" * 70)
-        print("LEAK-PROOF TRAINING SUMMARY")
-        print("=" * 70)
-        print(f"  Swing Model:")
-        print(f"    CV Test AUC: {swing_cv_results['mean_test_auc']:.3f} +/- {swing_cv_results['std_test_auc']:.3f}")
-        print(f"    Train-Test Gap: {swing_cv_results['train_test_gap']:.3f}")
+        logger.info("\n" + "=" * 70)
+        logger.info("LEAK-PROOF TRAINING SUMMARY")
+        logger.info("=" * 70)
+        logger.info(f"  Swing Model:")
+        logger.info(f"    CV Test AUC: {swing_cv_results['mean_test_auc']:.3f} +/- {swing_cv_results['std_test_auc']:.3f}")
+        logger.info(f"    Train-Test Gap: {swing_cv_results['train_test_gap']:.3f}")
 
-        print(f"\n  Timing Model:")
-        print(f"    CV Test AUC: {timing_cv_results['mean_test_auc']:.3f} +/- {timing_cv_results['std_test_auc']:.3f}")
-        print(f"    Train-Test Gap: {timing_cv_results['train_test_gap']:.3f}")
+        logger.info(f"\n  Timing Model:")
+        logger.info(f"    CV Test AUC: {timing_cv_results['mean_test_auc']:.3f} +/- {timing_cv_results['std_test_auc']:.3f}")
+        logger.info(f"    Train-Test Gap: {timing_cv_results['train_test_gap']:.3f}")
 
         # Check for overfitting
         if swing_cv_results["train_test_gap"] > 0.10 or timing_cv_results["train_test_gap"] > 0.10:
-            print("\n  [WARNING] High train-test gap detected - potential overfitting remains")
+            logger.info("\n  [WARNING] High train-test gap detected - potential overfitting remains")
         else:
-            print("\n  [GOOD] Low train-test gap - models appear robust")
+            logger.info("\n  [GOOD] Low train-test gap - models appear robust")
 
         # Save models
         import joblib
@@ -2683,14 +2693,14 @@ def main():
                         swing_cv_results["y_test_last"]
                     )
                     if conformal_sizer._fitted:
-                        print(f"  [CONFORMAL] Fitted position sizer (alpha={alpha})")
+                        logger.info(f"  [CONFORMAL] Fitted position sizer (alpha={alpha})")
                     else:
                         conformal_sizer = None
                 else:
-                    print("  [CONFORMAL] Skipped: no calibration data available")
+                    logger.info("  [CONFORMAL] Skipped: no calibration data available")
                     conformal_sizer = None
             except Exception as cs_err:
-                print(f"  [CONFORMAL] Skipped: {cs_err}")
+                logger.info(f"  [CONFORMAL] Skipped: {cs_err}")
                 conformal_sizer = None
 
         model_path = models_dir / "spy_leak_proof_models.joblib"
@@ -2706,13 +2716,13 @@ def main():
         _save_versioned_model(models_dir, "spy_leak_proof_models", leak_proof_save, max_versions=5)
         joblib.dump(leak_proof_save, model_path)
 
-        print(f"\n[SAVED] Leak-proof models saved to: {model_path}")
+        logger.info(f"\n[SAVED] Leak-proof models saved to: {model_path}")
 
         # Skip the legacy leaky training path
-        print("\n[INFO] Skipping legacy training path (using leak-proof results)")
-        print("\n" + "=" * 70)
-        print(f"Training completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        print("=" * 70)
+        logger.info("\n[INFO] Skipping legacy training path (using leak-proof results)")
+        logger.info("\n" + "=" * 70)
+        logger.info(f"Training completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info("=" * 70)
         return
 
     # ─────────────────────────────────────────────────────────────────────────
@@ -2734,399 +2744,6 @@ def main():
         "The leak-proof path fits all transformations INSIDE each CV fold,\n"
         "ensuring proper validation and reliable performance metrics."
     )
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # LEGACY CODE BELOW (kept for reference but never executes)
-    # ─────────────────────────────────────────────────────────────────────────
-    # NOTE: The code below will NEVER execute due to the raise above.
-    # It is kept temporarily for reference during the migration period.
-    # TODO: Remove this dead code in a future cleanup.
-    print("\n[LEGACY PATH] This code should never execute")
-
-    # Step 5: Advanced dimensionality reduction (passes y for MI-based methods)
-    X_reduced, reduced_features, dim_state = reduce_dimensions(X, feature_cols, y=y, fit=True)
-    print(f"[INFO] Features after reduction: {len(reduced_features)}")
-
-    # Step 6: Feature robustness scoring
-    robustness_df, robust_features = compute_feature_robustness(X_reduced, y, reduced_features)
-
-    # Use robust features only
-    robust_idx = [i for i, f in enumerate(reduced_features) if f in robust_features]
-    if len(robust_idx) >= 10:
-        X_robust = X_reduced[:, robust_idx]
-        robust_feature_names = [reduced_features[i] for i in robust_idx]
-    else:
-        print("[WARN] Not enough robust features, using all reduced features")
-        X_robust = X_reduced
-        robust_feature_names = reduced_features
-
-    # Step 7: Cross-validation (quick check)
-    cv_results, best_method = train_with_cv(X_robust, y, weights, robust_feature_names, "swing")
-
-    # Step 8: Optuna hyperparameter optimization
-    best_params = optimize_hyperparameters_optuna(X_robust, y, weights, robust_feature_names)
-
-    # Step 8B: Hyperparameter Stability Analysis
-    stability_score = 0.5  # Default if not analyzed
-    if CONFIG.get("use_anti_overfit", False) and best_params:
-        print("\n[STABILITY ANALYSIS]")
-        try:
-            stability_analyzer = StabilityAnalyzer(perturbation_pct=0.05)
-
-            # Define a simple scoring function for stability test
-            from sklearn.model_selection import cross_val_score
-            from sklearn.linear_model import LogisticRegression
-
-            def hp_score_fn(params):
-                C = params.get("l2_C", 1.0)
-                model = LogisticRegression(C=C, max_iter=500, random_state=42)
-                scores = cross_val_score(model, X_robust, y, cv=3, scoring="roc_auc")
-                return scores.mean()
-
-            param_ranges = {
-                "l2_C": CONFIG["hp_search_space"].get("l2_C", (0.01, 10.0)),
-            }
-
-            stability_results = stability_analyzer.compute_stability_score(
-                base_params={"l2_C": best_params.get("l2_C", 1.0)},
-                base_score=cv_results.get("mean_auc", 0.7) if isinstance(cv_results, dict) else 0.7,
-                param_ranges=param_ranges,
-                score_fn=hp_score_fn,
-                n_samples=10,
-            )
-            stability_score = stability_results.get("stability_score", 0.5)
-
-            if stability_score < CONFIG.get("stability_threshold", 0.5):
-                print(f"  [WARN] Low stability score ({stability_score:.3f}). Solution may be fragile.")
-            else:
-                print(f"  [GOOD] Stability score: {stability_score:.3f}")
-        except Exception as e:
-            print(f"  [WARN] Stability analysis failed: {e}")
-
-    # Step 9: Train final models using optimized hyperparameters
-    print(f"\n[INFO] Final feature count: {len(robust_feature_names)}")
-
-    # Get timing targets and weights from df_clean
-    y_timing = df_clean["target_timing"].astype(int).values
-    timing_weights = df_clean["timing_weight"].values
-
-    models, results, scaler, test_indices, proba_swing, proba_timing = \
-        train_final_models_from_arrays(
-            X_robust, y, y_timing, weights, timing_weights,
-            robust_feature_names, df_clean, best_threshold,
-            best_params=best_params
-        )
-
-    # Step 9B: Weighted Model Evaluation Score (WMES)
-    if CONFIG.get("use_anti_overfit", False):
-        print("\n[WEIGHTED MODEL EVALUATION]")
-        try:
-            # Get test set data for evaluation
-            # Note: proba_swing already contains only test set predictions
-            # test_indices are the indices into the original arrays
-            test_mask = np.zeros(len(y), dtype=bool)
-            test_mask[test_indices] = True
-
-            y_test = y[test_mask]
-            # proba_swing is already the test set predictions (not full dataset)
-            y_pred = (proba_swing > 0.5).astype(int)
-            y_proba = proba_swing
-            returns = df_clean["day_return"].values[test_mask]
-
-            # Get CV scores from results
-            cv_scores = results.get("cv_scores", [results["swing"]["auc"]])
-            if not isinstance(cv_scores, list):
-                cv_scores = [cv_scores]
-
-            # Compute WMES
-            wmes_results = compute_weighted_evaluation(
-                y_true=y_test,
-                y_pred=y_pred,
-                y_proba=y_proba,
-                returns=returns,
-                cv_scores=cv_scores,
-                n_features=len(robust_feature_names),
-                hp_sensitivity=1 - stability_score,  # Convert to sensitivity
-                noise_scores=None,  # Could add noise testing later
-            )
-
-            # Add to results
-            results["wmes"] = wmes_results["wmes"]
-            results["wmes_components"] = wmes_results
-
-            print(f"  WMES Score: {wmes_results['wmes']:.3f}")
-            print(f"    Win Rate Component: {wmes_results['win_rate']:.3f}")
-            print(f"    Robustness Component: {wmes_results['robustness']:.3f}")
-            print(f"    Profit Potential: {wmes_results['profit_potential']:.3f}")
-            print(f"    Plateau Stability: {wmes_results['plateau_stability']:.3f}")
-            print(f"    Complexity Penalty: {wmes_results['complexity_penalty']:.3f}")
-
-            if wmes_results["wmes"] < CONFIG.get("wmes_threshold", 0.55):
-                print(f"\n  [WARN] WMES below threshold ({CONFIG.get('wmes_threshold', 0.55):.2f})")
-                print("         Model may be overfit or fragile. Consider:")
-                print("         - Reducing model complexity")
-                print("         - Adding more regularization")
-                print("         - Using more synthetic data")
-            else:
-                print(f"\n  [GOOD] WMES above threshold - model appears robust")
-
-        except Exception as e:
-            print(f"  [WARN] WMES computation failed: {e}")
-            results["wmes"] = None
-
-    # Step 9C: Robustness Ensemble (train adjacent dimension/parameter models)
-    ensemble_results = None
-    if CONFIG.get("use_robustness_ensemble", False) and CONFIG.get("use_anti_overfit", False):
-        print("\n[ROBUSTNESS ENSEMBLE]")
-        try:
-            # Create the ensemble with dimension and parameter perturbations
-            robustness_ensemble = RobustnessEnsemble(
-                n_dimension_variants=CONFIG.get("n_dimension_variants", 2),
-                n_param_variants=CONFIG.get("n_param_variants", 2),
-                param_noise_pct=CONFIG.get("param_noise_pct", 0.05),
-                center_weight=CONFIG.get("ensemble_center_weight", 0.5),
-            )
-
-            # Get optimal dimensions from current feature count
-            optimal_dims = len(robust_feature_names)
-
-            # Train the ensemble
-            ensemble_results = robustness_ensemble.train_ensemble(
-                X=X_robust,
-                y=y,
-                sample_weights=weights,
-                base_params=best_params if best_params else {"C": 1.0, "max_iter": 500},
-                optimal_dims=optimal_dims,
-                cv_folds=3,
-            )
-
-            # Store results
-            results["robustness_ensemble"] = {
-                "fragility_score": ensemble_results["fragility"]["fragility_score"],
-                "interpretation": ensemble_results["fragility"]["interpretation"],
-                "n_models": len(ensemble_results["models"]),
-                "dim_variants": ensemble_results["dim_variants"],
-            }
-
-            # Check fragility threshold
-            fragility = ensemble_results["fragility"]["fragility_score"]
-            threshold = CONFIG.get("fragility_threshold", 0.35)
-
-            if fragility > threshold:
-                print(f"\n  [WARN] Fragility ({fragility:.3f}) exceeds threshold ({threshold:.2f})")
-                print(f"         {ensemble_results['fragility']['interpretation']}")
-                print("         Consider: more regularization, simpler model, more data")
-            else:
-                print(f"\n  [GOOD] Fragility ({fragility:.3f}) below threshold - solution is robust")
-
-            # Optional: Evaluate ensemble on test set
-            if len(test_indices) > 0:
-                X_test = X_robust[test_indices]
-                y_test = y[test_indices]
-                ensemble_eval = robustness_ensemble.evaluate_ensemble(X_test, y_test)
-                results["robustness_ensemble"]["test_auc"] = ensemble_eval["ensemble"]["auc"]
-
-        except Exception as e:
-            print(f"  [WARN] Robustness ensemble failed: {e}")
-            import traceback
-            traceback.print_exc()
-
-    # Step 9D: Entry/Exit Timing Model (ML-based specific timing predictions)
-    entry_exit_model = None
-    if CONFIG.get("train_entry_exit_model", False):
-        print("\n" + "=" * 70)
-        print("STEP 9D: ENTRY/EXIT TIMING MODEL")
-        print("=" * 70)
-        try:
-            # Need intraday data for this - check if df_1min is available
-            # (it's passed from main() through the training flow)
-            print("[INFO] Training ML model for entry/exit timing predictions")
-            print("  This model predicts:")
-            print("    - Optimal entry time (minutes from open)")
-            print("    - Optimal exit time (minutes from open)")
-            print("    - Position size based on conditions")
-            print("    - Dynamic stop loss / take profit levels")
-            print("    - Batch entry schedules")
-            print("    - Guardrail triggers")
-
-            # Entry/Exit timing model should use only REAL data (not synthetic)
-            # Filter out synthetic augmented samples
-            if "universe_id" in df_clean.columns:
-                # Real data has universe_id == NaN or 0
-                real_mask = df_clean["universe_id"].isna() | (df_clean["universe_id"] == 0)
-                real_mask_array = real_mask.values
-                df_real = df_clean[real_mask].copy()
-            else:
-                real_mask_array = np.ones(len(df_clean), dtype=bool)
-                df_real = df_clean.copy()
-
-            print(f"  Training on {len(df_real)} real samples (excluding synthetic)")
-
-            # Use the already-transformed X_robust data (which matches scaler expectations)
-            # X_robust has shape (n_samples, n_transformed_features) = (13630, 50)
-            X_real_robust = X_robust[real_mask_array]
-
-            # Apply scaler (expects 50 features - the transformed feature count)
-            X_real_scaled = scaler.transform(X_real_robust)
-
-            # Get swing predictions for real data
-            proba_real = (models["swing"]["l2"].predict_proba(X_real_scaled)[:, 1] +
-                         models["swing"]["gb"].predict_proba(X_real_scaled)[:, 1]) / 2
-
-            # Create directions based on swing predictions
-            directions = pd.Series(
-                np.where(proba_real > 0.5, "LONG", "SHORT"),
-                index=df_real.index,
-            )
-
-            # Create the timing model
-            entry_exit_model = EntryExitTimingModel(
-                model_type=CONFIG.get("entry_exit_model_type", "gradient_boosting"),
-                entry_window=CONFIG.get("entry_window", (0, 120)),
-                exit_window=CONFIG.get("exit_window", (180, 385)),
-                min_position_pct=CONFIG.get("min_position_pct", 0.05),
-                max_position_pct=CONFIG.get("max_position_pct", 0.25),
-            )
-
-            # Train the timing model using daily and intraday data
-            # df_1min is available from Step 1 (download_data)
-            timing_metrics = entry_exit_model.fit(
-                daily_data=df_real,
-                intraday_data=df_1min,
-                directions=directions,
-                cv_folds=3,
-            )
-
-            # Store results
-            results["entry_exit_timing"] = {
-                "metrics": timing_metrics,
-                "entry_window": CONFIG.get("entry_window"),
-                "exit_window": CONFIG.get("exit_window"),
-            }
-
-            # Store model for saving
-            models["entry_exit_timing"] = entry_exit_model
-
-            print("\n  [PASS] Entry/Exit Timing Model trained successfully")
-
-        except Exception as e:
-            print(f"  [WARN] Entry/Exit Timing Model training failed: {e}")
-            import traceback
-            traceback.print_exc()
-            entry_exit_model = None
-
-    # Step 9E: Temporal Integrated Training (anti-overfitting through temporal diversity)
-    temporal_results = None
-    if CONFIG.get("use_temporal_integration", True):
-        print("\n" + "=" * 70)
-        print("STEP 9E: TEMPORAL INTEGRATED TRAINING")
-        print("=" * 70)
-        print("[INFO] Training temporal cascade and masked variants for anti-overfitting")
-        print("  This trains multiple model variants:")
-        print("    - BASE models (standard)")
-        print("    - MASKED variants (5 models with 20% temporal masking)")
-        print("    - TEMPORAL CASCADE (T0, T30, T60, T90, T120, T180)")
-        print("    - INTERMITTENT MASKED (dropout regularization)")
-        print("    - ATTENTION-WEIGHTED (learned importance)")
-        print()
-
-        try:
-            from src.temporal_integrated_training import (
-                TemporalIntegratedTrainer,
-                TemporalModelRegistry,
-                train_all_temporal_models,
-            )
-
-            # Prepare intraday data dictionary for temporal cascade
-            print("[INFO] Preparing intraday data for temporal cascade...")
-            df_1min_dict = None
-            if CONFIG.get("train_temporal_cascade", True) and df_1min is not None:
-                df_1min_dict = {}
-                df_1min['date_str'] = pd.to_datetime(df_1min['timestamp']).dt.date.astype(str)
-                for date_str, group in df_1min.groupby('date_str'):
-                    df_1min_dict[date_str] = group.copy().reset_index(drop=True)
-                print(f"  Prepared {len(df_1min_dict)} days of intraday data")
-
-            # Get train/test splits from earlier
-            # X_robust, y arrays already available
-            train_end = int(len(X_robust) * 0.8) - CONFIG["purge_days"]
-            test_start = int(len(X_robust) * 0.8)
-
-            X_train_temporal = X_robust[:train_end]
-            X_test_temporal = X_robust[test_start:]
-            y_swing_train = y[:train_end]
-            y_swing_test = y[test_start:]
-            y_timing_train = y_timing[:train_end]
-            y_timing_test = y_timing[test_start:]
-            w_swing_train = weights[:train_end] if weights is not None else None
-            w_timing_train = timing_weights[:train_end] if timing_weights is not None else None
-
-            print(f"  Train samples: {len(X_train_temporal)}")
-            print(f"  Test samples: {len(X_test_temporal)}")
-
-            # Train all temporal variants
-            temporal_results = train_all_temporal_models(
-                X_train=X_train_temporal,
-                y_swing_train=y_swing_train,
-                y_timing_train=y_timing_train,
-                X_test=X_test_temporal,
-                y_swing_test=y_swing_test,
-                y_timing_test=y_timing_test,
-                df_daily=df_clean if CONFIG.get("train_temporal_cascade", True) else None,
-                df_1min_dict=df_1min_dict,
-                swing_weights=w_swing_train,
-                timing_weights=w_timing_train,
-            )
-
-            # Store in results
-            results["temporal_integration"] = {
-                "n_swing_models": len([r for r in temporal_results['swing']['records']]),
-                "n_timing_models": len([r for r in temporal_results['timing']['records']]),
-                "best_swing_auc": max(r.cv_auc for r in temporal_results['swing']['records']),
-                "best_timing_auc": max(r.cv_auc for r in temporal_results['timing']['records']),
-            }
-
-            # Log summary
-            registry = temporal_results['registry']
-            print("\n" + registry.summary())
-
-            print("\n  [PASS] Temporal Integrated Training complete")
-
-        except Exception as e:
-            print(f"  [WARN] Temporal Integrated Training failed: {e}")
-            import traceback
-            traceback.print_exc()
-            temporal_results = None
-
-    # Step 10: Save (use robust_feature_names which are the transformed feature names)
-    model_path = save_models(models, results, scaler, robust_feature_names,
-                             best_threshold, robustness_df, dim_state, entry_exit_model)
-
-    # Summary
-    print("\n" + "=" * 70)
-    print("TRAINING COMPLETE")
-    print("=" * 70)
-    print(f"\nSwing Model AUC: {results['swing']['auc']:.3f}")
-    print(f"Timing Model AUC: {results['timing']['auc']:.3f}")
-    if "buy_win_rate" in results:
-        print(f"Buy Signal Win Rate: {results['buy_win_rate']*100:.1f}%")
-
-    # Entry/Exit Timing Model summary
-    if entry_exit_model is not None and "entry_exit_timing" in results:
-        print("\nEntry/Exit Timing Model:")
-        ee_metrics = results.get("entry_exit_timing", {}).get("metrics", {})
-        if "entry" in ee_metrics:
-            entry_mae = ee_metrics["entry"].get("mae_minutes", {}).get("mean", "N/A")
-            print(f"  Entry Time MAE: {entry_mae:.1f} minutes" if isinstance(entry_mae, float) else f"  Entry Time MAE: {entry_mae}")
-        if "exit" in ee_metrics:
-            exit_mae = ee_metrics["exit"].get("mae_minutes", {}).get("mean", "N/A")
-            print(f"  Exit Time MAE: {exit_mae:.1f} minutes" if isinstance(exit_mae, float) else f"  Exit Time MAE: {exit_mae}")
-        if "position" in ee_metrics:
-            pos_mae = ee_metrics["position"].get("mae_pct", {}).get("mean", "N/A")
-            print(f"  Position Size MAE: {pos_mae:.2f}%" if isinstance(pos_mae, float) else f"  Position Size MAE: {pos_mae}")
-
-    print(f"\nModels saved to: {model_path}")
-    print(f"Completed: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 
 if __name__ == "__main__":

@@ -20,19 +20,22 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("TDA")
 
 
-class TDAHomologyFeatures:
+class TDAHomologyFeatures(FeatureModuleBase):
     """
     Compute persistent homology features from daily returns.
 
     All features use the tda_ prefix.  Requires giotto-tda (optional).
     Falls back to 0.0 when giotto-tda is not installed.
     """
+    FEATURE_NAMES = ["tda_h0_max_persistence", "tda_h1_max_persistence", "tda_persistence_entropy", "tda_betti_1_count", "tda_amplitude"]
+
 
     REQUIRED_COLS = {"close"}
 

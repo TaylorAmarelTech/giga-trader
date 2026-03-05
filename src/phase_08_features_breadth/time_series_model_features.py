@@ -23,12 +23,14 @@ from typing import Optional, Dict
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("TS_MODEL")
 
 
-class TimeSeriesModelFeatures:
+class TimeSeriesModelFeatures(FeatureModuleBase):
     """
     Generate features from time series model residuals and uncertainty.
 
@@ -37,6 +39,23 @@ class TimeSeriesModelFeatures:
     """
 
     REQUIRED_COLS = {"close"}
+    FEATURE_NAMES = [
+        "tsm_arima_residual",
+        "tsm_arima_residual_vol",
+        "tsm_arima_trend",
+        "tsm_chronos_residual_1d",
+        "tsm_chronos_residual_5d",
+        "tsm_chronos_interval_width",
+        "tsm_chronos_interval_pctile",
+        "tsm_chronos_surprise",
+        "tsm_model_disagreement",
+        "tsm_directional_agreement",
+        "tsm_c22_first_min_acf",
+        "tsm_c22_trev_1_num",
+        "tsm_c22_sp_trev",
+        "tsm_c22_mean_cross",
+        "tsm_c22_outlier_count",
+    ]
 
     def __init__(self, use_chronos: bool = True, use_catch22: bool = True):
         self._use_chronos = use_chronos

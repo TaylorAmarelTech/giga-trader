@@ -20,19 +20,22 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("L_MOMENTS")
 
 
-class LMomentsFeatures:
+class LMomentsFeatures(FeatureModuleBase):
     """
     Compute L-moment features from daily returns.
 
     All features use the lmom_ prefix.  Pure numpy implementation
     using probability-weighted moments (PWM) formula.
     """
+    FEATURE_NAMES = ["lmom_lcv_20d", "lmom_lskew_20d", "lmom_lkurt_20d", "lmom_lskew_z"]
+
 
     REQUIRED_COLS = {"close"}
 

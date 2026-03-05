@@ -21,12 +21,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class EarningsCalendarFeatures:
+class EarningsCalendarFeatures(FeatureModuleBase):
     """Compute earnings calendar density features."""
+    FEATURE_NAMES = ["ecal_density_this_week", "ecal_density_next_week", "ecal_season_flag", "ecal_tech_density", "ecal_spy_component_pct", "ecal_pre_earnings_vol"]
+
 
     REQUIRED_COLS = {"close"}
 

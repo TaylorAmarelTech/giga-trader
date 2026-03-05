@@ -22,19 +22,22 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("BLOCK_STRUCTURE")
 
 
-class BlockStructureFeatures:
+class BlockStructureFeatures(FeatureModuleBase):
     """
     Compute multi-day block structure features from OHLCV data.
 
     All features use the blk_ prefix and are computed from close/volume
     columns already in df_daily. No extra downloads needed.
     """
+    FEATURE_NAMES = ["blk_3d_return", "blk_5d_return", "blk_3d_acceleration", "blk_5d_acceleration", "blk_3d_reversal_boundary", "blk_5d_reversal_boundary", "blk_3d_vs_5d_agreement", "blk_sequential_strength", "blk_cascade_3_5_10", "blk_cascade_5_10_20", "blk_cascade_full", "blk_cascade_break_short", "blk_cascade_break_long", "blk_cascade_ratio_3_10", "blk_cascade_ratio_5_20", "blk_cascade_vol_expand", "blk_cascade_vol_compress", "blk_cascade_return_rank", "blk_3d_front_vs_back", "blk_5d_front_vs_back", "blk_boundary_3d_gap", "blk_boundary_5d_gap", "blk_boundary_3d_vol_shift", "blk_boundary_5d_vol_shift", "blk_boundary_3d_revert", "blk_boundary_5d_revert", "blk_return_roughness", "blk_3d_kurtosis", "blk_5d_dispersion", "blk_hurst_proxy"]
+
 
     REQUIRED_COLS = {"close"}
 

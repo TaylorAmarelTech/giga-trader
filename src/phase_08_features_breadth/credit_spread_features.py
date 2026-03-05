@@ -22,12 +22,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class CreditSpreadFeatures:
+class CreditSpreadFeatures(FeatureModuleBase):
     """Compute credit-spread features from HYG/LQD data or close-price proxy."""
+    FEATURE_NAMES = ["cred_hy_ig_spread", "cred_spread_20d", "cred_spread_z", "cred_spread_momentum", "cred_spread_accel", "cred_hy_return_20d", "cred_ig_return_20d", "cred_spread_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

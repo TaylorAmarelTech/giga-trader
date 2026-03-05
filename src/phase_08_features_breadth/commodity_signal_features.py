@@ -24,12 +24,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class CommoditySignalFeatures:
+class CommoditySignalFeatures(FeatureModuleBase):
     """Compute cross-commodity signals for equity prediction."""
+    FEATURE_NAMES = ["cmdty_copper_momentum", "cmdty_copper_gold_ratio", "cmdty_oil_copper_div", "cmdty_oil_vol", "cmdty_gold_silver_ratio", "cmdty_dr_copper_z", "cmdty_energy_metals_ratio", "cmdty_industrial_signal", "cmdty_safe_haven_flow", "cmdty_commodity_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

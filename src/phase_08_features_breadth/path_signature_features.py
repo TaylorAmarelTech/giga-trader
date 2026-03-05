@@ -31,12 +31,15 @@ from typing import List
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class PathSignatureFeatures:
+class PathSignatureFeatures(FeatureModuleBase):
     """Compute path signature features from daily OHLCV data."""
+    FEATURE_NAMES = ["psig_sig_ratio", "psig_momentum_asym"]
+
 
     REQUIRED_COLS = {"close"}
 

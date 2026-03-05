@@ -18,6 +18,7 @@ from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,10 @@ def _rs_hurst(series: np.ndarray) -> float:
     return float(np.clip(slope, 0.0, 1.0))
 
 
-class HurstFeatures:
+class HurstFeatures(FeatureModuleBase):
     """Compute Hurst exponent features from daily OHLCV data."""
+    FEATURE_NAMES = ["hurst_50d", "hurst_100d", "hurst_z", "hurst_regime"]
+
 
     REQUIRED_COLS = {"close"}
 

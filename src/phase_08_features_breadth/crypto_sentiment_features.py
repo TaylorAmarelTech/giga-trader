@@ -28,17 +28,27 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("CRYPTO_SENTIMENT")
 
 
-class CryptoSentimentFeatures:
+class CryptoSentimentFeatures(FeatureModuleBase):
     """
     Download crypto fear/greed data from Alternative.me and create features.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "crypto_fg_index",
+        "crypto_fg_zscore",
+        "crypto_fg_chg_5d",
+        "crypto_fg_regime",
+        "crypto_risk_proxy",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()

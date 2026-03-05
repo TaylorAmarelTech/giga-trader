@@ -23,19 +23,22 @@ from typing import Optional, Dict
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("MSE")
 
 
-class MultiscaleEntropyFeatures:
+class MultiscaleEntropyFeatures(FeatureModuleBase):
     """
     Compute multiscale sample entropy features from daily returns.
 
     All features use the mse_ prefix.  Pure numpy implementation
     of coarse-graining + template-matching sample entropy.
     """
+    FEATURE_NAMES = ["mse_slope", "mse_area", "mse_complexity_index"]
+
 
     REQUIRED_COLS = {"close"}
     SCALES = [1, 2, 3, 5, 10]

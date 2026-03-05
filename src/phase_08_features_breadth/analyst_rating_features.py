@@ -23,12 +23,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class AnalystRatingFeatures:
+class AnalystRatingFeatures(FeatureModuleBase):
     """Compute analyst rating consensus features."""
+    FEATURE_NAMES = ["anlst_buy_pct", "anlst_sell_pct", "anlst_strong_buy_pct", "anlst_consensus_drift", "anlst_upgrade_count", "anlst_downgrade_count", "anlst_net_revisions", "anlst_consensus_z"]
+
 
     REQUIRED_COLS = {"close"}
 

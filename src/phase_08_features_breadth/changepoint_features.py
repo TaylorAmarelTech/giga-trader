@@ -15,12 +15,15 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
 
-class ChangepointFeatures:
+class ChangepointFeatures(FeatureModuleBase):
     """Compute Bayesian Online Changepoint Detection features from daily data."""
+    FEATURE_NAMES = ["cpd_run_length", "cpd_prob_change", "cpd_regime_id"]
+
 
     REQUIRED_COLS = {"close"}
 

@@ -17,6 +17,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 from sklearn.metrics import normalized_mutual_info_score
+from src.core.feature_base import FeatureModuleBase
 
 logger = logging.getLogger(__name__)
 
@@ -47,8 +48,10 @@ def _rolling_nmi(returns: np.ndarray, lag: int, window: int = 50, n_bins: int = 
     return result
 
 
-class NMIFeatures:
+class NMIFeatures(FeatureModuleBase):
     """Compute Normalized Mutual Information features from daily OHLCV data."""
+    FEATURE_NAMES = ["nmi_lag1_50d", "nmi_lag5_50d", "nmi_efficiency"]
+
 
     REQUIRED_COLS = {"close"}
 

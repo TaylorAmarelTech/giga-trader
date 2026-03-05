@@ -31,17 +31,28 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 
+from src.core.feature_base import FeatureModuleBase
+
 warnings.filterwarnings("ignore")
 
 logger = logging.getLogger("FINNHUB_SOCIAL")
 
 
-class FinnhubSocialFeatures:
+class FinnhubSocialFeatures(FeatureModuleBase):
     """
     Download Finnhub social sentiment data and create predictive features.
 
     Pattern: download → compute → merge (same as EconomicFeatures).
     """
+
+    FEATURE_NAMES = [
+        "finnhub_social_reddit_mentions",
+        "finnhub_social_twitter_mentions",
+        "finnhub_social_total_mentions",
+        "finnhub_social_positive_pct",
+        "finnhub_social_score",
+        "finnhub_social_buzz_zscore",
+    ]
 
     def __init__(self):
         self.data: pd.DataFrame = pd.DataFrame()
