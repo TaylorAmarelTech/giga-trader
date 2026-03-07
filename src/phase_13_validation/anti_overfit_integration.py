@@ -324,6 +324,12 @@ _FEATURE_STEPS: List[_FeatureStep] = [
                  f"{_P08}.wsb_sentiment_features.WSBSentimentFeatures",
                  "create_wsb_features", "download_wsb_data",
                  gc_after="steps 81-86"),
+
+    # --- Step 87 (Wave PQ: causal discovery features) ---
+    _FeatureStep("use_causal_features", "CAUSAL", "causal_features",
+                 f"{_P08}.causal_features.CausalFeatureSelector",
+                 "create_causal_features",
+                 gc_after="step 87"),
 ]
 
 
@@ -474,6 +480,7 @@ def integrate_anti_overfit(
     use_gnews_headlines: bool = True,  # Google News headline sentiment features (gnews_*)
     use_finbert_nlp: bool = False,  # FinBERT local NLP features (nlp_*) -- heavy deps
     use_wsb_sentiment: bool = False,  # Reddit WSB PRAW sentiment features (wsb_*) -- needs OAuth
+    use_causal_features: bool = True,  # Causal feature selection features (causal_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,

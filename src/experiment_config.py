@@ -129,6 +129,12 @@ class FeatureEngineeringConfig:
     use_interaction_discovery: bool = False  # Default OFF: expensive
     max_interactions: int = 20
 
+    # Wave PQ: Adaptive Event-Driven Labeling (AEDL) — volatility-adaptive barriers
+    use_adaptive_labeling: bool = False  # Default OFF: alternative to triple barrier
+    aedl_vol_scaling: float = 1.0       # Volatility scaling multiplier
+    aedl_min_barrier_pct: float = 0.003 # Minimum barrier width
+    aedl_max_barrier_pct: float = 0.03  # Maximum barrier width
+
 
 @dataclass
 class DimensionalityReductionConfig:
@@ -565,6 +571,9 @@ class AntiOverfitConfig:
     # Wave N: Reddit WSB sentiment features (requires praw + Reddit OAuth)
     use_wsb_sentiment: bool = False  # Default OFF: requires Reddit credentials
 
+    # Wave PQ: Causal feature selection (PCMCI-based causal discovery)
+    use_causal_features: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 
@@ -603,6 +612,17 @@ class RobustnessEnsembleConfig:
     param_noise_pct: float = 0.05
     ensemble_center_weight: float = 0.5
     fragility_threshold: float = 0.35
+
+    # Wave PQ: Knowledge distillation — compress ensemble to lightweight student
+    use_knowledge_distillation: bool = False  # Default OFF: post-training step
+    distillation_temperature: float = 3.0
+    distillation_alpha: float = 0.7  # Weight for soft vs hard targets
+    distillation_student_type: str = "logistic"  # "logistic", "gradient_boosting"
+
+    # Wave PQ: Adaptive conformal inference — non-stationary coverage
+    use_adaptive_conformal: bool = True
+    aci_gamma: float = 0.01  # Step size for alpha adaptation
+    aci_decay_rate: float = 0.95  # Exponential decay for error weighting
 
 
 @dataclass

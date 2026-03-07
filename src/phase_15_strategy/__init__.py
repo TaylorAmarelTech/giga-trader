@@ -35,6 +35,9 @@ from src.phase_15_strategy.regime_router import (
 from src.phase_15_strategy.conformal_sizer import (
     ConformalPositionSizer,
 )
+from src.phase_15_strategy.adaptive_conformal import (
+    AdaptiveConformalSizer,
+)
 from src.phase_15_strategy.isotonic_calibrator import (
     IsotonicCalibrator,
 )
@@ -82,6 +85,8 @@ __all__ = [
     "RegimeRouter",
     # Conformal position sizing
     "ConformalPositionSizer",
+    # Adaptive conformal inference
+    "AdaptiveConformalSizer",
     # Isotonic calibration
     "IsotonicCalibrator",
     # Bayesian model averaging

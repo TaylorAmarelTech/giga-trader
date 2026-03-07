@@ -25,6 +25,9 @@ from src.phase_14_robustness.knockoff_gate import (
 from src.phase_14_robustness.wasserstein_regime import (
     WassersteinRegimeDetector,
 )
+from src.phase_14_robustness.knowledge_distiller import (
+    KnowledgeDistiller,
+)
 
 __all__ = [
     "StabilityAnalyzer",
@@ -36,4 +39,5 @@ __all__ = [
     "LabelNoiseTest",
     "KnockoffGate",
     "WassersteinRegimeDetector",
+    "KnowledgeDistiller",
 ]
