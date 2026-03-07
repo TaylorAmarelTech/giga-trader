@@ -57,6 +57,10 @@ from src.phase_12_model_training.stacking_ensemble import (
     StackingEnsembleClassifier,
 )
 
+from src.phase_12_model_training.kan_model import KANClassifier
+
+from src.phase_12_model_training.mamba_model import MambaClassifier
+
 from src.phase_12_model_training.training_pipeline_v2 import (
     DataLoader,
     FeatureEngineer,
@@ -132,4 +136,8 @@ __all__ = [
     "run_focused_grid",
     "run_quick_experiment",
     "train_from_registry",
+    # kan_model
+    "KANClassifier",
+    # mamba_model
+    "MambaClassifier",
 ]

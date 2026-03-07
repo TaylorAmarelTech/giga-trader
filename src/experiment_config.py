@@ -574,6 +574,15 @@ class AntiOverfitConfig:
     # Wave PQ: Causal feature selection (PCMCI-based causal discovery)
     use_causal_features: bool = True
 
+    # Wave PQ2: Kronos foundation-model-style random projection features (kron_*)
+    use_kronos_features: bool = True
+
+    # Wave PQ2: Graph attention cross-asset features (gat_*)
+    use_graph_attention: bool = True
+
+    # Wave PQ2: PatchTST patch-based temporal features (ptst_*)
+    use_patch_temporal: bool = True
+
     # Meta-labeling: secondary classifier predicting signal profitability
     use_meta_labeling: bool = True
 

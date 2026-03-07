@@ -111,6 +111,9 @@ FEATURE_GROUPS: Dict[str, List[str]] = {
     "gnews_headlines": ["gnews_"],
     "finbert_nlp": ["nlp_"],
     "wsb_sentiment": ["wsb_"],
+    "kronos": ["kron_"],
+    "graph_attention": ["gat_"],
+    "patch_temporal": ["ptst_"],
     "intraday": [
         "return_at_", "high_to_", "low_to_", "range_to_",
         "rsi_at_", "macd_at_", "bb_at_", "return_from_low_",

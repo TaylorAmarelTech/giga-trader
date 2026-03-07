@@ -330,6 +330,19 @@ _FEATURE_STEPS: List[_FeatureStep] = [
                  f"{_P08}.causal_features.CausalFeatureSelector",
                  "create_causal_features",
                  gc_after="step 87"),
+
+    # --- Steps 88-90 (Wave PQ2: research-driven features) ---
+    _FeatureStep("use_kronos_features", "KRONOS", "kronos_features",
+                 f"{_P08}.kronos_features.KronosFeatures",
+                 "create_kronos_features"),
+    _FeatureStep("use_graph_attention", "GAT", "graph_attention_features",
+                 f"{_P08}.graph_attention_features.GraphAttentionFeatures",
+                 "create_graph_attention_features", "download_cross_asset_data",
+                 date_as_str=True),
+    _FeatureStep("use_patch_temporal", "PTST", "patch_temporal_features",
+                 f"{_P08}.patch_temporal_features.PatchTemporalFeatures",
+                 "create_patch_temporal_features",
+                 gc_after="steps 88-90"),
 ]
 
 
@@ -481,6 +494,9 @@ def integrate_anti_overfit(
     use_finbert_nlp: bool = False,  # FinBERT local NLP features (nlp_*) -- heavy deps
     use_wsb_sentiment: bool = False,  # Reddit WSB PRAW sentiment features (wsb_*) -- needs OAuth
     use_causal_features: bool = True,  # Causal feature selection features (causal_*)
+    use_kronos_features: bool = True,  # Kronos random projection features (kron_*)
+    use_graph_attention: bool = True,  # Graph attention cross-asset features (gat_*)
+    use_patch_temporal: bool = True,  # PatchTST temporal features (ptst_*)
     synthetic_weight: float = 0.4,  # Weight for synthetic data (real = 1 - synthetic)
     use_bear_universes: bool = True,  # Bear market synthetic series
     bear_mean_shift_bps: Optional[List[int]] = None,

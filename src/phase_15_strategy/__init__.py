@@ -56,6 +56,9 @@ from src.phase_15_strategy.dynamic_kelly_sizer import (
 from src.phase_15_strategy.drawdown_adaptive_sizer import (
     DrawdownAdaptiveSizer,
 )
+from src.phase_15_strategy.multi_agent_orchestrator import (
+    MultiAgentOrchestrator,
+)
 
 __all__ = [
     # Data structures
@@ -99,4 +102,6 @@ __all__ = [
     "DynamicKellySizer",
     # Drawdown-adaptive sizing
     "DrawdownAdaptiveSizer",
+    # Multi-agent orchestrator
+    "MultiAgentOrchestrator",
 ]

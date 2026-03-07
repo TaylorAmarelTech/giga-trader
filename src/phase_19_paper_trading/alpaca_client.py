@@ -149,11 +149,11 @@ class DynamicThresholds:
         now = datetime.now().time()
         minutes_to_close = (dt_time(16, 0).hour * 60 + dt_time(16, 0).minute) - (now.hour * 60 + now.minute)
 
-        if minutes_to_close < 30:
+        if 0 < minutes_to_close < 30:
             # Last 30 min - more conservative
             adjustments["entry_threshold_mult"] = 1.15  # Higher threshold
             adjustments["position_mult"] = 0.5  # Smaller positions
-        elif minutes_to_close < 60:
+        elif 0 < minutes_to_close < 60:
             # Last hour - slightly more conservative
             adjustments["entry_threshold_mult"] = 1.05
             adjustments["position_mult"] = 0.75

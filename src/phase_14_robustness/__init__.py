@@ -28,6 +28,9 @@ from src.phase_14_robustness.wasserstein_regime import (
 from src.phase_14_robustness.knowledge_distiller import (
     KnowledgeDistiller,
 )
+from src.phase_14_robustness.test_time_adapter import (
+    TestTimeAdapter,
+)
 
 __all__ = [
     "StabilityAnalyzer",
@@ -40,4 +43,5 @@ __all__ = [
     "KnockoffGate",
     "WassersteinRegimeDetector",
     "KnowledgeDistiller",
+    "TestTimeAdapter",
 ]
